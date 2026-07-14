@@ -1,0 +1,54 @@
+* { box-sizing: border-box; }
+.invoice-page { width: 100%; padding: 24px; background: #f4f7fb; display: flex; justify-content: center; }
+.invoice-card { width: 100%; max-width: 1100px; background: #fff; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,.08); border: 1px solid #dbe4f0; font-family: Arial, Helvetica, sans-serif; color: #15305b; }
+.invoice-header { background: linear-gradient(135deg,#0d2d63,#0b2554); color: #fff; padding: 28px 32px; display: flex; justify-content: space-between; align-items: center; gap: 24px; border-bottom: 4px solid #17b8aa; }
+.invoice-brand { display: flex; align-items: center; gap: 18px; }
+.invoice-logo { width: 90px; height: 90px; object-fit: contain; flex-shrink: 0; }
+.invoice-brand h1 { margin: 0; font-size: 56px; line-height: 1; letter-spacing: 1px; }
+.invoice-brand p { margin: 6px 0 0; color: #19c5b6; font-size: 15px; letter-spacing: 2px; }
+.invoice-header-right { text-align: right; }
+.invoice-header-right h2 { margin: 0; font-size: 44px; line-height: 1.1; }
+.invoice-header-right h3 { margin: 12px 0 6px; font-size: 26px; color: #19c5b6; }
+.invoice-header-right p { margin: 0; font-size: 18px; color: #d9e5ff; }
+.invoice-contact { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; padding: 18px 32px; border-bottom: 1px solid #dbe4f0; color: #21416f; }
+.invoice-contact div { border-right: 1px solid #dbe4f0; padding-right: 12px; }
+.invoice-contact div:last-child { border-right: none; }
+.invoice-contact span { display: block; color: #10b5a8; font-size: 13px; margin-bottom: 4px; font-weight: 700; }
+.invoice-contact strong { display: block; font-size: 15px; line-height: 1.4; font-weight: 600; }
+.invoice-info-grid { display: grid; grid-template-columns: 160px repeat(3,1fr); padding: 20px 32px; }
+.invoice-info-box { border: 1px solid #dbe4f0; padding: 18px 16px; display: flex; flex-direction: column; justify-content: center; min-height: 88px; background: #fff; }
+.invoice-info-box span { font-size: 14px; color: #5a6f94; margin-bottom: 6px; }
+.invoice-info-box strong { font-size: 18px; color: #15305b; }
+.icon-box { background: linear-gradient(135deg,#14c3b3,#0ea99c); color: #fff; align-items: center; justify-content: center; }
+.invoice-receipt-icon { font-size: 52px; }
+.invoice-table-wrapper { padding: 0 32px 24px; }
+.invoice-table { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: 14px; border: 1px solid #dbe4f0; }
+.invoice-table thead th { background: #0d2d63; color: #fff; padding: 16px 14px; font-size: 16px; text-align: center; }
+.invoice-table tbody td { padding: 16px 14px; border-top: 1px solid #e5edf7; text-align: center; font-size: 15px; color: #18345f; }
+.invoice-table tbody td:nth-child(2) { text-align: left; }
+.invoice-bottom-grid { display: grid; grid-template-columns: 1fr 1.1fr; gap: 28px; padding: 0 32px 24px; }
+.payment-box, .summary-box { border: 1px solid #cfddee; border-radius: 16px; background: #fff; overflow: hidden; }
+.payment-box { padding: 22px; }
+.payment-box h4 { margin: 0 0 18px; color: #10b5a8; font-size: 18px; }
+.payment-row { display: flex; justify-content: space-between; gap: 16px; padding: 14px 0; border-top: 1px solid #e7eef8; font-size: 16px; }
+.payment-row:first-of-type { border-top: none; }
+.payment-row span { color: #4d6387; }
+.payment-row strong { color: #15305b; }
+.summary-box { padding: 18px 22px 0; }
+.summary-row { display: flex; justify-content: space-between; gap: 16px; padding: 14px 0; border-bottom: 1px dashed #93ddd5; font-size: 16px; }
+.summary-row span { color: #22406f; }
+.summary-row strong { color: #15305b; }
+.summary-row.discount strong { color: #10b5a8; }
+.summary-total { margin-top: 18px; background: linear-gradient(135deg,#0d2d63,#08204a); color: #fff; padding: 20px 22px; margin-left: -22px; margin-right: -22px; border-bottom-left-radius: 16px; border-bottom-right-radius: 16px; display: flex; justify-content: space-between; align-items: center; }
+.summary-total span { font-size: 20px; font-weight: 700; }
+.summary-total strong { font-size: 28px; color: #19c5b6; }
+.invoice-footer { display: grid; grid-template-columns: 1.2fr .8fr 1fr; gap: 20px; padding: 0 32px 24px; }
+.footer-box { border: 1px solid #dbe4f0; border-radius: 16px; padding: 18px; background: #fff; min-height: 130px; }
+.footer-box h5 { margin: 0 0 10px; color: #10b5a8; font-size: 18px; }
+.footer-box p { margin: 6px 0; color: #22406f; line-height: 1.5; }
+.center-box { text-align: center; display: flex; flex-direction: column; justify-content: center; }
+.qr-placeholder { width: 82px; height: 82px; margin: 0 auto 12px; border: 2px solid #10b5a8; border-radius: 10px; display: flex; align-items: center; justify-content: center; color: #0d2d63; font-weight: 700; }
+.invoice-bottom-bar { background: #0d2d63; color: #fff; display: flex; justify-content: space-around; gap: 10px; padding: 16px 20px; font-size: 15px; flex-wrap: wrap; }
+@media print { .invoice-page { padding: 0; background: #fff; } .invoice-card { box-shadow: none; border-radius: 0; max-width: none; } }
+@media (max-width: 992px) { .invoice-header { flex-direction: column; align-items: flex-start; } .invoice-header-right { text-align: left; } .invoice-contact { grid-template-columns: 1fr 1fr; } .invoice-info-grid { grid-template-columns: 1fr 1fr; } .icon-box { display: none; } .invoice-bottom-grid, .invoice-footer { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { .invoice-page { padding: 12px; } .invoice-header, .invoice-contact, .invoice-info-grid, .invoice-table-wrapper, .invoice-bottom-grid, .invoice-footer { padding-left: 16px; padding-right: 16px; } .invoice-brand h1 { font-size: 40px; } .invoice-logo { width: 70px; height: 70px; } .invoice-header-right h2 { font-size: 30px; } .invoice-contact { grid-template-columns: 1fr; } .invoice-contact div { border-right: none; border-bottom: 1px solid #e7eef8; padding-bottom: 10px; } .invoice-contact div:last-child { border-bottom: none; } .invoice-info-grid { grid-template-columns: 1fr; } .invoice-table thead { display: none; } .invoice-table, .invoice-table tbody, .invoice-table tr, .invoice-table td { display: block; width: 100%; } .invoice-table tr { border-bottom: 1px solid #dbe4f0; padding: 12px 0; } .invoice-table tbody td { text-align: right; padding: 8px 12px; position: relative; } .invoice-table tbody td::before { content: attr(data-label); float: left; color: #5a6f94; font-weight: 700; } .invoice-table tbody td:nth-child(2) { text-align: right; } .summary-total { flex-direction: column; align-items: flex-start; gap: 8px; } }

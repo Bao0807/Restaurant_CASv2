@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="135" viewBox="0 0 500 135">
+  
+  
+<g transform="translate(10 21) scale(0.5111111111111111)">
+    <defs>
+      <mask id="casMaskH">
+        <polygon points="90,50 62,114 118,114" fill="white" />
+        <rect x="75" y="81" width="30" height="8" fill="black" />
+      </mask>
+    </defs>
+    
+    <path d="M 140.4 129.4 A 64 64 0 1 1 140.4 50.6" fill="none" stroke="#0F2547" stroke-width="16" stroke-linecap="round" />
+    <polygon points="90,50 62,114 118,114" fill="#00BFA5" mask="url(#casMaskH)" />
+    <circle cx="140.432688" cy="129.402334" r="7" fill="#00BFA5" />
+    <circle cx="140.432688" cy="50.597666" r="7" fill="#00BFA5" />
+    </g>
+<text x="130" y="82" font-family="Space Grotesk, DejaVu Sans, Arial, sans-serif" font-weight="800" font-size="72" letter-spacing="-1.8" fill="#0F2547">CAS</text>
+<text x="132" y="107" font-family="Space Grotesk, DejaVu Sans, Arial, sans-serif" font-weight="500" font-size="12" letter-spacing="2.8" text-transform="uppercase" fill="#00BFA5">CORE ADVANCED SOLUTIONS</text>
+
+</svg>

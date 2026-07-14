@@ -1,0 +1,25 @@
+{
+  "name": "restaurant-casv2",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "npm@11.13.0",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "workspaces": [
+    "apps/web",
+    "apps/api"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev --workspace @cas/web",
+    "dev:api": "npm run dev --workspace @cas/api",
+    "build": "npm run build --workspace @cas/web",
+    "typecheck": "npm run typecheck --workspace @cas/web",
+    "test": "npm run test --workspaces --if-present",
+    "test:smoke": "npm run test:smoke --workspace @cas/api",
+    "check": "npm run typecheck && npm test && npm run build",
+    "start:api": "npm run start --workspace @cas/api",
+    "db:migrate": "npm run migrate --workspace @cas/api",
+    "db:schema": "mysql -h 127.0.0.1 -P 3306 -u root -p < database/schema.sql"
+  }
+}

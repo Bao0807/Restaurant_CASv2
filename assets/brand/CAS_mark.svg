@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180" viewBox="0 0 180 180">
+  
+  
+    <defs>
+      <mask id="casMask1">
+        <polygon points="90,50 62,114 118,114" fill="white" />
+        <rect x="75" y="81" width="30" height="8" fill="black" />
+      </mask>
+    </defs>
+    
+    <path d="M 140.4 129.4 A 64 64 0 1 1 140.4 50.6" fill="none" stroke="#0F2547" stroke-width="16" stroke-linecap="round" />
+    <polygon points="90,50 62,114 118,114" fill="#00BFA5" mask="url(#casMask1)" />
+    <circle cx="140.432688" cy="129.402334" r="7" fill="#00BFA5" />
+    <circle cx="140.432688" cy="50.597666" r="7" fill="#00BFA5" />
+    
+</svg>

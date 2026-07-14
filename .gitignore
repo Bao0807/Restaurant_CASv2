@@ -1,0 +1,12 @@
+node_modules/
+dist/
+apps/web/dist/
+logs/
+.env
+.env.local
+apps/api/.env
+apps/web/.env
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
