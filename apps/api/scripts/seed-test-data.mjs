@@ -2,18 +2,27 @@ import 'dotenv/config';
 import { closePool, getPool, initDatabase } from '../src/db.js';
 import { calculateTotals, parseJsonColumn, sanitizeSettings } from '../src/domain.js';
 import { defaultSettings } from '../src/defaultSettings.js';
-import { processKitchenQueue } from '../src/kitchenQueue.js';
 
 const DEMO_TABLES = [
-  ['demo-table-101', 101, 2, 'empty', null],
-  ['demo-table-102', 102, 4, 'reserved', '19:30'],
-  ['demo-table-103', 103, 4, 'waiting', null],
-  ['demo-table-104', 104, 6, 'waiting', null],
-  ['demo-table-105', 105, 2, 'done', null],
-  ['demo-table-106', 106, 8, 'waiting', null],
-  ['demo-table-107', 107, 4, 'waiting', null],
-  ['demo-table-108', 108, 10, 'empty', null],
+  ['demo-table-101', 101, 2, 'empty'],
+  ['demo-table-102', 102, 4, 'empty'],
+  ['demo-table-103', 103, 4, 'waiting'],
+  ['demo-table-104', 104, 6, 'waiting'],
+  ['demo-table-105', 105, 2, 'done'],
+  ['demo-table-106', 106, 8, 'waiting'],
+  ['demo-table-107', 107, 4, 'waiting'],
+  ['demo-table-108', 108, 10, 'empty'],
 ];
+
+const DEMO_RESERVATION_CODES = [
+  'DEMO-RSV-TODAY-101',
+  'DEMO-RSV-UPCOMING-102',
+  'DEMO-RSV-SEATED-103',
+  'DEMO-RSV-CANCELLED-108',
+  'DEMO-RSV-COMPLETED-108',
+  'DEMO-RSV-NOSHOW-108',
+];
+const DEMO_SEED_MARKER = 'restaurant-casv2';
 
 const DEMO_EMPLOYEES = [
   ['demo-employee-an', 'DEMO01', 'Nguyễn Minh Anh', 'server', '0901 101 001', '07:00', '15:00'],
@@ -101,7 +110,7 @@ function cartItem(menuRow, suffix, quantity = 1, withOptions = false) {
   };
 }
 
-async function createDemoOrder(connection, tableId, batches) {
+async function createDemoOrder(connection, tableId, batches, reservationId = null) {
   const items = batches.flatMap(batch => batch.items);
   const eta = Math.max(...batches.map(batch => batch.eta));
   const earliestQueueTime = batches.reduce(
@@ -109,9 +118,10 @@ async function createDemoOrder(connection, tableId, batches) {
     batches[0].queuedAt,
   );
   const [orderResult] = await connection.query(
-    `INSERT INTO active_orders (table_id, items, queued_at, cooking_started_at, estimated_cook_minutes)
-     VALUES (?, ?, ?, NULL, ?)`,
-    [tableId, JSON.stringify(items), earliestQueueTime, eta],
+    `INSERT INTO active_orders (
+      table_id, reservation_id, items, queued_at, cooking_started_at, estimated_cook_minutes
+     ) VALUES (?, ?, ?, ?, NULL, ?)`,
+    [tableId, reservationId, JSON.stringify(items), earliestQueueTime, eta],
   );
 
   for (const [index, batch] of batches.entries()) {
@@ -141,6 +151,76 @@ async function createDemoOrder(connection, tableId, batches) {
   await connection.query('UPDATE restaurant_tables SET status = ? WHERE id = ?', [nextStatus, tableId]);
 }
 
+/** Tạo đủ trạng thái đặt bàn trong namespace DEMO-RSV-* để kiểm thử UI và nghiệp vụ. */
+async function createDemoReservations(connection, now) {
+  const offsetMinutes = value => new Date(now + value * 60_000);
+  const todayStart = new Date(now);
+  todayStart.setHours(0, 0, 0, 0);
+  const todayPoint = fraction => new Date(
+    todayStart.getTime() + Math.floor((now - todayStart.getTime()) * fraction),
+  );
+  const definitions = [
+    {
+      code: 'DEMO-RSV-TODAY-101', tableId: 'demo-table-101', tableNumber: 101,
+      name: 'Khách demo hôm nay', phone: '0901101101', partySize: 2,
+      reservedAt: offsetMinutes(0), duration: 90, status: 'booked',
+      notes: 'Đặt gần giờ để kiểm thử nhắc bàn và nhận khách.',
+    },
+    {
+      code: 'DEMO-RSV-UPCOMING-102', tableId: 'demo-table-102', tableNumber: 102,
+      name: 'Khách demo ngày mai', phone: '0901101102', partySize: 4,
+      reservedAt: offsetMinutes(24 * 60), duration: 120, status: 'booked',
+      notes: 'Đặt trước cho nhóm 4 khách.',
+    },
+    {
+      code: 'DEMO-RSV-SEATED-103', tableId: 'demo-table-103', tableNumber: 103,
+      name: 'Khách demo đã nhận bàn', phone: '0901101103', partySize: 3,
+      reservedAt: offsetMinutes(-30), duration: 120, status: 'seated',
+      seatedAt: offsetMinutes(-25), notes: 'Đã nhận bàn và có order đang hoạt động.',
+    },
+    {
+      code: 'DEMO-RSV-CANCELLED-108', tableId: 'demo-table-108', tableNumber: 108,
+      name: 'Khách demo đã hủy', phone: '0901101104', partySize: 6,
+      reservedAt: offsetMinutes(-48 * 60), duration: 90, status: 'cancelled',
+      closedAt: offsetMinutes(-49 * 60), notes: 'Lịch sử đặt bàn đã hủy.',
+    },
+    {
+      code: 'DEMO-RSV-COMPLETED-108', tableId: 'demo-table-108', tableNumber: 108,
+      name: 'Khách demo đã hoàn tất', phone: '0901101105', partySize: 5,
+      reservedAt: todayPoint(0.1), duration: 120, status: 'completed',
+      seatedAt: todayPoint(0.15), closedAt: todayPoint(0.45),
+      notes: 'Lịch sử khách đặt bàn đã dùng bữa và thanh toán.',
+    },
+    {
+      code: 'DEMO-RSV-NOSHOW-108', tableId: 'demo-table-108', tableNumber: 108,
+      name: 'Khách demo không đến', phone: '0901101106', partySize: 4,
+      reservedAt: offsetMinutes(-96 * 60), duration: 90, status: 'no_show',
+      closedAt: offsetMinutes(-96 * 60 + 30), notes: 'Lịch sử khách không đến.',
+    },
+  ];
+
+  const created = new Map();
+  for (const definition of definitions) {
+    const endsAt = new Date(definition.reservedAt.getTime() + definition.duration * 60_000);
+    const [result] = await connection.query(
+      `INSERT INTO reservations (
+        reservation_code, table_id, table_number, customer_name, customer_phone,
+        phone_normalized, party_size, reserved_at, ends_at, duration_minutes,
+        status, seated_table_id, version, notes, seated_at, closed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+      [
+        definition.code, definition.tableId, definition.tableNumber, definition.name,
+        definition.phone, definition.phone, definition.partySize, definition.reservedAt,
+        endsAt, definition.duration, definition.status,
+        definition.status === 'seated' ? definition.tableId : null, definition.notes,
+        definition.seatedAt ?? null, definition.closedAt ?? null,
+      ],
+    );
+    created.set(definition.code, { id: result.insertId, ...definition, endsAt });
+  }
+  return created;
+}
+
 function unitPrice(item) {
   return item.menuItem.price
     + (item.selectedSize?.extraPrice ?? 0)
@@ -154,8 +234,9 @@ async function createDemoPayment(connection, settings, definition) {
     `INSERT INTO payment_transactions (
       invoice_code, transaction_code, table_id, table_number, payment_method,
       subtotal, discount, service_fee, vat, total, item_count, staff_id,
-      staff_name, cashier_name, paid_at, raw_payload
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      staff_name, cashier_name, paid_at, raw_payload, reservation_id,
+      reservation_code, customer_name, guest_count
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       definition.invoiceCode,
       `TX-${definition.invoiceCode}`,
@@ -172,7 +253,11 @@ async function createDemoPayment(connection, settings, definition) {
       definition.staffName ?? settings.staffName,
       settings.cashierName,
       definition.paidAt,
-      JSON.stringify({ demo: true }),
+      JSON.stringify({ demo: true, demoSeed: DEMO_SEED_MARKER }),
+      definition.reservationId ?? null,
+      definition.reservationCode ?? null,
+      definition.customerName ?? null,
+      definition.guestCount ?? null,
     ],
   );
 
@@ -218,31 +303,57 @@ async function seed() {
   try {
     await connection.beginTransaction();
     await connection.query('SELECT id FROM kitchen_queue_state WHERE id = 1 FOR UPDATE');
-    await connection.query("DELETE FROM payment_transactions WHERE invoice_code LIKE 'DEMO-%'");
+    await connection.query(
+      `DELETE FROM payment_transactions
+       WHERE JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.demoSeed')) = ?
+          OR (invoice_code LIKE 'DEMO-%'
+            AND JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.demo')) = 'true')`,
+      [DEMO_SEED_MARKER],
+    );
 
     for (const demoEmployee of DEMO_EMPLOYEES) {
-      await connection.query(
-        `INSERT INTO employees (id, employee_code, full_name, role, phone, shift_start, shift_end, active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, TRUE)
-         ON DUPLICATE KEY UPDATE employee_code = VALUES(employee_code), full_name = VALUES(full_name),
-           role = VALUES(role), phone = VALUES(phone), shift_start = VALUES(shift_start),
-           shift_end = VALUES(shift_end), active = TRUE`,
-        demoEmployee,
+      const [updated] = await connection.query(
+        `UPDATE employees SET employee_code = ?, full_name = ?, role = ?, phone = ?,
+           shift_start = ?, shift_end = ?, active = TRUE WHERE id = ?`,
+        [...demoEmployee.slice(1), demoEmployee[0]],
       );
+      if (updated.affectedRows === 0) {
+        // INSERT cố ý fail khi mã DEMOxx đã bị một bản ghi ngoài namespace chiếm dụng.
+        await connection.query(
+          `INSERT INTO employees (id, employee_code, full_name, role, phone, shift_start, shift_end, active)
+           VALUES (?, ?, ?, ?, ?, ?, ?, TRUE)`,
+          demoEmployee,
+        );
+      }
     }
 
     const placeholders = demoTableIds.map(() => '?').join(', ');
     await connection.query(`DELETE FROM active_orders WHERE table_id IN (${placeholders})`, demoTableIds);
-    await connection.query(`DELETE FROM restaurant_tables WHERE id IN (${placeholders})`, demoTableIds);
+    const reservationPlaceholders = DEMO_RESERVATION_CODES.map(() => '?').join(', ');
+    await connection.query(
+      `DELETE FROM reservations WHERE reservation_code IN (${reservationPlaceholders})`,
+      DEMO_RESERVATION_CODES,
+    );
     await ensureCatalog(connection);
 
     for (const table of DEMO_TABLES) {
-      await connection.query(
-        `INSERT INTO restaurant_tables (id, table_number, seats, status, reserved_time)
-         VALUES (?, ?, ?, ?, ?)`,
-        table,
+      const [updated] = await connection.query(
+        `UPDATE restaurant_tables
+         SET table_number = ?, seats = ?, status = ? WHERE id = ?`,
+        [table[1], table[2], table[3], table[0]],
       );
+      if (updated.affectedRows === 0) {
+        // Không dùng ON DUPLICATE KEY: nếu số bàn trùng dữ liệu thật thì rollback thay vì sửa nhầm dòng đó.
+        await connection.query(
+          `INSERT INTO restaurant_tables (id, table_number, seats, status)
+           VALUES (?, ?, ?, ?)`,
+          table,
+        );
+      }
     }
+
+    const now = Date.now();
+    const reservations = await createDemoReservations(connection, now);
 
     const [menuRows] = await connection.query(
       `SELECT id, name, description, price, image, category_id AS categoryId,
@@ -252,8 +363,8 @@ async function seed() {
     );
     if (menuRows.length < 4) throw new Error('Cần ít nhất 4 món đang bán để tạo dữ liệu test.');
 
-    const now = Date.now();
-    const queuedAt = offsetSeconds => new Date(now + offsetSeconds * 1_000);
+    // Mọi timestamp demo đều tương đối với cùng một mốc để lần seed luôn cho trạng thái xác định.
+    const queuedAt = offsetSeconds => new Date(now - 10_000 + offsetSeconds * 1_000);
     const minutesAgo = value => new Date(now - value * 60_000);
     const batch = (items, offsetSeconds, status = 'waiting', extra = {}) => ({
       items,
@@ -264,17 +375,21 @@ async function seed() {
     });
 
     await createDemoOrder(connection, 'demo-table-103', [
-      batch([cartItem(menuRows[0], '103-a', 1, true)], 0),
-    ]);
+      batch([cartItem(menuRows[0], '103-a', 1, true)], 0, 'cooking', {
+        queuedAt: minutesAgo(4), cookingStartedAt: minutesAgo(3),
+      }),
+    ], reservations.get('DEMO-RSV-SEATED-103').id);
     await createDemoOrder(connection, 'demo-table-104', [
       batch([cartItem(menuRows[1], '104-a', 2)], 1, 'done', {
-        cookingStartedAt: minutesAgo(10), completedAt: minutesAgo(8),
+        queuedAt: minutesAgo(15), cookingStartedAt: minutesAgo(10), completedAt: minutesAgo(8),
       }),
-      batch([cartItem(menuRows[2], '104-b', 1, true)], 2),
+      batch([cartItem(menuRows[2], '104-b', 1, true)], 2, 'cooking', {
+        queuedAt: minutesAgo(3), cookingStartedAt: minutesAgo(2),
+      }),
     ]);
     await createDemoOrder(connection, 'demo-table-105', [
       batch([cartItem(menuRows[3], '105-a', 1)], 3, 'done', {
-        cookingStartedAt: minutesAgo(8), completedAt: minutesAgo(5),
+        queuedAt: minutesAgo(12), cookingStartedAt: minutesAgo(8), completedAt: minutesAgo(5),
       }),
     ]);
     await createDemoOrder(connection, 'demo-table-106', [
@@ -282,24 +397,42 @@ async function seed() {
     ]);
     await createDemoOrder(connection, 'demo-table-107', [
       batch([cartItem(menuRows[5] ?? menuRows[1], '107-a', 1)], 5, 'done', {
-        cookingStartedAt: minutesAgo(6), completedAt: minutesAgo(4),
+        queuedAt: minutesAgo(10), cookingStartedAt: minutesAgo(6), completedAt: minutesAgo(4),
       }),
       batch([cartItem(menuRows[6] ?? menuRows[2], '107-b', 2, true)], 6),
     ]);
 
     const [settingsRows] = await connection.query('SELECT settings FROM restaurant_settings WHERE id = 1 LIMIT 1');
     const settings = sanitizeSettings(parseJsonColumn(settingsRows[0]?.settings, defaultSettings), defaultSettings);
-    const dateTag = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+    const localSeedDate = new Date(now);
+    const dateTag = [
+      localSeedDate.getFullYear(),
+      String(localSeedDate.getMonth() + 1).padStart(2, '0'),
+      String(localSeedDate.getDate()).padStart(2, '0'),
+    ].join('');
+    const todayStart = new Date(now);
+    todayStart.setHours(0, 0, 0, 0);
+    const paymentPoint = index => new Date(
+      todayStart.getTime()
+      + Math.floor((now - todayStart.getTime()) * ((index + 1) / (methods.length + 1))),
+    );
     const methods = ['cash', 'card', 'qr', 'cash', 'qr', 'card'];
     for (let index = 0; index < methods.length; index += 1) {
+      const completedReservation = index === 0
+        ? reservations.get('DEMO-RSV-COMPLETED-108')
+        : null;
       await createDemoPayment(connection, settings, {
-        invoiceCode: `DEMO-${dateTag}-${String(index + 1).padStart(2, '0')}`,
-        tableId: `demo-paid-${index + 1}`,
-        tableNumber: 91 + index,
+        invoiceCode: `DEMO-SEED-${dateTag}-${String(index + 1).padStart(2, '0')}`,
+        tableId: completedReservation?.tableId ?? `demo-paid-${index + 1}`,
+        tableNumber: completedReservation?.tableNumber ?? 91 + index,
         method: methods[index],
         employeeId: DEMO_EMPLOYEES[index % DEMO_EMPLOYEES.length][0],
         staffName: DEMO_EMPLOYEES[index % DEMO_EMPLOYEES.length][2],
-        paidAt: new Date(now - (10 + index * 35) * 60_000),
+        paidAt: completedReservation?.closedAt ?? paymentPoint(index),
+        reservationId: completedReservation?.id,
+        reservationCode: completedReservation?.code,
+        customerName: completedReservation?.name,
+        guestCount: completedReservation?.partySize,
         items: [
           cartItem(menuRows[index % menuRows.length], `paid-${index}-a`, index % 3 + 1, index % 2 === 0),
           cartItem(menuRows[(index + 2) % menuRows.length], `paid-${index}-b`, 1),
@@ -315,16 +448,17 @@ async function seed() {
     connection.release();
   }
 
-  await processKitchenQueue(pool);
-  const [[tableCount], [orderCount], [batchCount], [paymentCount], [employeeCount]] = await Promise.all([
+  const [[tableCount], [orderCount], [batchCount], [paymentCount], [employeeCount], [reservationCount], [queueCounts]] = await Promise.all([
     pool.query("SELECT COUNT(*) AS total FROM restaurant_tables WHERE id LIKE 'demo-table-%'"),
     pool.query("SELECT COUNT(*) AS total FROM active_orders WHERE table_id LIKE 'demo-table-%'"),
     pool.query("SELECT COUNT(*) AS total FROM order_batches WHERE table_id LIKE 'demo-table-%'"),
-    pool.query("SELECT COUNT(*) AS total FROM payment_transactions WHERE invoice_code LIKE 'DEMO-%'"),
+    pool.query("SELECT COUNT(*) AS total FROM payment_transactions WHERE JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.demoSeed')) = ?", [DEMO_SEED_MARKER]),
     pool.query("SELECT COUNT(*) AS total FROM employees WHERE id LIKE 'demo-employee-%' AND active = TRUE"),
+    pool.query(`SELECT COUNT(*) AS total FROM reservations WHERE reservation_code IN (${DEMO_RESERVATION_CODES.map(() => '?').join(', ')})`, DEMO_RESERVATION_CODES),
+    pool.query("SELECT SUM(status = 'cooking') AS cooking, SUM(status = 'waiting') AS waiting, SUM(status = 'done') AS done FROM order_batches WHERE table_id LIKE 'demo-table-%'"),
   ]);
   console.log(
-    `Seed test completed: tables=${tableCount[0].total}, activeOrders=${orderCount[0].total}, batches=${batchCount[0].total}, payments=${paymentCount[0].total}, employees=${employeeCount[0].total}`,
+    `Seed test completed: tables=${tableCount[0].total}, reservations=${reservationCount[0].total}, activeOrders=${orderCount[0].total}, batches=${batchCount[0].total}, cooking=${queueCounts[0].cooking}, waiting=${queueCounts[0].waiting}, done=${queueCounts[0].done}, payments=${paymentCount[0].total}, employees=${employeeCount[0].total}`,
   );
 }
 

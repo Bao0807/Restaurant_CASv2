@@ -9,24 +9,33 @@ export function availableKitchenSlots(cookingCount, concurrency = kitchenConcurr
   return Math.max(0, concurrency - Math.max(0, Number(cookingCount) || 0));
 }
 
-/** Xác định order nấu quá ngưỡng để Dashboard cảnh báo can thiệp. */
-export function isKitchenOrderStale(startedAt, staleAfterMinutes = 120, now = Date.now()) {
+/** Cảnh báo khi phiếu đã vượt ETA thêm một khoảng gia hạn cấu hình. */
+export function isKitchenOrderStale(
+  startedAt,
+  estimatedCookMinutes,
+  staleAfterMinutes = 120,
+  now = Date.now(),
+) {
   if (!startedAt) return false;
   const started = new Date(startedAt).getTime();
-  const threshold = Number(staleAfterMinutes) * 60_000;
+  const threshold = (Number(estimatedCookMinutes) + Number(staleAfterMinutes)) * 60_000;
   return Number.isFinite(started) && Number.isFinite(threshold) && threshold > 0 && now - started >= threshold;
 }
 
 /** Khóa hàng cấu hình duy nhất để mọi client cùng điều phối trên một queue. */
 export async function lockKitchenQueue(connection) {
   const [rows] = await connection.query(
-    `SELECT id, concurrency, automation_enabled AS automationEnabled, paused
+    `SELECT id, concurrency, stale_after_minutes AS staleAfterMinutes,
+       automation_enabled AS automationEnabled, paused, version
      FROM kitchen_queue_state WHERE id = 1 FOR UPDATE`,
   );
+  if (!rows[0]) throw new Error('Database thiếu cấu hình bếp id=1.');
   return {
     concurrency: Number(rows[0]?.concurrency) || kitchenConcurrency,
+    staleAfterMinutes: Number(rows[0]?.staleAfterMinutes) || 120,
     automationEnabled: rows[0]?.automationEnabled !== 0,
     paused: Boolean(rows[0]?.paused),
+    version: Number(rows[0]?.version) || 1,
   };
 }
 

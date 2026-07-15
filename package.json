@@ -21,6 +21,7 @@
     "start:api": "npm run start --workspace @cas/api",
     "db:migrate": "npm run migrate --workspace @cas/api",
     "db:seed:test": "npm run seed:test --workspace @cas/api",
+    "db:audit": "npm run db:audit --workspace @cas/api",
     "db:schema": "mysql -h 127.0.0.1 -P 3306 -u root -p < database/schema.sql"
   }
 }

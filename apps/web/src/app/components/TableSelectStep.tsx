@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Clock, Users } from 'lucide-react';
 import type { CartItem, KitchenStatus, Table, TableStatus } from '../data';
 import type { EditableOrderBatch } from '../services/api';
-import { STATUS_CONFIG } from '../data';
+import { formatReservationSlot, STATUS_CONFIG } from '../data';
 import { OrderTimer } from './OrderTimer';
 import { getTableOptionsHistoryTableId, TableOptionsModal } from './TableOptionsModal';
 
@@ -66,7 +66,7 @@ export function TableSelectStep({
       <div style={{ padding: '20px 16px 12px', background: '#fff', borderBottom: '1px solid #F3F4F6' }}>
         <h1 style={{ margin: 0, color: '#111827' }}>Chọn bàn</h1>
         <p style={{ margin: '4px 0 0', color: '#6B7280', fontSize: 14 }}>
-          Chọn bàn để gọi món hoặc quản lý order hiện tại
+          Chọn bàn để gọi món hoặc quản lý phiếu đang phục vụ
         </p>
         <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <span style={{ background: '#FFEDD5', color: '#C2410C', borderRadius: 999, padding: '4px 9px', fontSize: 11, fontWeight: 800 }}>
@@ -102,7 +102,7 @@ export function TableSelectStep({
               type="button"
               data-table-id={table.id}
               onClick={() => setSelectedTableId(table.id)}
-              aria-label={`Bàn ${table.number}, ${cfg.label}. Mở tùy chọn.`}
+              aria-label={`Bàn ${table.number}, ${cfg.label}${table.nextReservation ? `. Lịch kế tiếp ${formatReservationSlot(table.nextReservation.reservedAt)}, ${table.nextReservation.customerName}` : ''}. Mở tùy chọn.`}
               style={{
                 background: cfg.bg,
                 border: `2px solid ${cfg.border}`,
@@ -144,12 +144,14 @@ export function TableSelectStep({
                   <StatusDot status={table.status} />
                   <span style={{ fontSize: 12, color: cfg.text, fontWeight: 600 }}>{cfg.label}</span>
                 </div>
-                {table.status === 'reserved' && table.reservedTime && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 4 }}>
+                {table.nextReservation ? (
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 4, marginTop: 7, padding: '6px 7px', borderRadius: 8, background: '#EFF6FF', border: '1px solid #BFDBFE' }}>
                     <Clock size={11} color="#3B82F6" />
-                    <span style={{ fontSize: 11, color: '#3B82F6' }}>{table.reservedTime}</span>
+                    <span style={{ minWidth: 0, fontSize: 10, lineHeight: 1.35, color: '#1D4ED8', fontWeight: 700 }}>
+                      {formatReservationSlot(table.nextReservation.reservedAt)} · {table.nextReservation.customerName} · {table.nextReservation.partySize} khách
+                    </span>
                   </div>
-                )}
+                ) : null}
                 {(table.status === 'waiting' || table.status === 'cooking') && (
                   <div style={{ marginTop: 6 }}><OrderTimer table={table} /></div>
                 )}

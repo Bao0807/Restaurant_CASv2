@@ -77,6 +77,12 @@ function deleteBlockedReason(table: Table): string {
   return 'Chỉ có thể hủy khi toàn bộ phiếu còn đang chờ';
 }
 
+function formatReservationTime(value: string): string {
+  return new Date(value).toLocaleString('vi-VN', {
+    hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit',
+  });
+}
+
 /** Modal thao tác bàn dùng chung cho trang Gọi món và Tổng quan. */
 export function TableOptionsModal({
   table,
@@ -98,6 +104,7 @@ export function TableOptionsModal({
   const [markDoneBusy, setMarkDoneBusy] = useState(false);
   const cfg = STATUS_CONFIG[table.status];
   const hasOrder = Boolean(order?.length);
+  const checkedInReservation = table.nextReservation?.status === 'seated';
   const isCooking = table.status === 'cooking';
   const total = hasOrder ? cartTotal(order!) : 0;
   const canDelete = canDeleteWaitingOrder(table, hasOrder);
@@ -197,8 +204,10 @@ export function TableOptionsModal({
                 <span style={{ fontSize: 13, color: cfg.text, fontWeight: 600 }}>{cfg.label}</span>
               </span>
               <span style={{ fontSize: 12, color: '#9CA3AF' }}>· {table.seats} chỗ</span>
-              {table.status === 'reserved' && table.reservedTime && (
-                <span style={{ fontSize: 12, color: '#3B82F6' }}>· {table.reservedTime}</span>
+              {table.nextReservation && (
+                <span style={{ fontSize: 12, color: '#2563EB' }}>
+                  · {formatReservationTime(table.nextReservation.reservedAt)} · {table.nextReservation.customerName}
+                </span>
               )}
             </div>
             <div style={{ marginTop: 6 }}><OrderTimer table={table} compact /></div>
@@ -242,7 +251,8 @@ export function TableOptionsModal({
           )}
 
           <div className="table-options-actions">
-            {(table.status === 'empty' || hasOrder) && table.status !== 'reserved' && (
+            {(table.status === 'empty' || hasOrder || checkedInReservation)
+              && (table.status !== 'reserved' || checkedInReservation) && (
               <button
                 type="button"
                 onClick={() => { onStartOrder(); closeAfterAction(); }}
@@ -322,28 +332,28 @@ export function TableOptionsModal({
               >
                 <span className="table-option-action-icon table-option-action-icon-delete"><Trash2 size={18} /></span>
                 <span className="table-option-action-copy">
-                  <strong>Hủy order</strong>
+                  <strong>Hủy phiếu gọi món</strong>
                   <small>
                     {!canDelete && <AlertCircle size={11} />}
-                    {canDelete ? 'Xóa toàn bộ order còn trong hàng chờ' : deleteBlockedReason(table)}
+                    {canDelete ? 'Xóa toàn bộ lượt gọi còn trong hàng chờ' : deleteBlockedReason(table)}
                   </small>
                 </span>
               </button>
             )}
 
-            {table.status === 'reserved' && (
+            {table.status === 'reserved' && !checkedInReservation && (
               <div className="table-options-information">
                 <AlertCircle size={17} />
-                Bàn đang được đặt trước nên chưa thể gọi món.
+                Bàn đang được giữ theo lịch. Hãy check-in khách tại mục Đặt bàn trước khi gọi món.
               </div>
             )}
           </div>
         </div>
         {showDeleteConfirmation && (
           <ConfirmationDialog
-            title="Hủy toàn bộ order?"
+            title="Hủy toàn bộ lượt gọi?"
             message={`Toàn bộ phiếu đang chờ của bàn ${table.number} sẽ bị xóa khỏi hàng đợi. Thao tác này không thể hoàn tác.`}
-            confirmLabel="Hủy order"
+            confirmLabel="Xác nhận hủy"
             busy={deleteBusy}
             onCancel={() => { if (!deleteBusy) setShowDeleteConfirmation(false); }}
             onConfirm={() => {

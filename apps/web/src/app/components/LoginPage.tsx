@@ -27,13 +27,13 @@ export function LoginPage({ busy, error, onLogin }: LoginPageProps) {
       <section className="login-showcase" aria-label="Giới thiệu CAS POS">
         <img className="login-showcase-logo" src={BRAND_ASSETS.logoHorizontalWhite} alt="CAS" />
         <div className="login-showcase-content">
-          <div className="login-kicker"><ChefHat size={17} /> Restaurant Operations</div>
+          <div className="login-kicker"><ChefHat size={17} /> Quản lý vận hành</div>
           <h1>Vận hành nhà hàng<br />trong một màn hình.</h1>
           <p>Quản lý bàn, gọi món, hàng chờ bếp và thanh toán theo thời gian thực.</p>
           <div className="login-feature-list">
-            <span><ShieldCheck size={18} /> Dữ liệu đồng bộ với MySQL</span>
-            <span><ShieldCheck size={18} /> Queue bếp FIFO minh bạch</span>
-            <span><ShieldCheck size={18} /> Giá và ETA xác thực tại máy chủ</span>
+            <span><ShieldCheck size={18} /> Dữ liệu vận hành luôn đồng bộ</span>
+            <span><ShieldCheck size={18} /> Hàng đợi bếp FIFO minh bạch</span>
+            <span><ShieldCheck size={18} /> Giá và thời gian nấu nhất quán</span>
           </div>
         </div>
         <span className="login-showcase-footer">CAS · Core Advanced Solutions</span>

@@ -1,7 +1,7 @@
 export const defaultSettings = {
   restaurantName: 'Nhà hàng CAS',
   legalName: 'Core Advanced Solutions',
-  tagline: 'Restaurant Order Management',
+  tagline: 'Giải pháp vận hành nhà hàng',
   address: '127 Nguyễn Văn Linh, Quận 7, TP. Hồ Chí Minh',
   phone: '0900 123 456',
   email: 'hello@cas.vn',

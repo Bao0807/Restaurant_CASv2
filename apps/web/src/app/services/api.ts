@@ -1,10 +1,25 @@
-import type { CartItem, EditableOrderBatch, Employee, KitchenStatus, MenuCategory, MenuItem, PaymentRecord, ReportSummary, Table, TableStatus } from '../data';
+import type {
+  CartItem, EditableOrderBatch, Employee, KitchenStatus, MenuCategory, MenuItem,
+  PaymentRecord, ReportSummary, Reservation, ReservationInput, ReservationStatus,
+  Table, TableStatus,
+} from '../data';
 import { normalizeSettings, type RestaurantSettings } from '../config/restaurant';
 
 export type { EditableOrderBatch } from '../data';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
 const AUTH_STORAGE_KEY = 'cas-api-basic-auth';
+let serverClockOffsetMs = 0;
+
+/** Đồng hồ hiệu chỉnh theo MySQL, tránh timer sai khi giờ máy POS bị lệch. */
+export function getServerNowMs(): number {
+  return Date.now() + serverClockOffsetMs;
+}
+
+/** Chỉ App được áp dụng offset của snapshot đã thắng sequence race. */
+export function synchronizeServerClock(offsetMs: number | null): void {
+  if (offsetMs != null && Number.isFinite(offsetMs)) serverClockOffsetMs = offsetMs;
+}
 
 export class ApiError extends Error {
   status: number;
@@ -127,14 +142,122 @@ export async function deactivateEmployee(employeeId: string): Promise<void> {
   await request(`/employees/${encodeURIComponent(employeeId)}`, { method: 'DELETE' });
 }
 
+function normalizeReservation(reservation: Reservation): Reservation {
+  return {
+    ...reservation,
+    id: Number(reservation.id),
+    version: Number(reservation.version),
+    tableNumber: Number(reservation.tableNumber),
+    ...(reservation.tableSeats == null ? {} : { tableSeats: Number(reservation.tableSeats) }),
+    partySize: Number(reservation.partySize),
+    durationMinutes: Number(reservation.durationMinutes),
+    reservedAt: new Date(reservation.reservedAt).toISOString(),
+    endsAt: new Date(reservation.endsAt).toISOString(),
+    ...(reservation.seatedAt ? { seatedAt: new Date(reservation.seatedAt).toISOString() } : {}),
+    ...(reservation.closedAt ? { closedAt: new Date(reservation.closedAt).toISOString() } : {}),
+    createdAt: new Date(reservation.createdAt).toISOString(),
+    updatedAt: new Date(reservation.updatedAt).toISOString(),
+    notes: reservation.notes ?? '',
+  };
+}
+
+export interface ReservationQuery {
+  from?: Date;
+  to?: Date;
+  status?: ReservationStatus;
+  q?: string;
+  tableId?: string;
+}
+
+export interface AvailableReservationTable {
+  id: string;
+  number: number;
+  seats: number;
+}
+
+/** Lấy lịch đặt bàn theo khoảng thời gian; API luôn là nguồn kiểm tra xung đột cuối cùng. */
+export async function fetchReservations(query: ReservationQuery = {}): Promise<Reservation[]> {
+  const params = new URLSearchParams();
+  if (query.from) params.set('from', query.from.toISOString());
+  if (query.to) params.set('to', query.to.toISOString());
+  if (query.status) params.set('status', query.status);
+  if (query.q?.trim()) params.set('q', query.q.trim());
+  if (query.tableId) params.set('tableId', query.tableId);
+  const data = await request<{ reservations: Reservation[] }>(`/reservations${params.size ? `?${params}` : ''}`);
+  return data.reservations.map(normalizeReservation);
+}
+
+export async function fetchReservationAvailability(
+  reservedAt: Date,
+  durationMinutes: number,
+  partySize: number,
+): Promise<AvailableReservationTable[]> {
+  const params = new URLSearchParams({
+    reservedAt: reservedAt.toISOString(),
+    durationMinutes: String(durationMinutes),
+    partySize: String(partySize),
+  });
+  const data = await request<{ tables: AvailableReservationTable[] }>(`/reservations/availability?${params}`);
+  return data.tables.map(table => ({ ...table, number: Number(table.number), seats: Number(table.seats) }));
+}
+
+export async function createReservation(reservation: ReservationInput): Promise<Reservation> {
+  const data = await request<{ reservation: Reservation }>('/reservations', {
+    method: 'POST',
+    body: JSON.stringify({ reservation }),
+  });
+  return normalizeReservation(data.reservation);
+}
+
+export async function updateReservation(
+  reservationId: number,
+  reservation: ReservationInput,
+  expectedVersion: number,
+): Promise<Reservation> {
+  const data = await request<{ reservation: Reservation }>(`/reservations/${encodeURIComponent(String(reservationId))}`, {
+    method: 'PUT',
+    body: JSON.stringify({ reservation, expectedVersion }),
+  });
+  return normalizeReservation(data.reservation);
+}
+
+export async function updateReservationStatus(
+  reservationId: number,
+  status: ReservationStatus,
+  expectedVersion: number,
+): Promise<Reservation> {
+  const data = await request<{ reservation: Reservation }>(`/reservations/${encodeURIComponent(String(reservationId))}/status`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status, expectedVersion }),
+  });
+  return normalizeReservation(data.reservation);
+}
+
 /** Lấy snapshot nhất quán của bàn, order và trạng thái bếp. */
 export async function fetchOperations(): Promise<{
+  serverNow: string;
+  serverClockOffsetMs: number | null;
   tables: Table[];
   tableOrders: Record<string, CartItem[]>;
   waitingBatchesByTable: Record<string, EditableOrderBatch[]>;
   kitchen: KitchenStatus;
 }> {
-  return request('/operations');
+  const requestedAt = Date.now();
+  const snapshot = await request<{
+    serverNow: string;
+    tables: Table[];
+    tableOrders: Record<string, CartItem[]>;
+    waitingBatchesByTable: Record<string, EditableOrderBatch[]>;
+    kitchen: KitchenStatus;
+  }>('/operations');
+  const receivedAt = Date.now();
+  const parsedServerNow = Date.parse(snapshot.serverNow);
+  return {
+    ...snapshot,
+    serverClockOffsetMs: Number.isFinite(parsedServerNow)
+      ? parsedServerNow - Math.round((requestedAt + receivedAt) / 2)
+      : null,
+  };
 }
 
 export async function fetchCatalog(): Promise<{ categories: MenuCategory[]; items: MenuItem[] }> {
@@ -170,9 +293,14 @@ export async function saveCategory(category: Partial<MenuCategory>): Promise<Men
   return data.category;
 }
 
-export async function saveKitchenConfig(concurrency: number, staleAfterMinutes: number, automationEnabled: boolean, paused: boolean): Promise<Pick<KitchenStatus, 'concurrency' | 'staleAfterMinutes' | 'automationEnabled' | 'paused'>> {
-  const data = await request<Pick<KitchenStatus, 'concurrency' | 'staleAfterMinutes' | 'automationEnabled' | 'paused'>>('/kitchen/config', {
-    method: 'PUT', body: JSON.stringify({ concurrency, staleAfterMinutes, automationEnabled, paused }),
+type KitchenConfig = Pick<KitchenStatus, 'concurrency' | 'staleAfterMinutes' | 'automationEnabled' | 'paused' | 'version'>;
+
+export async function saveKitchenConfig(
+  expectedVersion: number,
+  changes: Partial<Omit<KitchenConfig, 'version'>>,
+): Promise<KitchenConfig> {
+  const data = await request<KitchenConfig>('/kitchen/config', {
+    method: 'PATCH', body: JSON.stringify({ expectedVersion, ...changes }),
   });
   return data;
 }
@@ -258,6 +386,8 @@ export async function fetchPayments(): Promise<PaymentRecord[]> {
   return data.payments.map(payment => ({
     ...payment,
     tableNumber: Number(payment.tableNumber),
+    ...(payment.reservationId != null ? { reservationId: Number(payment.reservationId) } : {}),
+    ...(payment.guestCount != null ? { guestCount: Number(payment.guestCount) } : {}),
     subtotal: Number(payment.subtotal),
     discount: Number(payment.discount),
     serviceFee: Number(payment.serviceFee),
@@ -287,6 +417,8 @@ export async function recordPayment(payment: PaymentRecord): Promise<PaymentReco
   return {
     ...data.payment,
     tableNumber: Number(data.payment.tableNumber),
+    ...(data.payment.reservationId != null ? { reservationId: Number(data.payment.reservationId) } : {}),
+    ...(data.payment.guestCount != null ? { guestCount: Number(data.payment.guestCount) } : {}),
     subtotal: Number(data.payment.subtotal),
     discount: Number(data.payment.discount),
     serviceFee: Number(data.payment.serviceFee),

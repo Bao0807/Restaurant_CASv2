@@ -1,8 +1,9 @@
 import { useSyncExternalStore } from 'react';
 import { Clock3, Flame } from 'lucide-react';
 import type { Table } from '../data';
+import { getServerNowMs } from '../services/api';
 
-let clockNow = Date.now();
+let clockNow = getServerNowMs();
 let clockTimer: number | null = null;
 const clockListeners = new Set<() => void>();
 
@@ -10,9 +11,9 @@ const clockListeners = new Set<() => void>();
 function subscribeClock(listener: () => void) {
   clockListeners.add(listener);
   if (clockTimer === null) {
-    clockNow = Date.now();
+    clockNow = getServerNowMs();
     clockTimer = window.setInterval(() => {
-      clockNow = Date.now();
+      clockNow = getServerNowMs();
       clockListeners.forEach(notify => notify());
     }, 1000);
   }

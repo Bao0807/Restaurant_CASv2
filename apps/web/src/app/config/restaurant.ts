@@ -12,9 +12,10 @@ export const BRAND_ASSETS = {
 export const APP_VIEW_LABELS: Record<AppView, string> = {
   order: 'Gọi món',
   overview: 'Tổng quan bàn',
+  reservations: 'Đặt bàn trước',
   payment: 'Thanh toán',
   reports: 'Báo cáo vận hành',
-  dashboard: 'Dashboard quản lý',
+  dashboard: 'Quản trị',
 };
 
 export const PAYMENT_METHOD_LABELS: Record<PaymentMethodId, string> = {
@@ -55,7 +56,7 @@ export const DASHBOARD_WIDGETS = [
 export const DEFAULT_RESTAURANT_SETTINGS: RestaurantSettings = {
   restaurantName: 'Nhà hàng CAS',
   legalName: 'Core Advanced Solutions',
-  tagline: 'Restaurant Order Management',
+  tagline: 'Giải pháp vận hành nhà hàng',
   address: '127 Nguyễn Văn Linh, Quận 7, TP. Hồ Chí Minh',
   phone: '0900 123 456',
   email: 'hello@cas.vn',

@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
-  Banknote, Building2, CreditCard, QrCode, ReceiptText,
+  Banknote, Building2, CalendarDays, CreditCard, QrCode, ReceiptText,
   Save, Settings, ShoppingBag, SlidersHorizontal, Users, WalletCards, Wrench,
 } from 'lucide-react';
 import type { CartItem, KitchenStatus, MenuCategory, MenuItem, PaymentMethodId, PaymentRecord, ReportSummary, Table } from '../data';
@@ -9,7 +9,7 @@ import {
   BRAND_ASSETS, DASHBOARD_WIDGETS, DEFAULT_RESTAURANT_SETTINGS,
   PAYMENT_METHOD_LABELS, calculateInvoiceTotals, type RestaurantSettings,
 } from '../config/restaurant';
-import { buildHourlyReport, buildStaffReport, paymentsForLocalDay } from '../reporting';
+import { buildReportTimeline, buildStaffReport, type ReportPeriod } from '../reporting';
 import { fetchReportSummary } from '../services/api';
 
 const ManagementPanel = lazy(() => import('./ManagementPanel').then(module => ({ default: module.ManagementPanel })));
@@ -18,6 +18,13 @@ const OrdersChart = lazy(() => import('./DashboardCharts').then(module => ({ def
 
 type DashboardTab = 'reports' | 'management' | 'settings';
 type SettingsStatus = 'idle' | 'loading' | 'saving' | 'saved' | 'error';
+
+interface ReportRange {
+  from: Date;
+  to: Date;
+  label: string;
+  contextLabel: string;
+}
 
 interface DashboardPageProps {
   mode: 'reports' | 'admin';
@@ -47,11 +54,95 @@ function formatShort(value: number): string {
   return String(value);
 }
 
+const REPORT_PERIODS: Array<{ id: ReportPeriod; label: string }> = [
+  { id: 'day', label: 'Ngày' },
+  { id: 'week', label: 'Tuần' },
+  { id: 'month', label: 'Tháng' },
+];
+
+const REPORT_TIMELINE_COPY: Record<ReportPeriod, {
+  revenueTitle: string;
+  ordersTitle: string;
+  description: string;
+}> = {
+  day: {
+    revenueTitle: 'Doanh thu theo giờ',
+    ordersTitle: 'Số hóa đơn theo giờ',
+    description: 'Mỗi điểm biểu diễn một giờ trong ngày',
+  },
+  week: {
+    revenueTitle: 'Doanh thu theo ngày',
+    ordersTitle: 'Số hóa đơn theo ngày',
+    description: 'Từ Thứ Hai đến Chủ nhật',
+  },
+  month: {
+    revenueTitle: 'Doanh thu theo tuần',
+    ordersTitle: 'Số hóa đơn theo tuần',
+    description: 'Tuần đầu và cuối được cắt đúng theo phạm vi tháng',
+  },
+};
+
+const formatReportDate = (date: Date) => date.toLocaleDateString('vi-VN', {
+  day: '2-digit', month: '2-digit', year: 'numeric',
+});
+
+/** Tạo khoảng [from, to) theo giờ địa phương để khớp bộ lọc của API báo cáo. */
+function buildReportRange(period: ReportPeriod, reference = new Date()): ReportRange {
+  const from = new Date(reference);
+  from.setHours(0, 0, 0, 0);
+
+  if (period === 'week') {
+    const dayFromMonday = (from.getDay() + 6) % 7;
+    from.setDate(from.getDate() - dayFromMonday);
+  } else if (period === 'month') {
+    from.setDate(1);
+  }
+
+  const to = new Date(from);
+  if (period === 'day') to.setDate(to.getDate() + 1);
+  else if (period === 'week') to.setDate(to.getDate() + 7);
+  else to.setMonth(to.getMonth() + 1);
+
+  const inclusiveTo = new Date(to);
+  inclusiveTo.setDate(inclusiveTo.getDate() - 1);
+  const label = period === 'day'
+    ? formatReportDate(from)
+    : `${formatReportDate(from)} – ${formatReportDate(inclusiveTo)}`;
+
+  return {
+    from,
+    to,
+    label,
+    contextLabel: period === 'day' ? 'trong ngày' : period === 'week' ? 'trong tuần' : 'trong tháng',
+  };
+}
+
 function SectionTitle({ title, sub }: { title: string; sub?: string }) {
   return (
     <div style={{ marginBottom: 12 }}>
       <div style={{ fontWeight: 800, color: '#111827', fontSize: '15px' }}>{title}</div>
       {sub && <div style={{ color: '#6B7280', fontSize: '12px', marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function ChartStatus({ height, state }: { height: number; state: 'idle' | 'loading' | 'error' }) {
+  return (
+    <div
+      role="status"
+      style={{
+        height,
+        display: 'grid',
+        placeItems: 'center',
+        color: state === 'error' ? '#B45309' : '#64748B',
+        background: state === 'error' ? '#FFFBEB' : '#F8FAFC',
+        borderRadius: 8,
+        fontSize: 12,
+        textAlign: 'center',
+        padding: 16,
+      }}
+    >
+      {state === 'error' ? 'Chưa thể tải dữ liệu biểu đồ.' : 'Đang tổng hợp dữ liệu biểu đồ…'}
     </div>
   );
 }
@@ -122,6 +213,9 @@ export function DashboardPage({
   const [draft, setDraft] = useState<RestaurantSettings>(settings);
   const [reportSummary, setReportSummary] = useState<ReportSummary | null>(null);
   const [reportState, setReportState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [reportPeriod, setReportPeriod] = useState<ReportPeriod>('day');
+  const [reportReference, setReportReference] = useState(() => new Date());
+  const reportRange = useMemo(() => buildReportRange(reportPeriod, reportReference), [reportPeriod, reportReference]);
 
   useEffect(() => {
     setDraft(settings);
@@ -130,16 +224,19 @@ export function DashboardPage({
     setTab(mode === 'reports' ? 'reports' : 'management');
   }, [mode]);
   useEffect(() => {
+    const now = new Date();
+    const nextDay = new Date(now);
+    nextDay.setHours(24, 0, 1, 0);
+    const timer = window.setTimeout(() => setReportReference(new Date()), nextDay.getTime() - now.getTime());
+    return () => window.clearTimeout(timer);
+  }, [reportReference]);
+  useEffect(() => {
     if (mode !== 'reports') return undefined;
     let active = true;
     const loadReport = async () => {
       if (document.visibilityState === 'hidden') return;
-      const from = new Date();
-      from.setHours(0, 0, 0, 0);
-      const to = new Date(from);
-      to.setDate(to.getDate() + 1);
       try {
-        const summary = await fetchReportSummary(from, to);
+        const summary = await fetchReportSummary(reportRange.from, reportRange.to);
         if (!active) return;
         setReportSummary(summary);
         setReportState('ready');
@@ -147,6 +244,7 @@ export function DashboardPage({
         if (active) setReportState('error');
       }
     };
+    setReportSummary(null);
     setReportState('loading');
     void loadReport();
     const timer = window.setInterval(() => { void loadReport(); }, 30_000);
@@ -154,36 +252,38 @@ export function DashboardPage({
       active = false;
       window.clearInterval(timer);
     };
-  }, [mode, payments.length, payments[0]?.invoiceCode]);
+  }, [mode, payments.length, payments[0]?.invoiceCode, reportRange.from.getTime(), reportRange.to.getTime()]);
 
   const activeOrders = useMemo(() => flattenOrders(tableOrders), [tableOrders]);
-  const todayPayments = useMemo(() => paymentsForLocalDay(payments), [payments]);
+  const periodPayments = useMemo(() => payments.filter(payment => {
+    const paidAt = new Date(payment.paidAt).getTime();
+    return paidAt >= reportRange.from.getTime() && paidAt < reportRange.to.getTime();
+  }), [payments, reportRange.from, reportRange.to]);
   const pendingTotal = useMemo(() => Object.values(tableOrders).reduce(
     (sum, order) => sum + calculateInvoiceTotals(cartTotal(order), settings).total,
     0,
   ), [settings, tableOrders]);
   const paidRevenue = reportSummary?.totals.revenue
-    ?? todayPayments.reduce((sum, payment) => sum + payment.total, 0);
-  const paidOrders = reportSummary?.totals.orders ?? todayPayments.length;
+    ?? periodPayments.reduce((sum, payment) => sum + payment.total, 0);
+  const paidOrders = reportSummary?.totals.orders ?? periodPayments.length;
   const servingTables = tables.filter(table => ['waiting', 'cooking', 'done'].includes(table.status)).length;
 
-  const hourlyData = useMemo(() => {
-    if (!reportSummary) return buildHourlyReport(todayPayments);
-    const byHour = new Map(reportSummary.hourly.map(row => [row.hour, row]));
-    return Array.from({ length: 24 }, (_, hour) => ({
-      hour: `${hour}h`,
-      revenue: byHour.get(hour)?.revenue ?? 0,
-      orders: byHour.get(hour)?.orders ?? 0,
-    }));
-  }, [reportSummary, todayPayments]);
+  const timelineData = useMemo(() => buildReportTimeline({
+    period: reportPeriod,
+    from: reportRange.from,
+    to: reportRange.to,
+    payments: periodPayments,
+    summary: reportSummary,
+  }), [reportPeriod, reportRange.from, reportRange.to, reportSummary, periodPayments]);
+  const timelineCopy = REPORT_TIMELINE_COPY[reportPeriod];
   const staffPerformance = useMemo(() => {
-    if (!reportSummary) return buildStaffReport(todayPayments);
+    if (!reportSummary) return buildStaffReport(periodPayments);
     return reportSummary.staff.map(staff => ({
       ...staff,
       key: staff.employeeId || `name:${staff.name.toLocaleLowerCase('vi-VN')}`,
       averageBill: staff.orders ? Math.round(staff.revenue / staff.orders) : 0,
     }));
-  }, [reportSummary, todayPayments]);
+  }, [reportSummary, periodPayments]);
 
   const paymentMix = (['cash', 'card', 'qr'] as PaymentMethodId[]).map(method => {
     const aggregated = reportSummary?.paymentMethods.find(row => row.method === method);
@@ -191,8 +291,8 @@ export function DashboardPage({
       method,
       label: PAYMENT_METHOD_LABELS[method],
       amount: aggregated?.revenue
-        ?? todayPayments.filter(payment => payment.method === method).reduce((sum, payment) => sum + payment.total, 0),
-      count: aggregated?.orders ?? todayPayments.filter(payment => payment.method === method).length,
+        ?? periodPayments.filter(payment => payment.method === method).reduce((sum, payment) => sum + payment.total, 0),
+      count: aggregated?.orders ?? periodPayments.filter(payment => payment.method === method).length,
       ...METHOD_META[method],
     };
   });
@@ -246,15 +346,17 @@ export function DashboardPage({
               <img src={BRAND_ASSETS.mark} alt="CAS" style={{ width: 27, height: 27 }} />
             </div>
             <div style={{ minWidth: 0 }}>
-              <h1 style={{ margin: 0, color: '#111827', fontSize: '22px' }}>{mode === 'reports' ? 'Báo cáo vận hành' : 'Dashboard quản trị'}</h1>
+              <h1 style={{ margin: 0, color: '#111827', fontSize: '22px' }}>{mode === 'reports' ? 'Báo cáo vận hành' : 'Quản trị nhà hàng'}</h1>
               <p style={{ margin: '3px 0 0', color: '#6B7280', fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 {settings.restaurantName} · {new Date().toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' })}
               </p>
             </div>
           </div>
-          <div style={{ background: settingsStatus === 'error' ? '#FEF2F2' : '#F0FDFA', color: settingsStatus === 'error' ? '#B91C1C' : '#0F766E', border: `1px solid ${settingsStatus === 'error' ? '#FECACA' : '#99F6E4'}`, borderRadius: 8, padding: '7px 10px', fontSize: '11px', fontWeight: 800 }}>
-            {settingsStatus === 'saving' ? 'Đang lưu' : settingsStatus === 'saved' ? 'Đã đồng bộ' : settingsStatus === 'loading' ? 'Đang tải' : settingsStatus === 'error' ? 'Local' : 'Sẵn sàng'}
-          </div>
+          {mode === 'admin' && (
+            <div role="status" style={{ background: settingsStatus === 'error' ? '#FEF2F2' : '#F0FDFA', color: settingsStatus === 'error' ? '#B91C1C' : '#0F766E', border: `1px solid ${settingsStatus === 'error' ? '#FECACA' : '#99F6E4'}`, borderRadius: 8, padding: '7px 10px', fontSize: '11px', fontWeight: 800 }}>
+              {settingsStatus === 'saving' ? 'Đang lưu' : settingsStatus === 'saved' ? 'Đã đồng bộ' : settingsStatus === 'loading' ? 'Đang tải' : settingsStatus === 'error' ? 'Chưa đồng bộ' : 'Sẵn sàng'}
+            </div>
+          )}
         </div>
 
         {mode === 'admin' && <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
@@ -293,12 +395,34 @@ export function DashboardPage({
 
       {tab === 'reports' ? (
         <div className="dashboard-reports-page" style={{ padding: '14px 14px 96px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div className="report-filter-bar">
+            <div className="report-range-copy">
+              <span className="report-range-icon" aria-hidden="true"><CalendarDays size={19} /></span>
+              <span>
+                <strong>Khoảng báo cáo</strong>
+                <small>{reportRange.label}</small>
+              </span>
+            </div>
+            <div className="report-period-selector" role="group" aria-label="Chọn kỳ báo cáo">
+              {REPORT_PERIODS.map(period => (
+                <button
+                  key={period.id}
+                  type="button"
+                  className={reportPeriod === period.id ? 'active' : ''}
+                  aria-pressed={reportPeriod === period.id}
+                  onClick={() => setReportPeriod(period.id)}
+                >
+                  {period.label}
+                </button>
+              ))}
+            </div>
+          </div>
           {reportState === 'error' && (
             <div role="status" style={{ padding: '10px 12px', border: '1px solid #FDE68A', background: '#FFFBEB', color: '#92400E', borderRadius: 8, fontSize: 12 }}>
-              Chưa tải được API tổng hợp; các KPI cơ bản đang dùng danh sách hóa đơn gần nhất.
+              Không thể tải dữ liệu tổng hợp. Biểu đồ được tạm ẩn để tránh hiển thị số liệu thiếu; hãy kiểm tra kết nối và thử lại.
             </div>
           )}
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <div className="report-kpi-grid">
             {widgetVisible('revenue') && (
               <KpiCard
                 icon={<WalletCards size={18} />}
@@ -317,9 +441,6 @@ export function DashboardPage({
                 color="#EA580C"
               />
             )}
-          </div>
-
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <KpiCard
               icon={<Users size={18} />}
               label="Bàn đang dùng"
@@ -330,52 +451,56 @@ export function DashboardPage({
             <KpiCard
               icon={<ReceiptText size={18} />}
               label="Hóa đơn gần đây"
-              value={todayPayments[0]?.invoiceCode ?? 'CAS'}
-              sub={todayPayments[0] ? formatVND(todayPayments[0].total) : 'Chưa có giao dịch hôm nay'}
+              value={periodPayments[0]?.invoiceCode ?? '—'}
+              sub={periodPayments[0] ? formatVND(periodPayments[0].total) : 'Chưa có giao dịch trong kỳ'}
               color="#7C3AED"
             />
           </div>
 
-          {widgetVisible('revenue') && (
-            <div style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 8, padding: 16 }}>
-              <SectionTitle title="Doanh thu theo giờ" sub={todayPayments.length ? 'Theo hóa đơn đã thanh toán hôm nay' : 'Chưa có giao dịch hôm nay'} />
-              <Suspense fallback={<div style={{ height: 184 }} />}><RevenueChart data={hourlyData} /></Suspense>
-            </div>
-          )}
-
-          {widgetVisible('paymentMix') && (
-            <div style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 8, padding: 16 }}>
-              <SectionTitle title="Phương thức thanh toán" sub={`${todayPayments.length} giao dịch hôm nay`} />
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {paymentMix.map(item => (
-                  <div key={item.method}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-                        <div style={{ width: 32, height: 32, borderRadius: 8, background: item.bg, color: item.color, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                          {item.icon}
-                        </div>
-                        <div>
-                          <div style={{ fontSize: '13px', fontWeight: 700, color: '#111827' }}>{item.label}</div>
-                          <div style={{ fontSize: '11px', color: '#9CA3AF' }}>{item.count} giao dịch</div>
-                        </div>
-                      </div>
-                      <div style={{ fontWeight: 800, color: item.color, fontSize: '13px' }}>{formatVND(item.amount)}</div>
-                    </div>
-                    <div style={{ height: 6, borderRadius: 999, background: '#F3F4F6', overflow: 'hidden' }}>
-                      <div style={{ height: '100%', width: `${paidRevenue ? Math.round((item.amount / paidRevenue) * 100) : 0}%`, background: item.color }} />
-                    </div>
-                  </div>
-                ))}
+          <div className="report-insight-grid">
+            {widgetVisible('revenue') && (
+              <div className="report-card report-chart-card">
+                <SectionTitle title={timelineCopy.revenueTitle} sub={paidOrders ? `${timelineCopy.description} · ${reportRange.label}` : 'Chưa có giao dịch trong kỳ'} />
+                {reportState === 'ready' ? (
+                  <Suspense fallback={<ChartStatus height={184} state="loading" />}><RevenueChart data={timelineData} /></Suspense>
+                ) : <ChartStatus height={184} state={reportState === 'error' ? 'error' : 'loading'} />}
               </div>
-            </div>
-          )}
+            )}
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 14 }}>
+            {widgetVisible('paymentMix') && (
+              <div className="report-card">
+                <SectionTitle title="Phương thức thanh toán" sub={`${paidOrders} giao dịch ${reportRange.contextLabel}`} />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {paymentMix.map(item => (
+                    <div key={item.method}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+                          <div style={{ width: 32, height: 32, borderRadius: 8, background: item.bg, color: item.color, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            {item.icon}
+                          </div>
+                          <div>
+                            <div style={{ fontSize: '13px', fontWeight: 700, color: '#111827' }}>{item.label}</div>
+                            <div style={{ fontSize: '11px', color: '#9CA3AF' }}>{item.count} giao dịch</div>
+                          </div>
+                        </div>
+                        <div style={{ fontWeight: 800, color: item.color, fontSize: '13px' }}>{formatVND(item.amount)}</div>
+                      </div>
+                      <div style={{ height: 6, borderRadius: 999, background: '#F3F4F6', overflow: 'hidden' }}>
+                        <div style={{ height: '100%', width: `${paidRevenue ? Math.round((item.amount / paidRevenue) * 100) : 0}%`, background: item.color }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="report-insight-grid report-secondary-grid">
             {widgetVisible('topItems') && (
               <div style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 8, padding: 16 }}>
-                <SectionTitle title="Món bán chạy" sub="Tính theo món trên hóa đơn đã thanh toán hôm nay" />
+                <SectionTitle title="Món bán chạy" sub={`Tính theo hóa đơn đã thanh toán ${reportRange.contextLabel}`} />
                 {reportState === 'loading' && <div role="status" style={{ color: '#64748B', fontSize: 13, padding: '14px 0' }}>Đang tổng hợp dữ liệu món…</div>}
-                {reportState !== 'loading' && topItems.length === 0 && <div style={{ color: '#9CA3AF', fontSize: 13, padding: '14px 0' }}>Chưa có món đã thanh toán hôm nay.</div>}
+                {reportState !== 'loading' && topItems.length === 0 && <div style={{ color: '#9CA3AF', fontSize: 13, padding: '14px 0' }}>Chưa có món đã thanh toán trong kỳ.</div>}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
                   {topItems.map((item, index) => (
                     <div key={item.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: index < topItems.length - 1 ? '1px solid #F3F4F6' : 'none' }}>
@@ -395,17 +520,19 @@ export function DashboardPage({
 
             {widgetVisible('orders') && (
               <div style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 8, padding: 16 }}>
-                <SectionTitle title="Số đơn theo giờ" sub="Nhịp phục vụ trong ngày" />
-                <Suspense fallback={<div style={{ height: 140 }} />}><OrdersChart data={hourlyData} /></Suspense>
+                <SectionTitle title={timelineCopy.ordersTitle} sub={`${timelineCopy.description} · ${reportRange.label}`} />
+                {reportState === 'ready' ? (
+                  <Suspense fallback={<ChartStatus height={140} state="loading" />}><OrdersChart data={timelineData} /></Suspense>
+                ) : <ChartStatus height={140} state={reportState === 'error' ? 'error' : 'loading'} />}
               </div>
             )}
           </div>
 
           {widgetVisible('staff') && (
             <div style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 8, padding: 16 }}>
-              <SectionTitle title="Hiệu suất nhân viên" sub={`${staffPerformance.length} nhân viên có giao dịch hôm nay`} />
+              <SectionTitle title="Hiệu suất nhân viên" sub={`${staffPerformance.length} nhân viên có giao dịch ${reportRange.contextLabel}`} />
               {staffPerformance.length === 0 ? (
-                <div style={{ color: '#9CA3AF', fontSize: 13, padding: '14px 0' }}>Chưa có hóa đơn thanh toán hôm nay để tính hiệu suất.</div>
+                <div style={{ color: '#9CA3AF', fontSize: 13, padding: '14px 0' }}>Chưa có hóa đơn trong kỳ để tính hiệu suất.</div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column' }}>
                   {staffPerformance.map((staff, index) => (
@@ -432,7 +559,7 @@ export function DashboardPage({
           <div style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 8, padding: 16 }}>
             <SectionTitle title="Danh mục doanh thu" sub="Giá trị món trước giảm giá, phí dịch vụ và thuế" />
             {reportState === 'loading' && <div role="status" style={{ color: '#64748B', fontSize: 13, padding: '14px 0' }}>Đang tổng hợp danh mục…</div>}
-            {reportState !== 'loading' && categoryRevenue.length === 0 && <div style={{ color: '#9CA3AF', fontSize: 13, padding: '14px 0' }}>Chưa có món đã thanh toán hôm nay.</div>}
+            {reportState !== 'loading' && categoryRevenue.length === 0 && <div style={{ color: '#9CA3AF', fontSize: 13, padding: '14px 0' }}>Chưa có món đã thanh toán trong kỳ.</div>}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {categoryRevenue.map(category => {
                 const percentage = categoryTotal ? Math.round((category.revenue / categoryTotal) * 100) : 0;
@@ -475,7 +602,7 @@ export function DashboardPage({
               <Field label="Tên pháp lý">
                 <input style={inputStyle} value={draft.legalName} onChange={event => updateDraft('legalName', event.target.value)} />
               </Field>
-              <Field label="Tagline">
+              <Field label="Khẩu hiệu">
                 <input style={inputStyle} value={draft.tagline} onChange={event => updateDraft('tagline', event.target.value)} />
               </Field>
               <Field label="Địa chỉ">
@@ -568,7 +695,7 @@ export function DashboardPage({
           </div>
 
           <div className="dashboard-settings-card" style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 8, padding: 16 }}>
-            <SectionTitle title="Widget dashboard" sub="Các khối hiển thị trong báo cáo" />
+            <SectionTitle title="Khối báo cáo" sub="Chọn các phần cần hiển thị trong báo cáo" />
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
               {DASHBOARD_WIDGETS.map(widget => {
                 const active = draft.visibleDashboardWidgets.includes(widget.id);

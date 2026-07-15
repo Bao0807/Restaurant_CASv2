@@ -39,10 +39,10 @@ export function OrderSuccessStep({ orderNumber, table, cart, batch, isEditing, o
           <CheckCircle size={40} color="#10B981" fill="#10B981" />
         </div>
         <h2 style={{ margin: '0 0 6px', color: '#111827' }}>
-          {isEditing ? 'Phiếu chờ đã được cập nhật!' : isAddition ? 'Lượt gọi thêm đã vào hàng đợi!' : 'Order đã gửi bếp!'}
+          {isEditing ? 'Phiếu chờ đã được cập nhật!' : isAddition ? 'Lượt gọi thêm đã vào hàng đợi!' : 'Phiếu đã gửi bếp!'}
         </h2>
         <p style={{ margin: 0, color: '#6B7280', fontSize: '14px' }}>
-          Order #{orderNumber} · Lượt {batch?.batchNumber ?? 1} · Bàn {table.number}
+          Phiếu #{orderNumber} · Lượt {batch?.batchNumber ?? 1} · Bàn {table.number}
         </p>
       </div>
 
@@ -59,7 +59,7 @@ export function OrderSuccessStep({ orderNumber, table, cart, batch, isEditing, o
                 <div style={{ color: '#fff', fontWeight: 700, fontSize: '15px' }}>
                   {isEditing ? 'PHIẾU ĐÃ CẬP NHẬT' : isAddition ? 'PHIẾU GỌI THÊM' : 'PHIẾU GỌI MÓN'}
                 </div>
-                <div style={{ color: '#9CA3AF', fontSize: '12px', marginTop: 2 }}>Order #{orderNumber} · Lượt {batch?.batchNumber ?? 1}</div>
+                <div style={{ color: '#9CA3AF', fontSize: '12px', marginTop: 2 }}>Phiếu #{orderNumber} · Lượt {batch?.batchNumber ?? 1}</div>
                 </div>
               </div>
               <div style={{ textAlign: 'right' }}>
@@ -134,7 +134,7 @@ export function OrderSuccessStep({ orderNumber, table, cart, batch, isEditing, o
           <p style={{ margin: 0, fontSize: '13px', color: '#92400E', lineHeight: 1.5 }}>
             {isEditing
               ? 'Phiếu giữ nguyên vị trí FIFO và thời điểm vào hàng chờ. '
-              : isAddition ? 'Phiếu gọi thêm được xếp FIFO như một lượt độc lập. ' : 'Order đã được gửi đến bếp. '}
+              : isAddition ? 'Phiếu gọi thêm được xếp FIFO như một lượt độc lập. ' : 'Phiếu gọi món đã được gửi đến bếp. '}
             Khi thanh toán, toàn bộ các lượt của bàn sẽ được gộp vào một hóa đơn cuối.
           </p>
         </div>

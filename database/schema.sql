@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS restaurant_settings (
   id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
   settings JSON NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT chk_settings_singleton CHECK (id = 1)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS restaurant_tables (
@@ -21,12 +22,53 @@ CREATE TABLE IF NOT EXISTS restaurant_tables (
   table_number INT UNSIGNED NOT NULL UNIQUE,
   seats INT UNSIGNED NOT NULL,
   status VARCHAR(20) NOT NULL DEFAULT 'empty',
-  reserved_time VARCHAR(10) NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT chk_restaurant_table_number CHECK (table_number BETWEEN 1 AND 999),
   CONSTRAINT chk_restaurant_table_seats CHECK (seats BETWEEN 1 AND 100),
-  CONSTRAINT chk_restaurant_table_status CHECK (status IN ('empty', 'waiting', 'cooking', 'done', 'reserved')),
+  CONSTRAINT chk_restaurant_table_status CHECK (status IN ('empty', 'waiting', 'cooking', 'done')),
   INDEX idx_restaurant_table_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS reservations (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  reservation_code VARCHAR(32) NOT NULL UNIQUE,
+  table_id VARCHAR(32) NULL,
+  table_number INT UNSIGNED NOT NULL,
+  customer_name VARCHAR(120) NOT NULL,
+  customer_phone VARCHAR(32) NOT NULL,
+  phone_normalized VARCHAR(15) NOT NULL,
+  party_size INT UNSIGNED NOT NULL,
+  reserved_at DATETIME(3) NOT NULL,
+  ends_at DATETIME(3) NOT NULL,
+  duration_minutes INT UNSIGNED NOT NULL DEFAULT 120,
+  status VARCHAR(20) NOT NULL DEFAULT 'booked',
+  seated_table_id VARCHAR(32) NULL,
+  version INT UNSIGNED NOT NULL DEFAULT 1,
+  notes VARCHAR(500) NOT NULL DEFAULT '',
+  seated_at DATETIME(3) NULL,
+  closed_at DATETIME(3) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_reservation_table FOREIGN KEY (table_id) REFERENCES restaurant_tables(id) ON DELETE SET NULL,
+  CONSTRAINT chk_reservation_phone CHECK (phone_normalized REGEXP '^[0-9]{8,15}$'),
+  CONSTRAINT chk_reservation_table_number CHECK (table_number BETWEEN 1 AND 999),
+  CONSTRAINT chk_reservation_party_size CHECK (party_size BETWEEN 1 AND 100),
+  CONSTRAINT chk_reservation_duration CHECK (duration_minutes BETWEEN 30 AND 480),
+  CONSTRAINT chk_reservation_status CHECK (status IN ('booked', 'seated', 'cancelled', 'no_show', 'completed')),
+  CONSTRAINT chk_reservation_window CHECK (ends_at = TIMESTAMPADD(MINUTE, duration_minutes, reserved_at)),
+  CONSTRAINT chk_reservation_version CHECK (version >= 1),
+  CONSTRAINT chk_reservation_lifecycle CHECK (
+    (status = 'booked' AND seated_at IS NULL AND closed_at IS NULL)
+    OR (status = 'seated' AND seated_at IS NOT NULL AND closed_at IS NULL)
+    OR (status IN ('cancelled', 'no_show') AND seated_at IS NULL AND closed_at IS NOT NULL)
+    OR (status = 'completed' AND seated_at IS NOT NULL AND closed_at IS NOT NULL AND closed_at >= seated_at)
+  ),
+  CONSTRAINT uq_reservation_id_table UNIQUE (id, table_id),
+  CONSTRAINT uq_reservation_seated_table UNIQUE (seated_table_id),
+  INDEX idx_reservation_schedule (status, reserved_at, ends_at),
+  INDEX idx_reservation_table_schedule (table_id, status, reserved_at, ends_at),
+  INDEX idx_reservation_phone (phone_normalized, reserved_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS menu_categories (
@@ -63,6 +105,7 @@ CREATE TABLE IF NOT EXISTS menu_items (
 CREATE TABLE IF NOT EXISTS active_orders (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   table_id VARCHAR(32) NOT NULL UNIQUE,
+  reservation_id BIGINT UNSIGNED NULL,
   items JSON NOT NULL,
   queued_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   cooking_started_at DATETIME(3) NULL,
@@ -72,6 +115,10 @@ CREATE TABLE IF NOT EXISTS active_orders (
   CONSTRAINT fk_active_order_table
     FOREIGN KEY (table_id) REFERENCES restaurant_tables(id)
     ON DELETE CASCADE,
+  CONSTRAINT fk_active_order_reservation_table
+    FOREIGN KEY (reservation_id, table_id) REFERENCES reservations(id, table_id),
+  CONSTRAINT uq_active_order_reservation UNIQUE (reservation_id),
+  CONSTRAINT uq_active_order_id_table UNIQUE (id, table_id),
   INDEX idx_active_order_queue (queued_at, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -89,7 +136,7 @@ CREATE TABLE IF NOT EXISTS order_batches (
   estimated_cook_minutes INT UNSIGNED NOT NULL DEFAULT 10,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  CONSTRAINT fk_order_batch_order FOREIGN KEY (order_id) REFERENCES active_orders(id) ON DELETE CASCADE,
+  CONSTRAINT fk_order_batch_order_table FOREIGN KEY (order_id, table_id) REFERENCES active_orders(id, table_id) ON DELETE CASCADE,
   CONSTRAINT uq_order_batch_number UNIQUE (order_id, batch_number),
   CONSTRAINT chk_order_batch_status CHECK (status IN ('waiting', 'cooking', 'done')),
   CONSTRAINT chk_order_batch_eta CHECK (estimated_cook_minutes BETWEEN 1 AND 23760),
@@ -103,7 +150,13 @@ CREATE TABLE IF NOT EXISTS kitchen_queue_state (
   stale_after_minutes INT UNSIGNED NOT NULL DEFAULT 120,
   automation_enabled BOOLEAN NOT NULL DEFAULT TRUE,
   paused BOOLEAN NOT NULL DEFAULT FALSE,
-  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  version BIGINT UNSIGNED NOT NULL DEFAULT 1,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT chk_kitchen_singleton CHECK (id = 1),
+  CONSTRAINT chk_kitchen_concurrency CHECK (concurrency BETWEEN 1 AND 20),
+  CONSTRAINT chk_kitchen_stale CHECK (stale_after_minutes BETWEEN 15 AND 1440),
+  CONSTRAINT chk_kitchen_flags CHECK (automation_enabled IN (0, 1) AND paused IN (0, 1)),
+  CONSTRAINT chk_kitchen_version CHECK (version >= 1)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS employees (
@@ -127,6 +180,10 @@ CREATE TABLE IF NOT EXISTS payment_transactions (
   transaction_code VARCHAR(64) NOT NULL,
   table_id VARCHAR(32) NOT NULL,
   table_number INT NOT NULL,
+  reservation_id BIGINT UNSIGNED NULL,
+  reservation_code VARCHAR(32) NULL,
+  customer_name VARCHAR(120) NULL,
+  guest_count INT UNSIGNED NULL,
   payment_method VARCHAR(20) NOT NULL,
   subtotal INT NOT NULL DEFAULT 0,
   discount INT NOT NULL DEFAULT 0,
@@ -142,9 +199,16 @@ CREATE TABLE IF NOT EXISTS payment_transactions (
   raw_payload JSON NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_payment_staff FOREIGN KEY (staff_id) REFERENCES employees(id) ON DELETE SET NULL,
+  CONSTRAINT fk_payment_reservation FOREIGN KEY (reservation_id) REFERENCES reservations(id) ON DELETE SET NULL,
+  CONSTRAINT chk_payment_guest_count CHECK (guest_count IS NULL OR guest_count BETWEEN 1 AND 100),
+  CONSTRAINT chk_payment_reservation_snapshot CHECK (
+    (reservation_code IS NULL AND customer_name IS NULL AND guest_count IS NULL)
+    OR (reservation_code IS NOT NULL AND customer_name IS NOT NULL AND guest_count IS NOT NULL)
+  ),
   INDEX idx_paid_at (paid_at),
   INDEX idx_table_id (table_id),
-  INDEX idx_payment_staff (staff_id, paid_at)
+  INDEX idx_payment_staff (staff_id, paid_at),
+  INDEX idx_payment_reservation (reservation_id, paid_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS payment_items (
@@ -173,7 +237,7 @@ VALUES (
   JSON_OBJECT(
     'restaurantName', 'Nhà hàng CAS',
     'legalName', 'Core Advanced Solutions',
-    'tagline', 'Restaurant Order Management',
+    'tagline', 'Giải pháp vận hành nhà hàng',
     'address', '127 Nguyễn Văn Linh, Quận 7, TP. Hồ Chí Minh',
     'phone', '0900 123 456',
     'email', 'hello@cas.vn',

@@ -1,8 +1,44 @@
 export type TableStatus = 'empty' | 'waiting' | 'cooking' | 'done' | 'reserved';
-export type AppView = 'order' | 'overview' | 'payment' | 'reports' | 'dashboard';
+export type AppView = 'order' | 'overview' | 'reservations' | 'payment' | 'reports' | 'dashboard';
 export type OrderStep = 'tables' | 'menu' | 'confirm' | 'success';
 export type PaymentMethodId = 'cash' | 'card' | 'qr';
 export type EmployeeRole = 'manager' | 'cashier' | 'server' | 'chef';
+export type ReservationStatus = 'booked' | 'seated' | 'cancelled' | 'no_show' | 'completed';
+
+export interface NextReservation {
+  id: number;
+  code: string;
+  customerName: string;
+  partySize: number;
+  reservedAt: string;
+  endsAt: string;
+  status: Extract<ReservationStatus, 'booked' | 'seated'>;
+}
+
+export interface Reservation extends Omit<NextReservation, 'status'> {
+  version: number;
+  tableId?: string | null;
+  tableNumber: number;
+  tableSeats?: number;
+  customerPhone: string;
+  durationMinutes: number;
+  status: ReservationStatus;
+  notes: string;
+  seatedAt?: string;
+  closedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReservationInput {
+  tableId: string;
+  customerName: string;
+  customerPhone: string;
+  partySize: number;
+  reservedAt: string;
+  durationMinutes: number;
+  notes: string;
+}
 
 export interface Employee {
   id: string;
@@ -22,7 +58,6 @@ export interface Table {
   number: number;
   seats: number;
   status: TableStatus;
-  reservedTime?: string;
   orderNumber?: number;
   queuedAt?: string;
   cookingStartedAt?: string;
@@ -36,6 +71,7 @@ export interface Table {
   cookingBatchCount?: number;
   doneBatchCount?: number;
   latestBatchNumber?: number;
+  nextReservation?: NextReservation | null;
 }
 
 export interface KitchenStatus {
@@ -43,9 +79,22 @@ export interface KitchenStatus {
   cookingCount: number;
   waitingCount: number;
   staleCount: number;
+  staleBatches: KitchenStaleBatch[];
   staleAfterMinutes: number;
   automationEnabled: boolean;
   paused: boolean;
+  version: number;
+}
+
+export interface KitchenStaleBatch {
+  batchId: number;
+  batchNumber: number;
+  tableId: string;
+  tableNumber: number;
+  orderNumber: number;
+  isAddition: boolean;
+  cookingStartedAt: string;
+  estimatedCookMinutes: number;
 }
 
 export interface MenuCategory {
@@ -106,6 +155,10 @@ export interface PaymentRecord {
   transactionCode: string;
   tableId: string;
   tableNumber: number;
+  reservationId?: number | null;
+  reservationCode?: string | null;
+  customerName?: string | null;
+  guestCount?: number | null;
   method: PaymentMethodId;
   subtotal: number;
   discount: number;
@@ -123,6 +176,7 @@ export interface ReportSummary {
   range: { from: string; to: string; timezoneOffsetMinutes?: number };
   totals: { revenue: number; orders: number; itemCount: number; averageBill: number };
   hourly: Array<{ hour: number; revenue: number; orders: number }>;
+  daily: Array<{ date: string; revenue: number; orders: number }>;
   paymentMethods: Array<{ method: PaymentMethodId; revenue: number; orders: number }>;
   topItems: Array<{ id: string; name: string; quantity: number; revenue: number }>;
   categories: Array<{ id: string; name: string; quantity: number; revenue: number }>;
@@ -152,6 +206,18 @@ export function cartEstimatedCookMinutes(items: CartItem[]): number {
 
 export function formatVND(amount: number): string {
   return new Intl.NumberFormat('vi-VN').format(amount) + 'đ';
+}
+
+/** Hiển thị giờ nếu lịch trong hôm nay, thêm ngày cho lịch ở ngày khác. */
+export function formatReservationSlot(value: string): string {
+  const date = new Date(value);
+  const today = new Date();
+  const sameDay = date.getFullYear() === today.getFullYear()
+    && date.getMonth() === today.getMonth()
+    && date.getDate() === today.getDate();
+  return date.toLocaleString('vi-VN', sameDay
+    ? { hour: '2-digit', minute: '2-digit' }
+    : { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
 export function genId(): string {

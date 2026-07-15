@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Bot, ChefHat, CirclePlus, Pause, Play, RotateCcw, Save, StepForward, Trash2, UserRoundPlus, UsersRound, UtensilsCrossed } from 'lucide-react';
-import type { Employee, EmployeeRole, KitchenStatus, MenuCategory, MenuItem, Table, TableStatus } from '../data';
-import { formatVND } from '../data';
+import type { Employee, EmployeeRole, KitchenStaleBatch, KitchenStatus, MenuCategory, MenuItem, Table } from '../data';
+import { formatVND, STATUS_CONFIG } from '../data';
 import {
   createTable,
   deactivateEmployee,
@@ -36,21 +36,25 @@ const EMPLOYEE_ROLE_LABELS: Record<EmployeeRole, string> = {
 };
 
 type ConfirmAction = (title: string, message: string, confirmLabel: string) => Promise<boolean>;
+type ManagementSection = 'kitchen' | 'menu' | 'tables' | 'employees';
 
 function TableEditor({ table, onChanged, report, confirmAction }: { table: Table; onChanged: Props['onChanged']; report: (message: string, error?: boolean) => void; confirmAction: ConfirmAction }) {
   const [draft, setDraft] = useState(table);
-  useEffect(() => setDraft(table), [table.number, table.seats, table.status, table.reservedTime]);
+  useEffect(() => setDraft(table), [table.number, table.seats, table.status]);
 
   const persist = async () => {
     try {
-      await saveTable(draft);
+      await saveTable({
+        ...draft,
+        status: table.orderNumber ? table.status : 'empty',
+      });
       await onChanged();
       report(`Đã cập nhật bàn ${draft.number}`);
     } catch (error) { report(error instanceof Error ? error.message : 'Không thể cập nhật bàn', true); }
   };
 
   const remove = async () => {
-    if (!await confirmAction('Xóa bàn?', `Bàn ${table.number} sẽ bị xóa khỏi sơ đồ. Chỉ bàn không có order mới thực hiện được.`, 'Xóa bàn')) return;
+    if (!await confirmAction('Xóa bàn?', `Bàn ${table.number} sẽ bị xóa khỏi sơ đồ. Chỉ bàn không có phiếu phục vụ mới xóa được.`, 'Xóa bàn')) return;
     try {
       await removeTable(table.id);
       await onChanged();
@@ -62,17 +66,12 @@ function TableEditor({ table, onChanged, report, confirmAction }: { table: Table
     <div className="management-row">
       <input aria-label="Số bàn" className={inputClass} type="number" min={1} value={draft.number} onChange={event => setDraft({ ...draft, number: Number(event.target.value) })} />
       <input aria-label="Số ghế" className={inputClass} type="number" min={1} value={draft.seats} onChange={event => setDraft({ ...draft, seats: Number(event.target.value) })} />
-      <select
-        aria-label={table.orderNumber ? 'Trạng thái do hàng đợi bếp quản lý' : 'Trạng thái'}
-        title={table.orderNumber ? 'Dùng thao tác order/bếp để đổi trạng thái' : 'Trạng thái bàn'}
-        className={inputClass}
-        value={draft.status}
-        disabled={Boolean(table.orderNumber)}
-        onChange={event => setDraft({ ...draft, status: event.target.value as TableStatus })}
-      >
-        <option value="empty">Trống</option><option value="reserved">Đặt trước</option>
-        {table.orderNumber && <><option value="waiting">Đang chờ</option><option value="cooking">Đang nấu</option><option value="done">Đã xong</option></>}
-      </select>
+      <div className="management-table-status" title="Trạng thái được đồng bộ từ đặt bàn và hàng đợi bếp">
+        <strong>{STATUS_CONFIG[table.status].label}</strong>
+        <small>{table.nextReservation
+          ? `${new Date(table.nextReservation.reservedAt).toLocaleString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })} · ${table.nextReservation.customerName}`
+          : table.orderNumber ? 'Bếp tự đồng bộ' : 'Sẵn sàng phục vụ'}</small>
+      </div>
       <button className="management-icon-button primary" aria-label={`Lưu bàn ${table.number}`} onClick={() => void persist()} title="Lưu bàn"><Save size={16} /></button>
       <button className="management-icon-button danger" aria-label={`Xóa bàn ${table.number}`} onClick={() => void remove()} title="Xóa bàn"><Trash2 size={16} /></button>
     </div>
@@ -80,10 +79,14 @@ function TableEditor({ table, onChanged, report, confirmAction }: { table: Table
 }
 
 export function ManagementPanel({ tables, categories, menuItems, kitchen, onChanged }: Props) {
+  const [activeSection, setActiveSection] = useState<ManagementSection>('kitchen');
   const [concurrency, setConcurrency] = useState(kitchen.concurrency);
   const [staleAfterMinutes, setStaleAfterMinutes] = useState(kitchen.staleAfterMinutes);
   const [automationEnabled, setAutomationEnabled] = useState(kitchen.automationEnabled);
   const [paused, setPaused] = useState(kitchen.paused);
+  const [kitchenVersion, setKitchenVersion] = useState(kitchen.version);
+  const [kitchenBusy, setKitchenBusy] = useState(false);
+  const kitchenBusyRef = useRef(false);
   const [newTable, setNewTable] = useState({ number: Math.max(0, ...tables.map(table => table.number)) + 1, seats: 4 });
   const [selectedItemId, setSelectedItemId] = useState('new');
   const emptyDish = { name: '', description: '', price: 0, image: '', categoryId: categories[0]?.id ?? '', cookMinutes: 10, available: true };
@@ -97,12 +100,16 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
   const [confirmation, setConfirmation] = useState<{
     title: string; message: string; confirmLabel: string; resolve: (confirmed: boolean) => void;
   } | null>(null);
-  const staleTables = tables.filter(table => table.kitchenStale);
+  const staleBatches = kitchen.staleBatches ?? [];
 
-  useEffect(() => setConcurrency(kitchen.concurrency), [kitchen.concurrency]);
-  useEffect(() => setStaleAfterMinutes(kitchen.staleAfterMinutes), [kitchen.staleAfterMinutes]);
-  useEffect(() => setAutomationEnabled(kitchen.automationEnabled), [kitchen.automationEnabled]);
-  useEffect(() => setPaused(kitchen.paused), [kitchen.paused]);
+  useEffect(() => {
+    if (kitchen.version <= kitchenVersion) return;
+    setConcurrency(kitchen.concurrency);
+    setStaleAfterMinutes(kitchen.staleAfterMinutes);
+    setAutomationEnabled(kitchen.automationEnabled);
+    setPaused(kitchen.paused);
+    setKitchenVersion(kitchen.version);
+  }, [kitchen.automationEnabled, kitchen.concurrency, kitchen.paused, kitchen.staleAfterMinutes, kitchen.version, kitchenVersion]);
   useEffect(() => {
     if (selectedItemId === 'new') return;
     const selected = menuItems.find(item => item.id === selectedItemId);
@@ -147,7 +154,7 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
   };
 
   const deactivate = async () => {
-    if (!dish.id || !await confirmAction('Ngừng bán món?', `${dish.name} sẽ không còn xuất hiện trong order mới.`, 'Ngừng bán')) return;
+    if (!dish.id || !await confirmAction('Ngừng bán món?', `${dish.name} sẽ không còn xuất hiện trong lượt gọi mới.`, 'Ngừng bán')) return;
     try { await deactivateMenuItem(dish.id); await onChanged(); report('Đã ngừng phục vụ món'); }
     catch (error) { report(error instanceof Error ? error.message : 'Không thể cập nhật món', true); }
   };
@@ -207,76 +214,135 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
   };
 
   /** Cho quản lý giải phóng slot bị giữ bởi order nấu quá lâu. */
-  const resolveStaleOrder = async (table: Table, action: 'requeue' | 'done') => {
+  const resolveStaleOrder = async (batch: KitchenStaleBatch, action: 'requeue' | 'done') => {
+    if (kitchenBusyRef.current) return;
+    kitchenBusyRef.current = true;
+    setKitchenBusy(true);
     try {
-      if (!table.cookingBatchId) throw new Error('Phiếu đang nấu đã thay đổi. Hãy tải lại dữ liệu.');
-      if (action === 'requeue') await requeueOrder(table.id, table.cookingBatchId);
-      else await updateTableStatus(table.id, 'done', table.cookingBatchId);
+      if (action === 'requeue') await requeueOrder(batch.tableId, batch.batchId);
+      else await updateTableStatus(batch.tableId, 'done', batch.batchId);
       await onChanged();
-      report(action === 'requeue' ? `Đã đưa bàn ${table.number} về cuối hàng chờ` : `Đã hoàn tất order bàn ${table.number}`);
+      report(action === 'requeue'
+        ? `Đã đưa lượt #${batch.batchNumber} của bàn ${batch.tableNumber} về cuối hàng chờ`
+        : `Đã hoàn tất lượt #${batch.batchNumber} của bàn ${batch.tableNumber}`);
     } catch (error) {
-      report(error instanceof Error ? error.message : 'Không thể xử lý order quá hạn', true);
+      report(error instanceof Error ? error.message : 'Không thể xử lý phiếu quá hạn', true);
+    } finally {
+      kitchenBusyRef.current = false;
+      setKitchenBusy(false);
     }
   };
 
-  /** Lưu toàn bộ state bếp cùng lúc để UI và queue không lệch chế độ. */
-  const persistKitchen = async (nextAutomation = automationEnabled, nextPaused = paused) => {
+  /** Chỉ gửi trường vừa đổi và dùng version để không ghi đè cấu hình từ máy POS khác. */
+  const persistKitchen = async (changes: Partial<Pick<KitchenStatus, 'concurrency' | 'staleAfterMinutes' | 'automationEnabled' | 'paused'>>) => {
+    if (kitchenBusyRef.current) return;
+    kitchenBusyRef.current = true;
+    setKitchenBusy(true);
     try {
-      await saveKitchenConfig(concurrency, staleAfterMinutes, nextAutomation, nextPaused);
-      setAutomationEnabled(nextAutomation);
-      setPaused(nextPaused);
+      const saved = await saveKitchenConfig(kitchenVersion, changes);
+      setConcurrency(saved.concurrency);
+      setStaleAfterMinutes(saved.staleAfterMinutes);
+      setAutomationEnabled(saved.automationEnabled);
+      setPaused(saved.paused);
+      setKitchenVersion(saved.version);
       await onChanged();
       report('Đã cập nhật chế độ vận hành bếp');
     } catch (error) {
       report(error instanceof Error ? error.message : 'Không thể lưu cấu hình bếp', true);
+      await Promise.resolve(onChanged()).catch(() => {});
+    } finally {
+      kitchenBusyRef.current = false;
+      setKitchenBusy(false);
     }
   };
 
   const dispatchNext = async () => {
+    if (kitchenBusyRef.current) return;
+    kitchenBusyRef.current = true;
+    setKitchenBusy(true);
     try {
       const count = await dispatchNextKitchenOrder();
       await onChanged();
-      report(count > 0 ? 'Đã lấy order đầu hàng chờ vào bếp' : 'Không có order chờ hoặc bếp đã đủ công suất');
+      report(count > 0 ? 'Đã đưa phiếu đầu hàng chờ vào bếp' : 'Không có phiếu chờ hoặc bếp đã đủ công suất');
     } catch (error) {
-      report(error instanceof Error ? error.message : 'Không thể điều phối order', true);
+      report(error instanceof Error ? error.message : 'Không thể điều phối phiếu', true);
+    } finally {
+      kitchenBusyRef.current = false;
+      setKitchenBusy(false);
     }
   };
+
+  const canDispatch = !kitchen.paused && !kitchen.automationEnabled && kitchen.waitingCount > 0
+    && kitchen.cookingCount < kitchen.concurrency && !kitchenBusy;
 
   return (
     <div className="management-panel">
       {notice && <div className={`management-notice ${notice.error ? 'error' : ''}`}>{notice.message}</div>}
 
-      {staleTables.length > 0 && (
+      <nav className="management-section-nav" aria-label="Khu vực quản trị">
+        <div className="management-section-tabs" role="group" aria-label="Chọn khu vực quản trị">
+          {([
+            { id: 'kitchen', label: 'Bếp', detail: staleBatches.length ? `${staleBatches.length} phiếu quá hạn` : `${kitchen.cookingCount} nấu · ${kitchen.waitingCount} chờ`, icon: staleBatches.length ? <AlertTriangle size={18} /> : <ChefHat size={18} /> },
+            { id: 'menu', label: 'Thực đơn', detail: `${menuItems.length} món · ${categories.length} danh mục`, icon: <UtensilsCrossed size={18} /> },
+            { id: 'tables', label: 'Bàn', detail: `${tables.length} bàn`, icon: <CirclePlus size={18} /> },
+            { id: 'employees', label: 'Nhân viên', detail: `${employees.filter(row => row.active).length} hoạt động`, icon: <UsersRound size={18} /> },
+          ] as const).map(section => (
+            <button
+              key={section.id}
+              id={`management-tab-${section.id}`}
+              type="button"
+              aria-pressed={activeSection === section.id}
+              aria-controls={`management-panel-${section.id}`}
+              className={activeSection === section.id ? 'active' : ''}
+              onClick={() => setActiveSection(section.id)}
+            >
+              {section.icon}
+              <span><strong>{section.label}</strong><small>{section.detail}</small></span>
+            </button>
+          ))}
+        </div>
+      </nav>
+
+      {activeSection === 'kitchen' && staleBatches.length > 0 && (
         <section className="management-stale-alert">
-          <div className="management-title"><AlertTriangle size={21} /><div><strong>{staleTables.length} order bếp quá hạn</strong><span>Đã nấu quá {kitchen.staleAfterMinutes} phút và đang chiếm công suất bếp</span></div></div>
+          <div className="management-title"><AlertTriangle size={21} /><div><strong>{staleBatches.length} phiếu bếp quá hạn</strong><span>Đã vượt ETA thêm {kitchen.staleAfterMinutes} phút và đang chiếm công suất bếp</span></div></div>
           <div className="management-stale-list">
-            {staleTables.map(table => (
-              <div key={table.id} className="management-stale-row">
-                <strong>Bàn {table.number}</strong>
-                <span>Order #{table.orderNumber}</span>
-                <button className="management-button secondary" onClick={() => void resolveStaleOrder(table, 'requeue')}><RotateCcw size={15} /> Xếp lại</button>
-                <button className="management-button" onClick={() => void resolveStaleOrder(table, 'done')}><Save size={15} /> Đã xong</button>
+            {staleBatches.map(batch => (
+              <div key={batch.batchId} className="management-stale-row">
+                <strong>Bàn {batch.tableNumber}</strong>
+                <span>Lượt #{batch.batchNumber}{batch.isAddition ? ' · gọi thêm' : ''}</span>
+                <button type="button" className="management-button secondary" disabled={kitchenBusy} onClick={() => void resolveStaleOrder(batch, 'requeue')}><RotateCcw size={15} /> Xếp lại</button>
+                <button type="button" className="management-button" disabled={kitchenBusy} onClick={() => void resolveStaleOrder(batch, 'done')}><Save size={15} /> Đã xong</button>
               </div>
             ))}
           </div>
         </section>
       )}
 
-      <section className="management-card">
+      {activeSection === 'kitchen' && <section
+        id="management-panel-kitchen"
+        role="region"
+        aria-labelledby="management-tab-kitchen"
+        className="management-card management-primary-card"
+      >
         <div className="management-title"><ChefHat size={20} /><div><strong>Cấu hình bếp</strong><span>{kitchen.cookingCount} đang nấu · {kitchen.waitingCount} đang chờ</span></div><span className={`kitchen-mode-badge ${paused ? 'paused' : automationEnabled ? 'auto' : 'manual'}`}>{paused ? 'Đang tạm dừng' : automationEnabled ? 'Tự động FIFO' : 'Điều phối thủ công'}</span></div>
-        <div className="management-actions"><label>Số order nấu song song<input className={inputClass} type="number" min={1} max={20} value={concurrency} onChange={event => setConcurrency(Number(event.target.value))} /></label><label>Cảnh báo quá hạn (phút)<input className={inputClass} type="number" min={15} max={1440} value={staleAfterMinutes} onChange={event => setStaleAfterMinutes(Number(event.target.value))} /></label><button className="management-button" onClick={() => void persistKitchen()}><Save size={16} /> Lưu cấu hình</button></div>
+        <div className="management-actions"><label>Số phiếu nấu song song<input className={inputClass} type="number" min={1} max={20} value={concurrency} disabled={kitchenBusy} onChange={event => setConcurrency(Number(event.target.value))} /></label><label>Cảnh báo sau ETA (phút)<input className={inputClass} type="number" min={15} max={1440} value={staleAfterMinutes} disabled={kitchenBusy} onChange={event => setStaleAfterMinutes(Number(event.target.value))} /></label><button type="button" className="management-button" disabled={kitchenBusy} onClick={() => void persistKitchen({ concurrency, staleAfterMinutes })}><Save size={16} /> {kitchenBusy ? 'Đang lưu…' : 'Lưu cấu hình'}</button></div>
         <div className="kitchen-control-grid">
-          <button className={`kitchen-control ${automationEnabled ? 'active' : ''}`} onClick={() => void persistKitchen(!automationEnabled, paused)}><Bot size={18} /><span><strong>Tự động</strong><small>{automationEnabled ? 'Queue tự lấy order theo FIFO' : 'Bật để queue tự vận hành'}</small></span></button>
-          <button className={`kitchen-control ${paused ? 'warning' : ''}`} onClick={() => void persistKitchen(automationEnabled, !paused)}>{paused ? <Play size={18} /> : <Pause size={18} />}<span><strong>{paused ? 'Tiếp tục bếp' : 'Tạm dừng bếp'}</strong><small>Không ảnh hưởng order đang nấu</small></span></button>
-          <button className="kitchen-control" disabled={paused} onClick={() => void dispatchNext()}><StepForward size={18} /><span><strong>Lấy order tiếp</strong><small>Điều phối 1 order đầu hàng chờ</small></span></button>
+          <button type="button" aria-pressed={automationEnabled} className={`kitchen-control ${automationEnabled ? 'active' : ''}`} disabled={kitchenBusy} onClick={() => void persistKitchen({ automationEnabled: !automationEnabled })}><Bot size={18} /><span><strong>Tự động FIFO</strong><small>{automationEnabled ? 'Tự lấy phiếu theo thứ tự chờ' : 'Bật chế độ vận hành tự động'}</small></span></button>
+          <button type="button" aria-pressed={paused} className={`kitchen-control ${paused ? 'warning' : ''}`} disabled={kitchenBusy} onClick={() => void persistKitchen({ paused: !paused })}>{paused ? <Play size={18} /> : <Pause size={18} />}<span><strong>{paused ? 'Tiếp tục bếp' : 'Tạm dừng bếp'}</strong><small>Chỉ dừng nhận phiếu; món đang nấu vẫn chạy</small></span></button>
+          <button type="button" className="kitchen-control" disabled={!canDispatch} onClick={() => void dispatchNext()}><StepForward size={18} /><span><strong>{kitchenBusy ? 'Đang điều phối…' : 'Lấy phiếu tiếp'}</strong><small>{automationEnabled ? 'Chỉ dùng khi điều phối thủ công' : kitchen.waitingCount === 0 ? 'Không có phiếu đang chờ' : 'Đưa đúng một phiếu đầu hàng chờ vào bếp'}</small></span></button>
         </div>
-      </section>
+      </section>}
 
-      <section className="management-card">
+      {activeSection === 'employees' && <section
+        id="management-panel-employees"
+        role="region"
+        aria-labelledby="management-tab-employees"
+        className="management-card management-primary-card"
+      >
         <div className="management-title">
           <UsersRound size={20} />
           <div><strong>Quản lý nhân viên</strong><span>{employees.filter(row => row.active).length} đang hoạt động · {employees.length} hồ sơ</span></div>
-          <span className="kitchen-mode-badge auto">Phân ca & hóa đơn</span>
         </div>
         <select
           className={inputClass}
@@ -321,31 +387,43 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
             </button>
           ))}
         </div>
-      </section>
+      </section>}
 
-      <section className="management-card">
-        <div className="management-title"><CirclePlus size={20} /><div><strong>Quản lý bàn</strong><span>Thêm, sửa bàn; trạng thái order do hàng đợi bếp quản lý</span></div></div>
+      {activeSection === 'tables' && <section
+        id="management-panel-tables"
+        role="region"
+        aria-labelledby="management-tab-tables"
+        className="management-card management-primary-card"
+      >
+        <div className="management-title"><CirclePlus size={20} /><div><strong>Quản lý bàn</strong><span>Thêm, sửa bàn; trạng thái phục vụ được đồng bộ với bếp</span></div></div>
         <div className="management-row add-row"><input className={inputClass} type="number" value={newTable.number} onChange={event => setNewTable({ ...newTable, number: Number(event.target.value) })} placeholder="Số bàn" /><input className={inputClass} type="number" value={newTable.seats} onChange={event => setNewTable({ ...newTable, seats: Number(event.target.value) })} placeholder="Số ghế" /><button className="management-button" onClick={() => void addTable()}><CirclePlus size={16} /> Thêm bàn</button></div>
         <div className="management-table-head"><span>Số bàn</span><span>Số ghế</span><span>Trạng thái</span><span></span></div>
         <div className="management-list">{tables.map(table => <TableEditor key={table.id} table={table} onChanged={onChanged} report={report} confirmAction={confirmAction} />)}</div>
-      </section>
+      </section>}
 
-      <section className="management-card management-menu-card">
-        <div className="management-title"><UtensilsCrossed size={20} /><div><strong>Thực đơn & thời gian nấu</strong><span>Giá và thời gian được áp dụng cho order mới</span></div></div>
+      {activeSection === 'menu' && <div
+        id="management-panel-menu"
+        role="region"
+        aria-labelledby="management-tab-menu"
+        className="management-section-stack"
+      >
+      <section className="management-card management-menu-card management-primary-card">
+        <div className="management-title"><UtensilsCrossed size={20} /><div><strong>Thực đơn & thời gian nấu</strong><span>Giá và thời gian áp dụng cho lượt gọi mới</span></div></div>
         <select className={inputClass} value={selectedItemId} onChange={event => { const id = event.target.value; setSelectedItemId(id); if (id === 'new') setDish({ ...emptyDish, categoryId: categories[0]?.id ?? '' }); }}><option value="new">＋ Thêm món mới</option>{menuItems.map(item => <option key={item.id} value={item.id}>{item.name} — {formatVND(item.price)}{!item.available ? ' (ngừng bán)' : ''}</option>)}</select>
         <div className="management-form-grid">
           <label>Tên món<input className={inputClass} value={dish.name ?? ''} onChange={event => setDish({ ...dish, name: event.target.value })} /></label>
           <label>Danh mục<select className={inputClass} value={dish.categoryId ?? ''} onChange={event => setDish({ ...dish, categoryId: event.target.value })}>{categories.map(category => <option key={category.id} value={category.id}>{category.emoji} {category.name}</option>)}</select></label>
           <label>Giá bán<input className={inputClass} type="number" min={0} value={dish.price ?? 0} onChange={event => setDish({ ...dish, price: Number(event.target.value) })} /></label>
           <label>Thời gian nấu (phút)<input className={inputClass} type="number" min={1} max={240} value={dish.cookMinutes ?? 10} onChange={event => setDish({ ...dish, cookMinutes: Number(event.target.value) })} /></label>
-          <label className="wide">URL hình ảnh<input className={inputClass} value={dish.image ?? ''} onChange={event => setDish({ ...dish, image: event.target.value })} /></label>
+          <label className="wide">Liên kết hình ảnh<input className={inputClass} value={dish.image ?? ''} onChange={event => setDish({ ...dish, image: event.target.value })} /></label>
           <label className="wide">Mô tả<textarea className={inputClass} rows={3} value={dish.description ?? ''} onChange={event => setDish({ ...dish, description: event.target.value })} /></label>
           <label className="management-check"><input type="checkbox" checked={dish.available !== false} onChange={event => setDish({ ...dish, available: event.target.checked })} /> Đang phục vụ</label>
         </div>
         <div className="management-actions"><button className="management-button" onClick={() => void persistDish()}><Save size={16} /> Lưu món</button>{dish.id && <button className="management-button secondary" onClick={() => void deactivate()}><Trash2 size={16} /> Ngừng bán</button>}</div>
       </section>
 
-      <section className="management-card compact"><div className="management-title"><CirclePlus size={20} /><div><strong>Thêm danh mục</strong><span>Tạo nhóm món mới cho thực đơn</span></div></div><div className="management-row add-row"><input className={inputClass} value={newCategory.emoji} onChange={event => setNewCategory({ ...newCategory, emoji: event.target.value })} aria-label="Biểu tượng" /><input className={inputClass} value={newCategory.name} onChange={event => setNewCategory({ ...newCategory, name: event.target.value })} placeholder="Tên danh mục" /><button className="management-button" onClick={() => void addCategory()}>Thêm</button></div></section>
+      <section className="management-card compact"><div className="management-title"><CirclePlus size={20} /><div><strong>Thêm danh mục</strong><span>Tạo nhóm món cho thực đơn</span></div></div><div className="management-row add-row"><input className={inputClass} value={newCategory.emoji} onChange={event => setNewCategory({ ...newCategory, emoji: event.target.value })} aria-label="Biểu tượng" /><input className={inputClass} value={newCategory.name} onChange={event => setNewCategory({ ...newCategory, name: event.target.value })} placeholder="Tên danh mục" /><button className="management-button" onClick={() => void addCategory()}>Thêm</button></div></section>
+      </div>}
       {confirmation && (
         <ConfirmationDialog
           title={confirmation.title}

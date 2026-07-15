@@ -59,11 +59,11 @@ test('chuẩn hóa danh mục, món và giới hạn thời gian nấu', () => {
   );
 });
 
-test('phát hiện order bếp quá hạn theo ngưỡng cấu hình', () => {
+test('phát hiện phiếu bếp quá hạn sau ETA và khoảng gia hạn', () => {
   const now = Date.parse('2026-07-14T12:00:00.000Z');
-  assert.equal(isKitchenOrderStale('2026-07-14T09:59:59.000Z', 120, now), true);
-  assert.equal(isKitchenOrderStale('2026-07-14T10:30:00.000Z', 120, now), false);
-  assert.equal(isKitchenOrderStale(null, 120, now), false);
+  assert.equal(isKitchenOrderStale('2026-07-14T09:59:59.000Z', 30, 90, now), true);
+  assert.equal(isKitchenOrderStale('2026-07-14T10:30:00.000Z', 30, 90, now), false);
+  assert.equal(isKitchenOrderStale(null, 30, 90, now), false);
 });
 
 test('tự hoàn tất mọi batch đã chạy đủ ETA và đồng bộ trạng thái bàn', async () => {

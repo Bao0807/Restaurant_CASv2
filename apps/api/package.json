@@ -8,6 +8,7 @@
     "start": "node src/server.js",
     "migrate": "node src/migrate.js",
     "seed:test": "node scripts/seed-test-data.mjs",
+    "db:audit": "node scripts/audit-db.mjs",
     "test": "node --test",
     "test:smoke": "node scripts/smoke.mjs"
   },

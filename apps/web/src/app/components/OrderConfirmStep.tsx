@@ -71,7 +71,7 @@ export function OrderConfirmStep({ table, cart, isAddition, isEditing, onCartCha
         <div style={{ flex: 1 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontWeight: 700, color: '#111827', fontSize: '16px' }}>
-              {isEditing ? 'Xác nhận sửa phiếu chờ' : isAddition ? 'Xác nhận gọi thêm' : 'Xác nhận order'}
+              {isEditing ? 'Xác nhận sửa phiếu chờ' : isAddition ? 'Xác nhận gọi thêm' : 'Xác nhận gọi món'}
             </span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
@@ -139,7 +139,7 @@ export function OrderConfirmStep({ table, cart, isAddition, isEditing, onCartCha
                     {item.menuItem.name}
                   </span>
                   <button
-                    aria-label={`Xóa ${item.menuItem.name} khỏi order`}
+                    aria-label={`Xóa ${item.menuItem.name} khỏi lượt gọi`}
                     onClick={() => remove(item.cartId)}
                     style={{ width: 44, height: 44, background: 'none', border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0, display: 'grid', placeItems: 'center' }}
                   >
@@ -232,7 +232,7 @@ export function OrderConfirmStep({ table, cart, isAddition, isEditing, onCartCha
           <Save size={20} />
           {submitting
             ? isEditing ? 'Đang cập nhật…' : 'Đang gửi bếp…'
-            : isEditing ? 'Cập nhật phiếu chờ' : isAddition ? 'Gửi phiếu gọi thêm' : 'Lưu order'}
+            : isEditing ? 'Cập nhật phiếu chờ' : isAddition ? 'Gửi phiếu gọi thêm' : 'Gửi bếp'}
         </button>
       </div>
 

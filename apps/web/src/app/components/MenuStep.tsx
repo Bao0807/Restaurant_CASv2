@@ -440,7 +440,7 @@ function CartSheet({
               fontSize: '15px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
             }}
           >
-            Xem xác nhận order <ChevronRight size={18} />
+            Xem lại lượt gọi <ChevronRight size={18} />
           </button>
         </div>
       </div>
