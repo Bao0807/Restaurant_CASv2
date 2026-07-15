@@ -75,6 +75,28 @@ CREATE TABLE IF NOT EXISTS active_orders (
   INDEX idx_active_order_queue (queued_at, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS order_batches (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  order_id BIGINT UNSIGNED NOT NULL,
+  table_id VARCHAR(32) NOT NULL,
+  batch_number INT UNSIGNED NOT NULL,
+  items JSON NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'waiting',
+  is_addition BOOLEAN NOT NULL DEFAULT FALSE,
+  queued_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  cooking_started_at DATETIME(3) NULL,
+  completed_at DATETIME(3) NULL,
+  estimated_cook_minutes INT UNSIGNED NOT NULL DEFAULT 10,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_order_batch_order FOREIGN KEY (order_id) REFERENCES active_orders(id) ON DELETE CASCADE,
+  CONSTRAINT uq_order_batch_number UNIQUE (order_id, batch_number),
+  CONSTRAINT chk_order_batch_status CHECK (status IN ('waiting', 'cooking', 'done')),
+  CONSTRAINT chk_order_batch_eta CHECK (estimated_cook_minutes BETWEEN 1 AND 23760),
+  INDEX idx_order_batch_queue (status, queued_at, id),
+  INDEX idx_order_batch_table (table_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS kitchen_queue_state (
   id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
   concurrency INT UNSIGNED NOT NULL DEFAULT 2,
@@ -82,6 +104,21 @@ CREATE TABLE IF NOT EXISTS kitchen_queue_state (
   automation_enabled BOOLEAN NOT NULL DEFAULT TRUE,
   paused BOOLEAN NOT NULL DEFAULT FALSE,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS employees (
+  id VARCHAR(64) NOT NULL PRIMARY KEY,
+  employee_code VARCHAR(24) NOT NULL UNIQUE,
+  full_name VARCHAR(120) NOT NULL,
+  role VARCHAR(20) NOT NULL DEFAULT 'server',
+  phone VARCHAR(32) NOT NULL DEFAULT '',
+  shift_start TIME NULL,
+  shift_end TIME NULL,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT chk_employee_role CHECK (role IN ('manager', 'cashier', 'server', 'chef')),
+  INDEX idx_employee_active_name (active, full_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS payment_transactions (
@@ -97,14 +134,17 @@ CREATE TABLE IF NOT EXISTS payment_transactions (
   vat INT NOT NULL DEFAULT 0,
   total INT NOT NULL DEFAULT 0,
   item_count INT NOT NULL DEFAULT 0,
+  staff_id VARCHAR(64) NULL,
   staff_name VARCHAR(120) NULL,
   cashier_name VARCHAR(120) NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'PAID',
   paid_at DATETIME(3) NOT NULL,
   raw_payload JSON NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_payment_staff FOREIGN KEY (staff_id) REFERENCES employees(id) ON DELETE SET NULL,
   INDEX idx_paid_at (paid_at),
-  INDEX idx_table_id (table_id)
+  INDEX idx_table_id (table_id),
+  INDEX idx_payment_staff (staff_id, paid_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS payment_items (
@@ -112,6 +152,8 @@ CREATE TABLE IF NOT EXISTS payment_items (
   transaction_id BIGINT UNSIGNED NOT NULL,
   cart_id VARCHAR(64) NULL,
   menu_item_id VARCHAR(64) NULL,
+  category_id VARCHAR(64) NULL,
+  category_name VARCHAR(120) NULL,
   name VARCHAR(255) NOT NULL,
   quantity INT NOT NULL,
   price INT NOT NULL,
@@ -121,7 +163,8 @@ CREATE TABLE IF NOT EXISTS payment_items (
   CONSTRAINT fk_payment_items_transaction
     FOREIGN KEY (transaction_id) REFERENCES payment_transactions(id)
     ON DELETE CASCADE,
-  INDEX idx_payment_item_transaction (transaction_id)
+  INDEX idx_payment_item_transaction (transaction_id),
+  INDEX idx_payment_item_category (category_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 INSERT IGNORE INTO restaurant_settings (id, settings)
@@ -155,3 +198,11 @@ INSERT IGNORE INTO restaurant_tables (id, table_number, seats) VALUES
   ('t9', 9, 6), ('t10', 10, 4), ('t11', 11, 8), ('t12', 12, 4);
 
 INSERT IGNORE INTO kitchen_queue_state (id) VALUES (1);
+
+INSERT IGNORE INTO employees (
+  id, employee_code, full_name, role, phone, shift_start, shift_end, active
+) VALUES
+  ('employee-server-default', 'NV001', 'Nhân viên phục vụ', 'server', '0900 111 001', '08:00', '16:00', TRUE),
+  ('employee-cashier-default', 'NV002', 'Thu ngân CAS', 'cashier', '0900 111 002', '08:00', '16:00', TRUE),
+  ('employee-chef-default', 'NV003', 'Bếp trưởng CAS', 'chef', '0900 111 003', '09:00', '17:00', TRUE),
+  ('employee-manager-default', 'NV004', 'Quản lý CAS', 'manager', '0900 111 004', '09:00', '18:00', TRUE);

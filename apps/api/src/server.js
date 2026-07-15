@@ -6,6 +6,7 @@ import { defaultSettings } from './defaultSettings.js';
 import { closePool, databaseConfigSummary, getPool, initDatabase } from './db.js';
 import {
   createPayment,
+  normalizeEmployee,
   parseJsonColumn,
   sanitizeSettings,
   validateOrderItems,
@@ -18,7 +19,8 @@ import {
   saveCategory,
   saveMenuItem,
 } from './catalog.js';
-import { isKitchenOrderStale, lockKitchenQueue, processKitchenQueue, promoteKitchenQueue } from './kitchenQueue.js';
+import { isKitchenOrderStale, lockKitchenQueue, processKitchenQueue, promoteKitchenQueue, syncTableStatuses } from './kitchenQueue.js';
+import { canCancelOrder, canSettleOrder } from './orderPolicy.js';
 
 const app = express();
 const isProduction = process.env.NODE_ENV === 'production';
@@ -44,6 +46,26 @@ const kitchenStaleMinutes = Number.isInteger(configuredStaleMinutes)
 let dbReady = false;
 let dbError = null;
 let connecting = false;
+let kitchenCycleRunning = false;
+
+const databaseConnectivityErrorCodes = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'PROTOCOL_CONNECTION_LOST',
+  'PROTOCOL_ENQUEUE_AFTER_FATAL_ERROR',
+  'ER_SERVER_SHUTDOWN',
+]);
+
+function isDatabaseConnectivityError(error) {
+  return databaseConnectivityErrorCodes.has(error?.code)
+    || /pool is closed|connection.*closed|read ECONNRESET/i.test(error?.message || '');
+}
+
+function markDatabaseUnavailable(error) {
+  dbReady = false;
+  dbError = error;
+}
 
 /** Chuyển lỗi từ route async về error middleware chung của Express. */
 function asyncRoute(handler) {
@@ -176,10 +198,23 @@ function paymentSelect(whereClause) {
     vat,
     total,
     item_count AS itemCount,
+    staff_id AS employeeId,
     staff_name AS staffName,
     cashier_name AS cashierName,
     paid_at AS paidAt
   FROM payment_transactions ${whereClause}`;
+}
+
+function employeeSelect(whereClause = '') {
+  return `SELECT id, employee_code AS code, full_name AS name, role, phone,
+    TIME_FORMAT(shift_start, '%H:%i') AS shiftStart,
+    TIME_FORMAT(shift_end, '%H:%i') AS shiftEnd,
+    active, created_at AS createdAt, updated_at AS updatedAt
+    FROM employees ${whereClause}`;
+}
+
+function serializeEmployee(row) {
+  return { ...row, active: Boolean(row.active) };
 }
 
 app.disable('x-powered-by');
@@ -202,12 +237,19 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '256kb' }));
 
-app.get('/api/health', (_req, res) => {
+app.get('/api/health', asyncRoute(async (_req, res) => {
+  if (dbReady) {
+    try {
+      await getPool().query({ sql: 'SELECT 1', timeout: 2_000 });
+    } catch (error) {
+      markDatabaseUnavailable(error);
+    }
+  }
   res.status(dbReady ? 200 : 503).json({
     ok: dbReady,
     database: dbReady ? 'connected' : 'unavailable',
   });
-});
+}));
 
 app.get('/api/auth/session', requireAuth, (req, res) => {
   res.json({
@@ -237,6 +279,54 @@ app.put('/api/settings', requireDatabase, asyncRoute(async (req, res) => {
     [JSON.stringify(settings)],
   );
   res.json({ settings });
+}));
+
+/** Danh sách nhân sự dùng chung cho quản trị, phân công phục vụ và báo cáo. */
+app.get('/api/employees', requireDatabase, asyncRoute(async (req, res) => {
+  const activeOnly = req.query.active === 'true';
+  const [rows] = await getPool().query(
+    `${employeeSelect(activeOnly ? 'WHERE active = TRUE' : '')} ORDER BY active DESC, full_name, employee_code`,
+  );
+  res.json({ employees: rows.map(serializeEmployee) });
+}));
+
+app.post('/api/employees', requireDatabase, asyncRoute(async (req, res) => {
+  const employee = normalizeEmployee(req.body?.employee);
+  const [duplicates] = await getPool().query('SELECT id FROM employees WHERE employee_code = ? LIMIT 1', [employee.code]);
+  if (duplicates[0]) throw httpError(409, 'EMPLOYEE_CODE_EXISTS', 'Mã nhân viên đã tồn tại.');
+  const id = `employee-${crypto.randomUUID()}`;
+  await getPool().query(
+    `INSERT INTO employees (id, employee_code, full_name, role, phone, shift_start, shift_end, active)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, employee.code, employee.name, employee.role, employee.phone, employee.shiftStart, employee.shiftEnd, employee.active],
+  );
+  const [rows] = await getPool().query(`${employeeSelect('WHERE id = ?')} LIMIT 1`, [id]);
+  res.status(201).json({ employee: serializeEmployee(rows[0]) });
+}));
+
+app.put('/api/employees/:employeeId', requireDatabase, asyncRoute(async (req, res) => {
+  const [currentRows] = await getPool().query(`${employeeSelect('WHERE id = ?')} LIMIT 1`, [req.params.employeeId]);
+  if (!currentRows[0]) throw httpError(404, 'EMPLOYEE_NOT_FOUND', 'Không tìm thấy nhân viên.');
+  const employee = normalizeEmployee(req.body?.employee, serializeEmployee(currentRows[0]));
+  const [duplicates] = await getPool().query(
+    'SELECT id FROM employees WHERE employee_code = ? AND id <> ? LIMIT 1',
+    [employee.code, req.params.employeeId],
+  );
+  if (duplicates[0]) throw httpError(409, 'EMPLOYEE_CODE_EXISTS', 'Mã nhân viên đã tồn tại.');
+  await getPool().query(
+    `UPDATE employees SET employee_code = ?, full_name = ?, role = ?, phone = ?,
+       shift_start = ?, shift_end = ?, active = ? WHERE id = ?`,
+    [employee.code, employee.name, employee.role, employee.phone, employee.shiftStart, employee.shiftEnd, employee.active, req.params.employeeId],
+  );
+  const [rows] = await getPool().query(`${employeeSelect('WHERE id = ?')} LIMIT 1`, [req.params.employeeId]);
+  res.json({ employee: serializeEmployee(rows[0]) });
+}));
+
+// Không xóa vật lý để hóa đơn cũ vẫn giữ được lịch sử nhân sự.
+app.delete('/api/employees/:employeeId', requireDatabase, asyncRoute(async (req, res) => {
+  const [result] = await getPool().query('UPDATE employees SET active = FALSE WHERE id = ?', [req.params.employeeId]);
+  if (result.affectedRows === 0) throw httpError(404, 'EMPLOYEE_NOT_FOUND', 'Không tìm thấy nhân viên.');
+  res.json({ ok: true });
 }));
 
 app.get('/api/catalog', requireDatabase, asyncRoute(async (_req, res) => {
@@ -294,115 +384,294 @@ app.delete('/api/menu-items/:itemId', requireDatabase, asyncRoute(async (req, re
 
 // Snapshot này là nguồn sự thật duy nhất để UI đồng bộ bàn, order và queue.
 app.get('/api/operations', requireDatabase, asyncRoute(async (_req, res) => {
-  const [rows] = await getPool().query(
-    `SELECT
-      t.id,
-      t.table_number AS number,
-      t.seats,
-      t.status,
-      t.reserved_time AS reservedTime,
-      o.id AS orderNumber,
-      o.items,
-      o.queued_at AS queuedAt,
-      o.cooking_started_at AS cookingStartedAt,
-      o.estimated_cook_minutes AS estimatedCookMinutes
-    FROM restaurant_tables t
-    LEFT JOIN active_orders o ON o.table_id = t.id
-    ORDER BY t.table_number`,
-  );
-  const [kitchenRows] = await getPool().query(
-    `SELECT concurrency, stale_after_minutes AS staleAfterMinutes,
-      automation_enabled AS automationEnabled, paused
-     FROM kitchen_queue_state WHERE id = 1 LIMIT 1`,
-  );
-  const staleAfterMinutes = Number(kitchenRows[0]?.staleAfterMinutes) || kitchenStaleMinutes;
+  const connection = await getPool().getConnection();
+  try {
+    // Một repeatable-read snapshot tránh ghép trạng thái bàn cũ với queue mới giữa chu kỳ bếp.
+    await connection.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+    await connection.query('START TRANSACTION READ ONLY');
+    const [rows] = await connection.query(
+      `SELECT
+        t.id,
+        t.table_number AS number,
+        t.seats,
+        t.status,
+        t.reserved_time AS reservedTime,
+        o.id AS orderNumber,
+        o.items
+      FROM restaurant_tables t
+      LEFT JOIN active_orders o ON o.table_id = t.id
+      ORDER BY t.table_number`,
+    );
+    const [batchRows] = await connection.query(
+      `SELECT id AS batchId, order_id AS orderId, table_id AS tableId,
+        batch_number AS batchNumber, items, status, is_addition AS isAddition,
+        queued_at AS queuedAt, cooking_started_at AS cookingStartedAt,
+        completed_at AS completedAt, estimated_cook_minutes AS estimatedCookMinutes
+       FROM order_batches
+       ORDER BY queued_at, id`,
+    );
+    const [kitchenRows] = await connection.query(
+      `SELECT concurrency, stale_after_minutes AS staleAfterMinutes,
+        automation_enabled AS automationEnabled, paused
+       FROM kitchen_queue_state WHERE id = 1 LIMIT 1`,
+    );
+    await connection.commit();
 
-  const tableOrders = {};
-  const waitingRows = rows
-    .filter(row => row.status === 'waiting' && row.orderNumber)
-    .sort((left, right) => {
-      const timeDifference = new Date(left.queuedAt).getTime() - new Date(right.queuedAt).getTime();
-      return timeDifference || Number(left.orderNumber) - Number(right.orderNumber);
+    const staleAfterMinutes = Number(kitchenRows[0]?.staleAfterMinutes) || kitchenStaleMinutes;
+    const tableOrders = {};
+    const waitingBatchesByTable = {};
+    const waitingRows = batchRows
+      .filter(row => row.status === 'waiting')
+      .sort((left, right) => {
+        const timeDifference = new Date(left.queuedAt).getTime() - new Date(right.queuedAt).getTime();
+        return timeDifference || Number(left.batchId) - Number(right.batchId);
+      });
+    const queuePositions = new Map(waitingRows.map((row, index) => [Number(row.batchId), index + 1]));
+    const batchesByTable = batchRows.reduce((result, batch) => {
+      const current = result.get(batch.tableId) ?? [];
+      current.push(batch);
+      result.set(batch.tableId, current);
+      return result;
+    }, new Map());
+    const tables = rows.map(row => {
+      if (row.items != null) tableOrders[row.id] = parseJsonColumn(row.items, []);
+      const batches = batchesByTable.get(row.id) ?? [];
+      const cookingBatches = batches.filter(batch => batch.status === 'cooking');
+      const waitingBatches = batches.filter(batch => batch.status === 'waiting');
+      const doneBatches = batches.filter(batch => batch.status === 'done');
+      if (waitingBatches.length > 0) {
+        waitingBatchesByTable[row.id] = waitingBatches
+          .sort((left, right) => Number(left.batchNumber) - Number(right.batchNumber))
+          .map(batch => ({
+            batchId: Number(batch.batchId),
+            batchNumber: Number(batch.batchNumber),
+            items: parseJsonColumn(batch.items, []),
+            queuedAt: new Date(batch.queuedAt).toISOString(),
+            estimatedCookMinutes: Number(batch.estimatedCookMinutes),
+          }));
+      }
+      const timerBatch = cookingBatches[0] ?? waitingBatches[0];
+      const stale = cookingBatches.some(batch => isKitchenOrderStale(batch.cookingStartedAt, staleAfterMinutes));
+      const queuePosition = waitingBatches.length
+        ? Math.min(...waitingBatches.map(batch => queuePositions.get(Number(batch.batchId)) ?? Number.MAX_SAFE_INTEGER))
+        : undefined;
+      return {
+        id: row.id,
+        number: Number(row.number),
+        seats: Number(row.seats),
+        status: row.status,
+        ...(row.reservedTime ? { reservedTime: row.reservedTime } : {}),
+        ...(row.orderNumber ? { orderNumber: Number(row.orderNumber) } : {}),
+        ...(timerBatch?.queuedAt ? { queuedAt: new Date(timerBatch.queuedAt).toISOString() } : {}),
+        ...(timerBatch?.cookingStartedAt ? { cookingStartedAt: new Date(timerBatch.cookingStartedAt).toISOString() } : {}),
+        ...(timerBatch?.estimatedCookMinutes ? { estimatedCookMinutes: Number(timerBatch.estimatedCookMinutes) } : {}),
+        ...(cookingBatches[0]?.batchId ? { cookingBatchId: Number(cookingBatches[0].batchId) } : {}),
+        ...(stale ? { kitchenStale: true } : {}),
+        ...(queuePosition && queuePosition !== Number.MAX_SAFE_INTEGER ? { queuePosition } : {}),
+        batchCount: batches.length,
+        additionalBatchCount: batches.filter(batch => Boolean(batch.isAddition)).length,
+        waitingBatchCount: waitingBatches.length,
+        cookingBatchCount: cookingBatches.length,
+        doneBatchCount: doneBatches.length,
+        latestBatchNumber: batches.length ? Math.max(...batches.map(batch => Number(batch.batchNumber))) : 0,
+      };
     });
-  const queuePositions = new Map(waitingRows.map((row, index) => [row.id, index + 1]));
-  const tables = rows.map(row => {
-    if (row.items != null) tableOrders[row.id] = parseJsonColumn(row.items, []);
-    const stale = row.status === 'cooking'
-      && isKitchenOrderStale(row.cookingStartedAt, staleAfterMinutes);
-    return {
-      id: row.id,
-      number: Number(row.number),
-      seats: Number(row.seats),
-      status: row.status,
-      ...(row.reservedTime ? { reservedTime: row.reservedTime } : {}),
-      ...(row.orderNumber ? { orderNumber: Number(row.orderNumber) } : {}),
-      ...(row.queuedAt ? { queuedAt: new Date(row.queuedAt).toISOString() } : {}),
-      ...(row.cookingStartedAt ? { cookingStartedAt: new Date(row.cookingStartedAt).toISOString() } : {}),
-      ...(row.estimatedCookMinutes ? { estimatedCookMinutes: Number(row.estimatedCookMinutes) } : {}),
-      ...(stale ? { kitchenStale: true } : {}),
-      ...(queuePositions.has(row.id) ? { queuePosition: queuePositions.get(row.id) } : {}),
-    };
-  });
-  res.json({
-    tables,
-    tableOrders,
-    kitchen: {
-      concurrency: Number(kitchenRows[0]?.concurrency) || 2,
-      cookingCount: rows.filter(row => row.status === 'cooking').length,
-      waitingCount: waitingRows.length,
-      staleCount: tables.filter(table => table.kitchenStale).length,
-      staleAfterMinutes,
-      automationEnabled: kitchenRows[0]?.automationEnabled !== 0,
-      paused: Boolean(kitchenRows[0]?.paused),
-    },
-  });
+    res.json({
+      tables,
+      tableOrders,
+      waitingBatchesByTable,
+      kitchen: {
+        concurrency: Number(kitchenRows[0]?.concurrency) || 2,
+        cookingCount: batchRows.filter(row => row.status === 'cooking').length,
+        waitingCount: waitingRows.length,
+        staleCount: tables.filter(table => table.kitchenStale).length,
+        staleAfterMinutes,
+        automationEnabled: kitchenRows[0]?.automationEnabled !== 0,
+        paused: Boolean(kitchenRows[0]?.paused),
+      },
+    });
+  } catch (error) {
+    await connection.rollback().catch(() => {});
+    throw error;
+  } finally {
+    connection.release();
+  }
 }));
 
 // Lưu order, chuẩn hóa catalog và điều phối FIFO trong cùng một transaction.
 app.put('/api/orders/:tableId', requireDatabase, asyncRoute(async (req, res) => {
   const validatedItems = validateOrderItems(req.body?.items);
+  const append = req.body?.append === true;
   const connection = await getPool().getConnection();
   try {
     await connection.beginTransaction();
     await lockKitchenQueue(connection);
     const [tables] = await connection.query(
-      'SELECT id, status FROM restaurant_tables WHERE id = ? FOR UPDATE',
+      `SELECT t.id, t.status, o.id AS orderId, o.items AS orderItems,
+        o.estimated_cook_minutes AS orderEstimatedCookMinutes
+       FROM restaurant_tables t
+       LEFT JOIN active_orders o ON o.table_id = t.id
+       WHERE t.id = ? FOR UPDATE`,
       [req.params.tableId],
     );
     const table = tables[0];
     if (!table) throw httpError(404, 'TABLE_NOT_FOUND', 'Không tìm thấy bàn.');
     if (table.status === 'reserved') throw httpError(409, 'TABLE_RESERVED', 'Bàn đang được đặt trước.');
 
+    if (table.orderId && !append) {
+      throw httpError(409, 'ORDER_ALREADY_EXISTS', 'Bàn đã có order. Hãy dùng chế độ gọi thêm món.');
+    }
+
     const items = await canonicalizeOrderItems(connection, validatedItems);
     const estimatedCookMinutes = estimateCookMinutes(items);
-    await connection.query(
-      `INSERT INTO active_orders (table_id, items, estimated_cook_minutes) VALUES (?, ?, ?)
-       ON DUPLICATE KEY UPDATE items = VALUES(items),
-         estimated_cook_minutes = VALUES(estimated_cook_minutes), updated_at = CURRENT_TIMESTAMP`,
-      [table.id, JSON.stringify(items), estimatedCookMinutes],
-    );
-    if (table.status !== 'waiting' && table.status !== 'cooking') {
-      await connection.query(
-        'UPDATE active_orders SET queued_at = CURRENT_TIMESTAMP(3), cooking_started_at = NULL WHERE table_id = ?',
-        [table.id],
+    let orderId;
+    let batchNumber = 1;
+    const isAddition = Boolean(table.orderId);
+    if (table.orderId) {
+      const existingItems = parseJsonColumn(table.orderItems, []);
+      if (existingItems.length + items.length > 500) {
+        throw httpError(400, 'ORDER_TOO_LARGE', 'Order của bàn vượt quá 500 dòng món.');
+      }
+      const existingCartIds = new Set(existingItems.map(item => item.cartId));
+      if (items.some(item => existingCartIds.has(item.cartId))) {
+        throw httpError(409, 'DUPLICATE_CART_ITEM', 'Lượt gọi thêm chứa món đã có trong order trước.');
+      }
+      orderId = Number(table.orderId);
+      const [batchNumbers] = await connection.query(
+        'SELECT COALESCE(MAX(batch_number), 0) + 1 AS nextBatchNumber FROM order_batches WHERE order_id = ?',
+        [orderId],
       );
+      batchNumber = Number(batchNumbers[0].nextBatchNumber);
+      await connection.query(
+        `UPDATE active_orders SET items = ?, estimated_cook_minutes = GREATEST(estimated_cook_minutes, ?),
+          updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        [JSON.stringify([...existingItems, ...items]), estimatedCookMinutes, orderId],
+      );
+    } else {
+      const [orderResult] = await connection.query(
+        'INSERT INTO active_orders (table_id, items, estimated_cook_minutes) VALUES (?, ?, ?)',
+        [table.id, JSON.stringify(items), estimatedCookMinutes],
+      );
+      orderId = Number(orderResult.insertId);
     }
-    const nextStatus = table.status === 'cooking' ? 'cooking' : 'waiting';
-    await connection.query('UPDATE restaurant_tables SET status = ? WHERE id = ?', [nextStatus, table.id]);
+
+    const [batchResult] = await connection.query(
+      `INSERT INTO order_batches (
+        order_id, table_id, batch_number, items, status, is_addition, estimated_cook_minutes
+      ) VALUES (?, ?, ?, ?, 'waiting', ?, ?)`,
+      [orderId, table.id, batchNumber, JSON.stringify(items), isAddition, estimatedCookMinutes],
+    );
     await promoteKitchenQueue(connection);
-    const [orders] = await connection.query(
-      `SELECT o.id, t.status, o.queued_at AS queuedAt, o.cooking_started_at AS cookingStartedAt
-       FROM active_orders o INNER JOIN restaurant_tables t ON t.id = o.table_id
-       WHERE o.table_id = ?`,
-      [table.id],
+    await syncTableStatuses(connection, [table.id]);
+    const [batches] = await connection.query(
+      `SELECT status, queued_at AS queuedAt, cooking_started_at AS cookingStartedAt
+       FROM order_batches WHERE id = ?`,
+      [batchResult.insertId],
     );
     await connection.commit();
     res.json({
       ok: true,
-      orderNumber: Number(orders[0].id),
-      status: orders[0].status,
-      queuedAt: new Date(orders[0].queuedAt).toISOString(),
-      ...(orders[0].cookingStartedAt ? { cookingStartedAt: new Date(orders[0].cookingStartedAt).toISOString() } : {}),
+      orderNumber: orderId,
+      batchId: Number(batchResult.insertId),
+      batchNumber,
+      isAddition,
+      status: batches[0].status,
+      queuedAt: new Date(batches[0].queuedAt).toISOString(),
+      ...(batches[0].cookingStartedAt ? { cookingStartedAt: new Date(batches[0].cookingStartedAt).toISOString() } : {}),
+      estimatedCookMinutes,
+      items,
+    });
+  } catch (error) {
+    await connection.rollback().catch(() => {});
+    throw error;
+  } finally {
+    connection.release();
+  }
+}));
+
+// Chỉ sửa đúng một phiếu bếp còn chờ; các phiếu đã nấu và vị trí FIFO được giữ nguyên.
+app.put('/api/orders/:tableId/batches/:batchId', requireDatabase, asyncRoute(async (req, res) => {
+  const validatedItems = validateOrderItems(req.body?.items);
+  const batchId = boundedInteger(req.params.batchId, 'batchId', 1, Number.MAX_SAFE_INTEGER);
+  const connection = await getPool().getConnection();
+  try {
+    await connection.beginTransaction();
+    await lockKitchenQueue(connection);
+    const [tables] = await connection.query(
+      `SELECT t.id, o.id AS orderId
+       FROM restaurant_tables t
+       LEFT JOIN active_orders o ON o.table_id = t.id
+       WHERE t.id = ? FOR UPDATE`,
+      [req.params.tableId],
+    );
+    const table = tables[0];
+    if (!table) throw httpError(404, 'TABLE_NOT_FOUND', 'Không tìm thấy bàn.');
+    if (!table.orderId) throw httpError(409, 'ORDER_NOT_FOUND', 'Bàn chưa có order.');
+
+    const [batches] = await connection.query(
+      `SELECT id AS batchId, batch_number AS batchNumber, items, status,
+        is_addition AS isAddition, queued_at AS queuedAt,
+        estimated_cook_minutes AS estimatedCookMinutes
+       FROM order_batches
+       WHERE order_id = ? AND table_id = ?
+       ORDER BY batch_number, id FOR UPDATE`,
+      [table.orderId, table.id],
+    );
+    const targetBatch = batches.find(batch => Number(batch.batchId) === batchId);
+    if (!targetBatch) throw httpError(404, 'ORDER_BATCH_NOT_FOUND', 'Không tìm thấy phiếu bếp của bàn này.');
+    if (targetBatch.status !== 'waiting') {
+      throw httpError(409, 'ORDER_BATCH_NOT_WAITING', 'Phiếu bếp đã bắt đầu nấu hoặc đã xong nên không thể sửa.');
+    }
+
+    const items = await canonicalizeOrderItems(connection, validatedItems);
+    const incomingCartIds = new Set();
+    for (const item of items) {
+      if (incomingCartIds.has(item.cartId)) {
+        throw httpError(409, 'DUPLICATE_CART_ITEM', 'Phiếu bếp chứa mã dòng món bị trùng.');
+      }
+      incomingCartIds.add(item.cartId);
+    }
+    const otherItems = batches
+      .filter(batch => Number(batch.batchId) !== batchId)
+      .flatMap(batch => parseJsonColumn(batch.items, []));
+    const otherCartIds = new Set(otherItems.map(item => item.cartId));
+    if (items.some(item => otherCartIds.has(item.cartId))) {
+      throw httpError(409, 'DUPLICATE_CART_ITEM', 'Phiếu sửa chứa món đã thuộc một lượt gọi khác.');
+    }
+    if (otherItems.length + items.length > 500) {
+      throw httpError(400, 'ORDER_TOO_LARGE', 'Order của bàn vượt quá 500 dòng món.');
+    }
+
+    const estimatedCookMinutes = estimateCookMinutes(items);
+    await connection.query(
+      `UPDATE order_batches SET items = ?, estimated_cook_minutes = ?
+       WHERE id = ? AND table_id = ? AND status = 'waiting'`,
+      [JSON.stringify(items), estimatedCookMinutes, batchId, table.id],
+    );
+    const aggregateItems = batches.flatMap(batch => (
+      Number(batch.batchId) === batchId ? items : parseJsonColumn(batch.items, [])
+    ));
+    const aggregateEta = Math.max(
+      estimatedCookMinutes,
+      ...batches
+        .filter(batch => Number(batch.batchId) !== batchId)
+        .map(batch => Number(batch.estimatedCookMinutes) || 1),
+    );
+    await connection.query(
+      'UPDATE active_orders SET items = ?, estimated_cook_minutes = ? WHERE id = ?',
+      [JSON.stringify(aggregateItems), aggregateEta, table.orderId],
+    );
+    await syncTableStatuses(connection, [table.id]);
+    await connection.commit();
+    res.json({
+      ok: true,
+      edited: true,
+      orderNumber: Number(table.orderId),
+      batchId,
+      batchNumber: Number(targetBatch.batchNumber),
+      isAddition: Boolean(targetBatch.isAddition),
+      status: 'waiting',
+      queuedAt: new Date(targetBatch.queuedAt).toISOString(),
       estimatedCookMinutes,
       items,
     });
@@ -480,7 +749,7 @@ app.put('/api/tables/:tableId', requireDatabase, asyncRoute(async (req, res) => 
     await connection.beginTransaction();
     await lockKitchenQueue(connection);
     const [rows] = await connection.query(
-      `SELECT t.id, o.id AS orderId FROM restaurant_tables t
+      `SELECT t.id, t.status, t.reserved_time AS reservedTime, o.id AS orderId FROM restaurant_tables t
        LEFT JOIN active_orders o ON o.table_id = t.id WHERE t.id = ? FOR UPDATE`,
       [req.params.tableId],
     );
@@ -492,22 +761,28 @@ app.put('/api/tables/:tableId', requireDatabase, asyncRoute(async (req, res) => 
     if (!hasOrder && ['waiting', 'cooking', 'done'].includes(status)) {
       throw httpError(409, 'ORDER_NOT_FOUND', 'Cần có order trước khi chọn trạng thái phục vụ.');
     }
-    await connection.query(
-      'UPDATE restaurant_tables SET table_number = ?, seats = ?, status = ?, reserved_time = ? WHERE id = ?',
-      [number, seats, status, reservedTime, req.params.tableId],
-    );
-    if (hasOrder && status === 'cooking') {
-      await connection.query(
-        'UPDATE active_orders SET cooking_started_at = COALESCE(cooking_started_at, CURRENT_TIMESTAMP(3)) WHERE table_id = ?',
-        [req.params.tableId],
+    if (hasOrder && status !== rows[0].status) {
+      throw httpError(
+        409,
+        'ORDER_STATUS_ACTION_REQUIRED',
+        'Trạng thái order do hàng đợi bếp quản lý. Hãy dùng thao tác hoàn tất hoặc đưa lại vào hàng chờ.',
       );
     }
-    if (hasOrder && status === 'waiting') {
-      await connection.query('UPDATE active_orders SET cooking_started_at = NULL WHERE table_id = ?', [req.params.tableId]);
+    if (hasOrder) {
+      await connection.query(
+        'UPDATE restaurant_tables SET table_number = ?, seats = ? WHERE id = ?',
+        [number, seats, req.params.tableId],
+      );
+    } else {
+      await connection.query(
+        'UPDATE restaurant_tables SET table_number = ?, seats = ?, status = ?, reserved_time = ? WHERE id = ?',
+        [number, seats, status, reservedTime, req.params.tableId],
+      );
     }
-    await promoteKitchenQueue(connection);
+    const [updatedTables] = await connection.query('SELECT status FROM restaurant_tables WHERE id = ?', [req.params.tableId]);
     await connection.commit();
-    res.json({ table: { id: req.params.tableId, number, seats, status, ...(reservedTime ? { reservedTime } : {}) } });
+    const effectiveReservedTime = hasOrder ? rows[0].reservedTime : reservedTime;
+    res.json({ table: { id: req.params.tableId, number, seats, status: updatedTables[0].status, ...(effectiveReservedTime ? { reservedTime: effectiveReservedTime } : {}) } });
   } catch (error) {
     await connection.rollback().catch(() => {});
     throw error;
@@ -517,37 +792,59 @@ app.put('/api/tables/:tableId', requireDatabase, asyncRoute(async (req, res) => 
 }));
 
 app.delete('/api/tables/:tableId', requireDatabase, asyncRoute(async (req, res) => {
-  const [orders] = await getPool().query('SELECT id FROM active_orders WHERE table_id = ? LIMIT 1', [req.params.tableId]);
-  if (orders[0]) throw httpError(409, 'TABLE_HAS_ORDER', 'Không thể xóa bàn đang có order.');
-  const [result] = await getPool().query('DELETE FROM restaurant_tables WHERE id = ?', [req.params.tableId]);
-  if (result.affectedRows === 0) throw httpError(404, 'TABLE_NOT_FOUND', 'Không tìm thấy bàn.');
-  res.json({ ok: true });
-}));
-
-app.post('/api/orders/:tableId/requeue', requireDatabase, asyncRoute(async (req, res) => {
   const connection = await getPool().getConnection();
   try {
     await connection.beginTransaction();
     await lockKitchenQueue(connection);
     const [rows] = await connection.query(
-      `SELECT t.id, t.status, o.id AS orderId FROM restaurant_tables t
+      `SELECT t.id, o.id AS orderId
+       FROM restaurant_tables t
        LEFT JOIN active_orders o ON o.table_id = t.id
        WHERE t.id = ? FOR UPDATE`,
+      [req.params.tableId],
+    );
+    if (!rows[0]) throw httpError(404, 'TABLE_NOT_FOUND', 'Không tìm thấy bàn.');
+    if (rows[0].orderId) throw httpError(409, 'TABLE_HAS_ORDER', 'Không thể xóa bàn đang có order.');
+    await connection.query('DELETE FROM restaurant_tables WHERE id = ?', [req.params.tableId]);
+    await connection.commit();
+    res.json({ ok: true });
+  } catch (error) {
+    await connection.rollback().catch(() => {});
+    throw error;
+  } finally {
+    connection.release();
+  }
+}));
+
+app.post('/api/orders/:tableId/requeue', requireDatabase, asyncRoute(async (req, res) => {
+  const expectedBatchId = boundedInteger(req.body?.expectedBatchId, 'expectedBatchId', 1, Number.MAX_SAFE_INTEGER);
+  const connection = await getPool().getConnection();
+  try {
+    await connection.beginTransaction();
+    await lockKitchenQueue(connection);
+    const [rows] = await connection.query(
+      `SELECT t.id, o.id AS orderId FROM restaurant_tables t
+       LEFT JOIN active_orders o ON o.table_id = t.id WHERE t.id = ? FOR UPDATE`,
       [req.params.tableId],
     );
     const table = rows[0];
     if (!table) throw httpError(404, 'TABLE_NOT_FOUND', 'Không tìm thấy bàn.');
     if (!table.orderId) throw httpError(409, 'ORDER_NOT_FOUND', 'Bàn chưa có order.');
-    if (table.status !== 'cooking') {
-      throw httpError(409, 'ORDER_NOT_COOKING', 'Chỉ có thể đưa order đang nấu về hàng chờ.');
+    const [cookingBatches] = await connection.query(
+      `SELECT id FROM order_batches
+       WHERE table_id = ? AND id = ? AND status = 'cooking' FOR UPDATE`,
+      [table.id, expectedBatchId],
+    );
+    if (!cookingBatches[0]) {
+      throw httpError(409, 'ORDER_BATCH_CHANGED', 'Phiếu đang nấu đã thay đổi. Hãy tải lại trạng thái bàn.');
     }
     await connection.query(
-      `UPDATE active_orders SET queued_at = CURRENT_TIMESTAMP(3), cooking_started_at = NULL
-       WHERE table_id = ?`,
-      [table.id],
+      `UPDATE order_batches SET status = 'waiting', queued_at = CURRENT_TIMESTAMP(3),
+        cooking_started_at = NULL, completed_at = NULL WHERE id = ?`,
+      [cookingBatches[0].id],
     );
-    await connection.query("UPDATE restaurant_tables SET status = 'waiting' WHERE id = ?", [table.id]);
     await promoteKitchenQueue(connection);
+    await syncTableStatuses(connection, [table.id]);
     await connection.commit();
     res.json({ ok: true });
   } catch (error) {
@@ -569,7 +866,18 @@ app.delete('/api/orders/:tableId', requireDatabase, asyncRoute(async (req, res) 
     );
     const table = tables[0];
     if (!table) throw httpError(404, 'TABLE_NOT_FOUND', 'Không tìm thấy bàn.');
-    if (table.status === 'cooking') throw httpError(409, 'ORDER_COOKING', 'Không thể hủy order đang nấu.');
+    const [orders] = await connection.query(
+      'SELECT id FROM active_orders WHERE table_id = ? FOR UPDATE',
+      [table.id],
+    );
+    if (!orders[0]) throw httpError(409, 'ORDER_NOT_FOUND', 'Bàn chưa có order.');
+    const [batches] = await connection.query(
+      'SELECT id, status FROM order_batches WHERE table_id = ? ORDER BY id FOR UPDATE',
+      [table.id],
+    );
+    if (!canCancelOrder(batches)) {
+      throw httpError(409, 'ORDER_NOT_WAITING', 'Chỉ có thể hủy khi toàn bộ lượt gọi của order còn đang chờ.');
+    }
     await connection.query('DELETE FROM active_orders WHERE table_id = ?', [table.id]);
     await connection.query("UPDATE restaurant_tables SET status = 'empty' WHERE id = ?", [table.id]);
     await promoteKitchenQueue(connection);
@@ -585,7 +893,8 @@ app.delete('/api/orders/:tableId', requireDatabase, asyncRoute(async (req, res) 
 
 app.patch('/api/tables/:tableId/status', requireDatabase, asyncRoute(async (req, res) => {
   const nextStatus = req.body?.status;
-  const transitions = { cooking: 'done' };
+  if (nextStatus !== 'done') throw httpError(400, 'VALIDATION_ERROR', 'Chỉ hỗ trợ hoàn tất lượt đang nấu.');
+  const expectedBatchId = boundedInteger(req.body?.expectedBatchId, 'expectedBatchId', 1, Number.MAX_SAFE_INTEGER);
   const connection = await getPool().getConnection();
   try {
     await connection.beginTransaction();
@@ -596,15 +905,133 @@ app.patch('/api/tables/:tableId/status', requireDatabase, asyncRoute(async (req,
     );
     const table = tables[0];
     if (!table) throw httpError(404, 'TABLE_NOT_FOUND', 'Không tìm thấy bàn.');
-    if (transitions[table.status] !== nextStatus) {
-      throw httpError(409, 'INVALID_STATUS_TRANSITION', `Không thể chuyển từ ${table.status} sang ${nextStatus}.`);
-    }
     const [orders] = await connection.query('SELECT id FROM active_orders WHERE table_id = ?', [table.id]);
     if (orders.length === 0) throw httpError(409, 'ORDER_NOT_FOUND', 'Bàn chưa có order.');
-    await connection.query('UPDATE restaurant_tables SET status = ? WHERE id = ?', [nextStatus, table.id]);
+    const [batches] = await connection.query(
+      `SELECT id FROM order_batches
+       WHERE table_id = ? AND id = ? AND status = 'cooking' FOR UPDATE`,
+      [table.id, expectedBatchId],
+    );
+    if (!batches[0]) {
+      throw httpError(409, 'ORDER_BATCH_CHANGED', 'Phiếu đang nấu đã thay đổi. Hãy tải lại trạng thái bàn.');
+    }
+    await connection.query(
+      "UPDATE order_batches SET status = 'done', completed_at = CURRENT_TIMESTAMP(3) WHERE id = ?",
+      [batches[0].id],
+    );
     await promoteKitchenQueue(connection);
+    await syncTableStatuses(connection, [table.id]);
+    const [updatedTables] = await connection.query('SELECT status FROM restaurant_tables WHERE id = ?', [table.id]);
     await connection.commit();
-    res.json({ ok: true, status: nextStatus });
+    res.json({ ok: true, status: updatedTables[0].status, completedBatchId: Number(batches[0].id) });
+  } catch (error) {
+    await connection.rollback().catch(() => {});
+    throw error;
+  } finally {
+    connection.release();
+  }
+}));
+
+/** Tổng hợp trực tiếp trên hóa đơn đã thanh toán, không dùng order đang mở làm số liệu bán hàng. */
+app.get('/api/reports/summary', requireDatabase, asyncRoute(async (req, res) => {
+  if (typeof req.query.from !== 'string' || typeof req.query.to !== 'string') {
+    throw httpError(400, 'INVALID_DATE_RANGE', 'Khoảng thời gian báo cáo không hợp lệ.');
+  }
+  const from = new Date(req.query.from);
+  const to = new Date(req.query.to);
+  const duration = to.getTime() - from.getTime();
+  const timezoneOffsetMinutes = req.query.timezoneOffsetMinutes == null
+    ? 0
+    : boundedInteger(req.query.timezoneOffsetMinutes, 'timezoneOffsetMinutes', -840, 840);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || duration <= 0 || duration > 366 * 24 * 60 * 60 * 1000) {
+    throw httpError(400, 'INVALID_DATE_RANGE', 'Khoảng báo cáo phải lớn hơn 0 và không vượt quá 366 ngày.');
+  }
+
+  const connection = await getPool().getConnection();
+  try {
+    await connection.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+    await connection.query('START TRANSACTION READ ONLY');
+    const range = [from, to];
+    const [totalRows] = await connection.query(
+      `SELECT COALESCE(SUM(total), 0) AS revenue, COUNT(*) AS orders,
+        COALESCE(SUM(item_count), 0) AS itemCount
+       FROM payment_transactions WHERE paid_at >= ? AND paid_at < ?`,
+      range,
+    );
+    const [hourlyRows] = await connection.query(
+      `SELECT localHour AS hour, COALESCE(SUM(total), 0) AS revenue, COUNT(*) AS orders
+       FROM (
+         SELECT HOUR(DATE_ADD(paid_at, INTERVAL ? MINUTE)) AS localHour, total
+         FROM payment_transactions WHERE paid_at >= ? AND paid_at < ?
+       ) scoped
+       GROUP BY localHour ORDER BY localHour`,
+      [timezoneOffsetMinutes, ...range],
+    );
+    const [methodRows] = await connection.query(
+      `SELECT payment_method AS method, COALESCE(SUM(total), 0) AS revenue, COUNT(*) AS orders
+       FROM payment_transactions WHERE paid_at >= ? AND paid_at < ?
+       GROUP BY payment_method ORDER BY revenue DESC`,
+      range,
+    );
+    const [topItemRows] = await connection.query(
+      `SELECT COALESCE(pi.menu_item_id, CONCAT('legacy:', pi.name)) AS id, pi.name,
+        SUM(pi.quantity) AS quantity, SUM(pi.quantity * pi.price) AS revenue
+       FROM payment_items pi
+       INNER JOIN payment_transactions pt ON pt.id = pi.transaction_id
+       WHERE pt.paid_at >= ? AND pt.paid_at < ?
+       GROUP BY COALESCE(pi.menu_item_id, CONCAT('legacy:', pi.name)), pi.name
+       ORDER BY quantity DESC, revenue DESC, pi.name LIMIT 10`,
+      range,
+    );
+    const [categoryRows] = await connection.query(
+      `SELECT COALESCE(pi.category_id, 'uncategorized') AS id,
+        COALESCE(pi.category_name, 'Khác') AS name,
+        SUM(pi.quantity) AS quantity, SUM(pi.quantity * pi.price) AS revenue
+       FROM payment_items pi
+       INNER JOIN payment_transactions pt ON pt.id = pi.transaction_id
+       WHERE pt.paid_at >= ? AND pt.paid_at < ?
+       GROUP BY COALESCE(pi.category_id, 'uncategorized'), COALESCE(pi.category_name, 'Khác')
+       ORDER BY revenue DESC, quantity DESC, name`,
+      range,
+    );
+    const [staffRows] = await connection.query(
+      `SELECT pt.staff_id AS employeeId,
+        CASE WHEN pt.staff_id IS NULL THEN 'Chưa gán nhân viên'
+          ELSE COALESCE(MAX(e.full_name), MAX(NULLIF(pt.staff_name, '')), 'Nhân viên') END AS name,
+        COALESCE(SUM(pt.total), 0) AS revenue, COUNT(*) AS orders,
+        COALESCE(SUM(pt.item_count), 0) AS itemCount
+       FROM payment_transactions pt
+       LEFT JOIN employees e ON e.id = pt.staff_id
+       WHERE pt.paid_at >= ? AND pt.paid_at < ?
+       GROUP BY pt.staff_id
+       ORDER BY revenue DESC, orders DESC, name`,
+      range,
+    );
+    await connection.commit();
+
+    const totals = {
+      revenue: Number(totalRows[0]?.revenue) || 0,
+      orders: Number(totalRows[0]?.orders) || 0,
+      itemCount: Number(totalRows[0]?.itemCount) || 0,
+    };
+    res.json({
+      range: { from: from.toISOString(), to: to.toISOString(), timezoneOffsetMinutes },
+      totals: {
+        ...totals,
+        averageBill: totals.orders ? Math.round(totals.revenue / totals.orders) : 0,
+      },
+      hourly: hourlyRows.map(row => ({ hour: Number(row.hour), revenue: Number(row.revenue), orders: Number(row.orders) })),
+      paymentMethods: methodRows.map(row => ({ method: row.method, revenue: Number(row.revenue), orders: Number(row.orders) })),
+      topItems: topItemRows.map(row => ({ id: row.id, name: row.name, quantity: Number(row.quantity), revenue: Number(row.revenue) })),
+      categories: categoryRows.map(row => ({ id: row.id, name: row.name, quantity: Number(row.quantity), revenue: Number(row.revenue) })),
+      staff: staffRows.map(row => ({
+        ...(row.employeeId ? { employeeId: row.employeeId } : {}),
+        name: row.name,
+        revenue: Number(row.revenue),
+        orders: Number(row.orders),
+        itemCount: Number(row.itemCount),
+      })),
+    });
   } catch (error) {
     await connection.rollback().catch(() => {});
     throw error;
@@ -645,6 +1072,28 @@ app.post('/api/payments', requireDatabase, asyncRoute(async (req, res) => {
     await connection.beginTransaction();
     await lockKitchenQueue(connection);
 
+    // Retry sau timeout phải trả đúng giao dịch đã commit, kể cả active order đã được đóng.
+    if (typeof draft?.invoiceCode === 'string' && draft.invoiceCode) {
+      const [existingRows] = await connection.query(
+        `${paymentSelect('WHERE invoice_code = ?')} LIMIT 1 FOR UPDATE`,
+        [draft.invoiceCode],
+      );
+      const existing = existingRows[0];
+      if (existing) {
+        const requestedEmployeeId = typeof draft.employeeId === 'string' && draft.employeeId
+          ? draft.employeeId
+          : null;
+        const sameRequest = existing.tableId === tableId
+          && existing.method === draft.method
+          && existing.transactionCode === draft.transactionCode
+          && (existing.employeeId ?? null) === requestedEmployeeId;
+        if (!sameRequest) throw httpError(409, 'DUPLICATE_INVOICE', 'Mã hóa đơn đã được dùng cho một giao dịch khác.');
+        await connection.commit();
+        res.json({ ok: true, id: existing.id, payment: existing, idempotent: true });
+        return;
+      }
+    }
+
     const [tables] = await connection.query(
       'SELECT id, table_number AS number, status FROM restaurant_tables WHERE id = ? FOR UPDATE',
       [tableId],
@@ -654,30 +1103,70 @@ app.post('/api/payments', requireDatabase, asyncRoute(async (req, res) => {
 
     const [orders] = await connection.query('SELECT items FROM active_orders WHERE table_id = ? FOR UPDATE', [tableId]);
     if (!orders[0]) throw httpError(409, 'ORDER_NOT_FOUND', 'Order đã được thanh toán hoặc không còn tồn tại.');
-    const items = validateOrderItems(parseJsonColumn(orders[0].items, []));
+    const [batches] = await connection.query(
+      'SELECT id, status FROM order_batches WHERE table_id = ? ORDER BY id FOR UPDATE',
+      [tableId],
+    );
+    if (!canSettleOrder(batches)) {
+      throw httpError(409, 'ORDER_NOT_READY_FOR_PAYMENT', 'Chỉ thanh toán sau khi bếp hoàn tất tất cả lượt gọi của bàn.');
+    }
+    const items = validateOrderItems(parseJsonColumn(orders[0].items, []), { maxItems: 500 });
 
     const [settingsRows] = await connection.query('SELECT settings FROM restaurant_settings WHERE id = 1 LIMIT 1');
     const settings = sanitizeSettings(parseJsonColumn(settingsRows[0]?.settings, defaultSettings), defaultSettings);
-    const payment = createPayment({ draft, items, settings, table });
+    let selectedEmployee = null;
+    if (typeof draft?.employeeId === 'string' && draft.employeeId) {
+      const [employeeRows] = await connection.query(
+        'SELECT id, full_name AS name, role, active FROM employees WHERE id = ? LIMIT 1',
+        [draft.employeeId],
+      );
+      selectedEmployee = employeeRows[0];
+      if (!selectedEmployee || !selectedEmployee.active) {
+        throw httpError(409, 'EMPLOYEE_UNAVAILABLE', 'Nhân viên phục vụ không tồn tại hoặc đã ngừng làm việc.');
+      }
+      if (selectedEmployee.role !== 'server') {
+        throw httpError(409, 'EMPLOYEE_ROLE_INVALID', 'Chỉ nhân viên có vai trò Phục vụ mới được gán cho bàn.');
+      }
+    }
+    const payment = createPayment({
+      draft,
+      items,
+      settings: selectedEmployee ? { ...settings, staffName: selectedEmployee.name } : settings,
+      table,
+    });
+    if (selectedEmployee) payment.employeeId = selectedEmployee.id;
 
     const [result] = await connection.query(
       `INSERT INTO payment_transactions (
         invoice_code, transaction_code, table_id, table_number, payment_method,
-        subtotal, discount, service_fee, vat, total, item_count,
+        subtotal, discount, service_fee, vat, total, item_count, staff_id,
         staff_name, cashier_name, paid_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         payment.invoiceCode, payment.transactionCode, payment.tableId, payment.tableNumber, payment.method,
         payment.subtotal, payment.discount, payment.serviceFee, payment.vat, payment.total, payment.itemCount,
+        payment.employeeId ?? null,
         payment.staffName, payment.cashierName, new Date(payment.paidAt),
       ],
     );
 
-    const itemPlaceholders = items.map(() => '(?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+    const categoryIds = [...new Set(items.map(item => item.menuItem.categoryId).filter(Boolean))];
+    const categoryNames = new Map();
+    if (categoryIds.length > 0) {
+      const categoryPlaceholders = categoryIds.map(() => '?').join(', ');
+      const [categoryRows] = await connection.query(
+        `SELECT id, name FROM menu_categories WHERE id IN (${categoryPlaceholders})`,
+        categoryIds,
+      );
+      categoryRows.forEach(category => categoryNames.set(category.id, category.name));
+    }
+    const itemPlaceholders = items.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
     const itemValues = items.flatMap(item => [
       result.insertId,
       item.cartId,
       item.menuItem.id,
+      item.menuItem.categoryId || null,
+      categoryNames.get(item.menuItem.categoryId) || 'Khác',
       item.menuItem.name,
       item.quantity,
       item.menuItem.price + (item.selectedSize?.extraPrice ?? 0)
@@ -687,7 +1176,8 @@ app.post('/api/payments', requireDatabase, asyncRoute(async (req, res) => {
     ]);
     await connection.query(
       `INSERT INTO payment_items (
-        transaction_id, cart_id, menu_item_id, name, quantity, price, note, options_json
+        transaction_id, cart_id, menu_item_id, category_id, category_name,
+        name, quantity, price, note, options_json
       ) VALUES ${itemPlaceholders}`,
       itemValues,
     );
@@ -716,6 +1206,7 @@ app.post('/api/payments', requireDatabase, asyncRoute(async (req, res) => {
 app.use('/api', (_req, res) => res.status(404).json({ error: 'NOT_FOUND' }));
 
 app.use((error, _req, res, _next) => {
+  if (isDatabaseConnectivityError(error)) markDatabaseUnavailable(error);
   const databaseConflict = error.code === 'ER_DUP_ENTRY';
   const status = Number(error.status) || (databaseConflict ? 409 : error instanceof SyntaxError ? 400 : 500);
   const code = error.code && typeof error.code === 'string' && !error.code.startsWith('ER_')
@@ -741,8 +1232,7 @@ async function connectDatabase() {
     console.log(`MySQL connected: ${databaseConfigSummary.host}:${databaseConfigSummary.port}/${databaseConfigSummary.database}`);
     if (promoted.length > 0) console.log(`Kitchen queue promoted ${promoted.length} order(s).`);
   } catch (error) {
-    dbReady = false;
-    dbError = error;
+    markDatabaseUnavailable(error);
     console.warn(`MySQL unavailable: ${error.message}`);
   } finally {
     connecting = false;
@@ -759,10 +1249,29 @@ const retryTimer = setInterval(() => {
 }, 10_000);
 retryTimer.unref();
 
+/**
+ * Đồng hồ bếp phía server: tự hoàn tất batch đủ ETA và cấp slot FIFO kế tiếp.
+ * Guard trong RAM chỉ chống chồng vòng tại một process; khóa MySQL vẫn bảo vệ nhiều instance.
+ */
+const kitchenCycleTimer = setInterval(async () => {
+  if (!dbReady || kitchenCycleRunning) return;
+  kitchenCycleRunning = true;
+  try {
+    await processKitchenQueue(getPool());
+  } catch (error) {
+    if (isDatabaseConnectivityError(error)) markDatabaseUnavailable(error);
+    console.warn(`Kitchen timer cycle failed: ${error.message}`);
+  } finally {
+    kitchenCycleRunning = false;
+  }
+}, 1_000);
+kitchenCycleTimer.unref();
+
 /** Dừng nhận request mới và đóng pool trước khi thoát tiến trình. */
 async function shutdown(signal) {
   console.log(`${signal} received, shutting down.`);
   clearInterval(retryTimer);
+  clearInterval(kitchenCycleTimer);
   server.close(async () => {
     await closePool().catch(error => console.error(error));
     process.exit(0);

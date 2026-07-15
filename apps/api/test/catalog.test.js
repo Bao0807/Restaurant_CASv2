@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { canonicalizeOrderItems, estimateCookMinutes, normalizeCategory, normalizeMenuItem } from '../src/catalog.js';
-import { isKitchenOrderStale, promoteKitchenQueue } from '../src/kitchenQueue.js';
+import { completeExpiredKitchenBatches, isKitchenOrderStale, promoteKitchenQueue } from '../src/kitchenQueue.js';
 
 const catalogRow = {
   id: 'm1', name: 'Phở bò', description: 'Món thử', price: 65_000, image: '',
@@ -66,6 +66,29 @@ test('phát hiện order bếp quá hạn theo ngưỡng cấu hình', () => {
   assert.equal(isKitchenOrderStale(null, 120, now), false);
 });
 
+test('tự hoàn tất mọi batch đã chạy đủ ETA và đồng bộ trạng thái bàn', async () => {
+  const calls = [];
+  const connection = {
+    async query(sql, params = []) {
+      calls.push({ sql, params });
+      if (sql.includes('SELECT id AS batchId')) {
+        return [[
+          { batchId: 21, tableId: 't1' },
+          { batchId: 22, tableId: 't2' },
+        ]];
+      }
+      if (sql.includes('UPDATE order_batches')) return [{ affectedRows: 2 }];
+      if (sql.includes('UPDATE restaurant_tables')) return [{ affectedRows: 2 }];
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+  };
+
+  const completed = await completeExpiredKitchenBatches(connection);
+  assert.deepEqual(completed.map(batch => batch.batchId), [21, 22]);
+  assert.deepEqual(calls[1].params, [21, 22]);
+  assert.match(calls[2].sql, /SUM\(status = 'cooking'\)/);
+});
+
 test('queue không tự lấy món khi tạm dừng hoặc chuyển sang thủ công', async () => {
   for (const state of [
     { concurrency: 2, automationEnabled: 1, paused: 1 },
@@ -83,7 +106,7 @@ test('điều phối thủ công có thể lấy order khi chế độ tự đ�
     async query(sql) {
       if (sql.includes('FROM kitchen_queue_state')) return [[{ concurrency: 2, automationEnabled: 0, paused: 0 }]];
       if (sql.includes('COUNT(*)')) return [[{ cookingCount: 0 }]];
-      if (sql.includes('SELECT o.id')) return [[]];
+      if (sql.includes('SELECT id AS batchId')) return [[]];
       throw new Error(`Unexpected SQL: ${sql}`);
     },
   };

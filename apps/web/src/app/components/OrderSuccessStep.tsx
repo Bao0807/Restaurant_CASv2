@@ -1,18 +1,30 @@
-import { CheckCircle, Plus } from 'lucide-react';
+import { CheckCircle, Clock3, Plus, Printer } from 'lucide-react';
 import { Table, CartItem, cartEstimatedCookMinutes, cartTotal, formatVND } from '../data';
 import { BRAND_ASSETS } from '../config/restaurant';
+import type { SavedOrderBatch } from '../services/api';
 
 interface OrderSuccessStepProps {
   orderNumber: string;
   table: Table;
   cart: CartItem[];
+  batch: SavedOrderBatch | null;
+  isEditing: boolean;
   onAddMore: () => void;
   onDone: () => void;
 }
 
-export function OrderSuccessStep({ orderNumber, table, cart, onAddMore, onDone }: OrderSuccessStepProps) {
+export function OrderSuccessStep({ orderNumber, table, cart, batch, isEditing, onAddMore, onDone }: OrderSuccessStepProps) {
   const total = cartTotal(cart);
   const estimatedCookMinutes = cartEstimatedCookMinutes(cart);
+  const isAddition = batch?.isAddition ?? false;
+
+  const printKitchenTicket = () => {
+    const cleanup = () => document.body.classList.remove('printing-kitchen-ticket');
+    document.body.classList.add('printing-kitchen-ticket');
+    window.addEventListener('afterprint', cleanup, { once: true });
+    window.print();
+    window.setTimeout(cleanup, 1_000);
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, background: '#F9FAFB' }}>
@@ -26,24 +38,28 @@ export function OrderSuccessStep({ orderNumber, table, cart, onAddMore, onDone }
         }}>
           <CheckCircle size={40} color="#10B981" fill="#10B981" />
         </div>
-        <h2 style={{ margin: '0 0 6px', color: '#111827' }}>Order đã gửi bếp!</h2>
+        <h2 style={{ margin: '0 0 6px', color: '#111827' }}>
+          {isEditing ? 'Phiếu chờ đã được cập nhật!' : isAddition ? 'Lượt gọi thêm đã vào hàng đợi!' : 'Order đã gửi bếp!'}
+        </h2>
         <p style={{ margin: 0, color: '#6B7280', fontSize: '14px' }}>
-          Phiếu #{orderNumber} · Bàn {table.number}
+          Order #{orderNumber} · Lượt {batch?.batchNumber ?? 1} · Bàn {table.number}
         </p>
       </div>
 
       {/* Order Summary */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '16px' }}>
         {/* Receipt Card */}
-        <div style={{ background: '#fff', borderRadius: 20, overflow: 'hidden', boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }}>
+        <div className="kitchen-ticket" style={{ background: '#fff', borderRadius: 20, overflow: 'hidden', boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }}>
           {/* Receipt Header */}
           <div style={{ background: '#111827', padding: '16px 20px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <img src={BRAND_ASSETS.mark} alt="CAS" style={{ width: 28, height: 28, flexShrink: 0 }} />
                 <div>
-                <div style={{ color: '#fff', fontWeight: 700, fontSize: '15px' }}>Phiếu gọi món</div>
-                <div style={{ color: '#9CA3AF', fontSize: '12px', marginTop: 2 }}>#{orderNumber}</div>
+                <div style={{ color: '#fff', fontWeight: 700, fontSize: '15px' }}>
+                  {isEditing ? 'PHIẾU ĐÃ CẬP NHẬT' : isAddition ? 'PHIẾU GỌI THÊM' : 'PHIẾU GỌI MÓN'}
+                </div>
+                <div style={{ color: '#9CA3AF', fontSize: '12px', marginTop: 2 }}>Order #{orderNumber} · Lượt {batch?.batchNumber ?? 1}</div>
                 </div>
               </div>
               <div style={{ textAlign: 'right' }}>
@@ -103,6 +119,9 @@ export function OrderSuccessStep({ orderNumber, table, cart, onAddMore, onDone }
               <span style={{ color: '#374151', fontWeight: 600 }}>Tổng {cart.reduce((s, i) => s + i.quantity, 0)} phần</span>
               <span style={{ fontWeight: 800, fontSize: '18px', color: '#111827' }}>{formatVND(total)}</span>
             </div>
+            <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6, color: '#1D4ED8', fontSize: 12, fontWeight: 700 }}>
+              <Clock3 size={14} /> ETA lượt này: khoảng {batch?.estimatedCookMinutes ?? estimatedCookMinutes} phút
+            </div>
           </div>
         </div>
 
@@ -113,13 +132,22 @@ export function OrderSuccessStep({ orderNumber, table, cart, onAddMore, onDone }
         }}>
           <span style={{ fontSize: 18 }}>🍳</span>
           <p style={{ margin: 0, fontSize: '13px', color: '#92400E', lineHeight: 1.5 }}>
-            Order đã được gửi đến bếp. Thời gian nấu ước tính khoảng <strong>{estimatedCookMinutes} phút</strong>; số phần của từng món đã được tính vào ETA.
+            {isEditing
+              ? 'Phiếu giữ nguyên vị trí FIFO và thời điểm vào hàng chờ. '
+              : isAddition ? 'Phiếu gọi thêm được xếp FIFO như một lượt độc lập. ' : 'Order đã được gửi đến bếp. '}
+            Khi thanh toán, toàn bộ các lượt của bàn sẽ được gộp vào một hóa đơn cuối.
           </p>
         </div>
       </div>
 
       {/* Actions */}
       <div style={{ padding: '14px 16px 24px', background: '#fff', borderTop: '1px solid #F3F4F6', display: 'flex', gap: 10, flexShrink: 0 }}>
+        <button
+          onClick={printKitchenTicket}
+          style={{ background: '#ECFEFF', color: '#0F766E', border: '1px solid #99F6E4', borderRadius: 14, padding: '14px', cursor: 'pointer', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 7 }}
+        >
+          <Printer size={18} /> In phiếu
+        </button>
         <button
           onClick={onAddMore}
           style={{

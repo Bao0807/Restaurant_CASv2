@@ -1,5 +1,7 @@
-import type { CartItem, KitchenStatus, MenuCategory, MenuItem, PaymentRecord, Table, TableStatus } from '../data';
+import type { CartItem, EditableOrderBatch, Employee, KitchenStatus, MenuCategory, MenuItem, PaymentRecord, ReportSummary, Table, TableStatus } from '../data';
 import { normalizeSettings, type RestaurantSettings } from '../config/restaurant';
+
+export type { EditableOrderBatch } from '../data';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
 const AUTH_STORAGE_KEY = 'cas-api-basic-auth';
@@ -36,14 +38,27 @@ export function clearApiCredentials(): void {
 /** Client HTTP dùng chung: gắn auth theo tab và chuẩn hóa mọi lỗi API. */
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const authorization = getAuthorization();
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(authorization ? { Authorization: authorization } : {}),
-      ...(options?.headers ?? {}),
-    },
-  });
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 12_000);
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
+      signal: options?.signal ?? controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authorization ? { Authorization: authorization } : {}),
+        ...(options?.headers ?? {}),
+      },
+    });
+  } catch (error) {
+    if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
+      throw new ApiError('API không phản hồi sau 12 giây. Vui lòng kiểm tra kết nối.', 0, 'REQUEST_TIMEOUT');
+    }
+    throw new ApiError('Không thể kết nối API. Vui lòng kiểm tra mạng hoặc backend.', 0, 'NETWORK_ERROR');
+  } finally {
+    window.clearTimeout(timeout);
+  }
 
   const contentType = response.headers.get('content-type') || '';
   const body = contentType.includes('application/json')
@@ -93,10 +108,30 @@ export async function saveRestaurantSettings(settings: RestaurantSettings): Prom
   return normalizeSettings(data.settings);
 }
 
+export async function fetchEmployees(activeOnly = false): Promise<Employee[]> {
+  const data = await request<{ employees: Employee[] }>(`/employees${activeOnly ? '?active=true' : ''}`);
+  return data.employees.map(employee => ({ ...employee, active: Boolean(employee.active) }));
+}
+
+export async function saveEmployee(employee: Partial<Employee>): Promise<Employee> {
+  const path = employee.id ? `/employees/${encodeURIComponent(employee.id)}` : '/employees';
+  const data = await request<{ employee: Employee }>(path, {
+    method: employee.id ? 'PUT' : 'POST',
+    body: JSON.stringify({ employee }),
+  });
+  return { ...data.employee, active: Boolean(data.employee.active) };
+}
+
+/** Ngừng hoạt động thay vì xóa vật lý để giữ lịch sử hóa đơn. */
+export async function deactivateEmployee(employeeId: string): Promise<void> {
+  await request(`/employees/${encodeURIComponent(employeeId)}`, { method: 'DELETE' });
+}
+
 /** Lấy snapshot nhất quán của bàn, order và trạng thái bếp. */
 export async function fetchOperations(): Promise<{
   tables: Table[];
   tableOrders: Record<string, CartItem[]>;
+  waitingBatchesByTable: Record<string, EditableOrderBatch[]>;
   kitchen: KitchenStatus;
 }> {
   return request('/operations');
@@ -166,15 +201,29 @@ export async function removeTable(tableId: string): Promise<void> {
 }
 
 /** Lưu order; backend sẽ chuẩn hóa lại catalog, giá và ETA. */
-export async function saveOrder(tableId: string, items: CartItem[]): Promise<{
+export interface SavedOrderBatch {
   orderNumber: number;
+  batchId: number;
+  batchNumber: number;
+  isAddition: boolean;
   status: TableStatus;
   queuedAt: string;
   cookingStartedAt?: string;
-  estimatedCookMinutes?: number;
+  estimatedCookMinutes: number;
   items: CartItem[];
-}> {
+}
+
+/** Mỗi lần gọi thêm gửi một batch mới; backend xếp batch đó vào FIFO độc lập. */
+export async function saveOrder(tableId: string, items: CartItem[], append = false): Promise<SavedOrderBatch> {
   return request(`/orders/${encodeURIComponent(tableId)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ items, append }),
+  });
+}
+
+/** Sửa một phiếu bếp còn chờ mà không đổi số phiếu hoặc vị trí FIFO. */
+export async function updateWaitingOrderBatch(tableId: string, batchId: number, items: CartItem[]): Promise<SavedOrderBatch> {
+  return request(`/orders/${encodeURIComponent(tableId)}/batches/${encodeURIComponent(String(batchId))}`, {
     method: 'PUT',
     body: JSON.stringify({ items }),
   });
@@ -184,14 +233,17 @@ export async function deleteOrder(tableId: string): Promise<void> {
   await request(`/orders/${encodeURIComponent(tableId)}`, { method: 'DELETE' });
 }
 
-export async function requeueOrder(tableId: string): Promise<void> {
-  await request(`/orders/${encodeURIComponent(tableId)}/requeue`, { method: 'POST' });
+export async function requeueOrder(tableId: string, expectedBatchId: number): Promise<void> {
+  await request(`/orders/${encodeURIComponent(tableId)}/requeue`, {
+    method: 'POST',
+    body: JSON.stringify({ expectedBatchId }),
+  });
 }
 
-export async function updateTableStatus(tableId: string, status: TableStatus): Promise<TableStatus> {
+export async function updateTableStatus(tableId: string, status: TableStatus, expectedBatchId: number): Promise<TableStatus> {
   const data = await request<{ status: TableStatus }>(`/tables/${encodeURIComponent(tableId)}/status`, {
     method: 'PATCH',
-    body: JSON.stringify({ status }),
+    body: JSON.stringify({ status, expectedBatchId }),
   });
   return data.status;
 }
@@ -214,6 +266,16 @@ export async function fetchPayments(): Promise<PaymentRecord[]> {
     itemCount: Number(payment.itemCount),
     paidAt: new Date(payment.paidAt).toISOString(),
   }));
+}
+
+/** Lấy số liệu đã aggregate từ hóa đơn; không phụ thuộc order đang mở hay giới hạn danh sách 1.000 dòng. */
+export async function fetchReportSummary(from: Date, to: Date): Promise<ReportSummary> {
+  const query = new URLSearchParams({
+    from: from.toISOString(),
+    to: to.toISOString(),
+    timezoneOffsetMinutes: String(-from.getTimezoneOffset()),
+  });
+  return request(`/reports/summary?${query}`);
 }
 
 /** Ghi thanh toán idempotent theo invoiceCode và nhận tổng tiền đã tính lại. */

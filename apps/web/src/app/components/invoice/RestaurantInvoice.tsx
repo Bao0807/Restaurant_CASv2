@@ -18,6 +18,8 @@ export interface PrintableInvoiceData {
   area: string;
   customerName: string;
   guestCount: number;
+  batchCount?: number;
+  additionalBatchCount?: number;
   staffName: string;
   cashierName: string;
   restaurant: {
@@ -88,6 +90,13 @@ export function RestaurantInvoice({ data }: { data: PrintableInvoiceData }) {
           <div className="invoice-info-box"><span>Khu vực</span><strong>{data.area}</strong></div>
           <div className="invoice-info-box"><span>Khách hàng</span><strong>{data.customerName}</strong></div>
           <div className="invoice-info-box"><span>Số khách</span><strong>{data.guestCount}</strong></div>
+          <div className="invoice-info-box">
+            <span>Lượt gọi</span>
+            <strong>
+              {data.batchCount ?? 1}
+              {(data.additionalBatchCount ?? 0) > 0 && ` (+${data.additionalBatchCount} gọi thêm)`}
+            </strong>
+          </div>
           <div className="invoice-info-box"><span>Thu ngân / Phục vụ</span><strong>{data.cashierName} / {data.staffName}</strong></div>
         </div>
 

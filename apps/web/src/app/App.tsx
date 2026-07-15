@@ -1,4 +1,5 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { LogOut, UserRound } from 'lucide-react';
 import {
   AppView, OrderStep, Table, CartItem, PaymentRecord,
   INITIAL_TABLES, INITIAL_TABLE_ORDERS, CATEGORIES, MENU_ITEMS,
@@ -24,9 +25,13 @@ import {
   saveOrder,
   saveRestaurantSettings,
   updateTableStatus,
+  updateWaitingOrderBatch,
+  type EditableOrderBatch,
+  type SavedOrderBatch,
 } from './services/api';
 import { BottomNav } from './components/BottomNav';
 import { TableSelectStep } from './components/TableSelectStep';
+import { canDeleteWaitingOrder } from './components/TableOptionsModal';
 import { LoginPage } from './components/LoginPage';
 
 const MenuStep = lazy(() => import('./components/MenuStep').then(module => ({ default: module.MenuStep })));
@@ -36,6 +41,26 @@ const OverviewPage = lazy(() => import('./components/OverviewPage').then(module 
 const PaymentPage = lazy(() => import('./components/PaymentPage').then(module => ({ default: module.PaymentPage })));
 const DashboardPage = lazy(() => import('./components/DashboardPage').then(module => ({ default: module.DashboardPage })));
 
+type OrderMode = 'new' | 'addition' | 'edit';
+
+interface AppNavigationState {
+  casNavigation: true;
+  view: AppView;
+  orderStep: OrderStep;
+  selectedTableId: string | null;
+  orderMode: OrderMode;
+  editingBatchId: number | null;
+}
+
+function isAppNavigationState(value: unknown): value is AppNavigationState {
+  if (!value || typeof value !== 'object') return false;
+  const state = value as Partial<AppNavigationState>;
+  return state.casNavigation === true
+    && ['order', 'overview', 'payment', 'reports', 'dashboard'].includes(state.view ?? '')
+    && ['tables', 'menu', 'confirm', 'success'].includes(state.orderStep ?? '')
+    && ['new', 'addition', 'edit'].includes(state.orderMode ?? '');
+}
+
 export default function App() {
   const [view, setView] = useState<AppView>('order');
   const [orderStep, setOrderStep] = useState<OrderStep>('tables');
@@ -43,7 +68,11 @@ export default function App() {
   const [cart, setCart] = useState<CartItem[]>([]);
   const [tables, setTables] = useState<Table[]>(INITIAL_TABLES);
   const [tableOrders, setTableOrders] = useState<Record<string, CartItem[]>>(INITIAL_TABLE_ORDERS);
+  const [waitingBatchesByTable, setWaitingBatchesByTable] = useState<Record<string, EditableOrderBatch[]>>({});
   const [lastOrderNumber, setLastOrderNumber] = useState('');
+  const [lastOrderBatch, setLastOrderBatch] = useState<SavedOrderBatch | null>(null);
+  const [orderMode, setOrderMode] = useState<OrderMode>('new');
+  const [editingBatchId, setEditingBatchId] = useState<number | null>(null);
   const [restaurantSettings, setRestaurantSettings] = useState<RestaurantSettings>(DEFAULT_RESTAURANT_SETTINGS);
   const [completedPayments, setCompletedPayments] = useState<PaymentRecord[]>([]);
   const [kitchen, setKitchen] = useState<KitchenStatus>({ concurrency: 2, cookingCount: 0, waitingCount: 0, staleCount: 0, staleAfterMinutes: 120, automationEnabled: true, paused: false });
@@ -52,11 +81,15 @@ export default function App() {
   const [settingsStatus, setSettingsStatus] = useState<'idle' | 'loading' | 'saving' | 'saved' | 'error'>('loading');
   const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' | 'info' } | null>(null);
   const [authStatus, setAuthStatus] = useState<'checking' | 'required' | 'authenticated'>('checking');
+  const [authenticatedUsername, setAuthenticatedUsername] = useState('');
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [bootstrapStatus, setBootstrapStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [operationsSyncStatus, setOperationsSyncStatus] = useState<'online' | 'stale'>('online');
+  const [lastOperationsSyncAt, setLastOperationsSyncAt] = useState<Date | null>(null);
+  const historyReadyRef = useRef(false);
 
   /** Hiển thị phản hồi ngắn sau thao tác mà không chặn luồng người dùng. */
   const showToast = (msg: string, type: 'success' | 'error' | 'info' = 'info') => {
@@ -64,15 +97,115 @@ export default function App() {
     setTimeout(() => setToast(null), 2800);
   };
 
+  /** Ghi một mốc điều hướng SPA để Back/Forward khôi phục đúng trang và bước order. */
+  const navigate = (
+    overrides: Partial<Omit<AppNavigationState, 'casNavigation'>>,
+    method: 'push' | 'replace' = 'push',
+  ) => {
+    const next: AppNavigationState = {
+      casNavigation: true,
+      view,
+      orderStep,
+      selectedTableId,
+      orderMode,
+      editingBatchId,
+      ...overrides,
+    };
+
+    if (method === 'replace') window.history.replaceState(next, '');
+    else window.history.pushState(next, '');
+
+    historyReadyRef.current = true;
+    setView(next.view);
+    setOrderStep(next.orderStep);
+    setSelectedTableId(next.selectedTableId);
+    setOrderMode(next.orderMode);
+    setEditingBatchId(next.editingBatchId);
+  };
+
+  useEffect(() => {
+    if (authStatus !== 'authenticated' || bootstrapStatus !== 'ready' || historyReadyRef.current) return;
+
+    const stored = window.history.state;
+    if (isAppNavigationState(stored)) {
+      const tableExists = !stored.selectedTableId || tables.some(table => table.id === stored.selectedTableId);
+      const requiresTable = stored.view === 'order' && stored.orderStep !== 'tables';
+      const hasStaleReceipt = stored.orderStep === 'success';
+      const next = (requiresTable && !tableExists) || hasStaleReceipt
+        ? { ...stored, orderStep: 'tables' as const, selectedTableId: null, orderMode: 'new' as const, editingBatchId: null }
+        : stored;
+
+      setView(next.view);
+      setOrderStep(next.orderStep);
+      setSelectedTableId(next.selectedTableId);
+      setOrderMode(next.orderMode);
+      setEditingBatchId(next.editingBatchId);
+      if (next.orderMode === 'edit' && next.editingBatchId !== null && next.selectedTableId) {
+        const batch = waitingBatchesByTable[next.selectedTableId]?.find(item => item.batchId === next.editingBatchId);
+        if (batch) setCart(batch.items);
+      }
+      window.history.replaceState(next, '');
+    } else {
+      window.history.replaceState({
+        casNavigation: true,
+        view,
+        orderStep,
+        selectedTableId,
+        orderMode,
+        editingBatchId,
+      } satisfies AppNavigationState, '');
+    }
+    historyReadyRef.current = true;
+  }, [authStatus, bootstrapStatus, editingBatchId, orderMode, orderStep, selectedTableId, tables, view, waitingBatchesByTable]);
+
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      if (!isAppNavigationState(event.state)) return;
+
+      let next = event.state;
+      const requiresTable = next.view === 'order' && next.orderStep !== 'tables';
+      const tableExists = Boolean(next.selectedTableId && tables.some(table => table.id === next.selectedTableId));
+      if (requiresTable && !tableExists) {
+        next = { ...next, orderStep: 'tables', selectedTableId: null, orderMode: 'new', editingBatchId: null };
+        window.history.replaceState(next, '');
+      }
+
+      if (next.orderMode === 'edit' && next.editingBatchId !== null && next.selectedTableId) {
+        const batch = waitingBatchesByTable[next.selectedTableId]?.find(item => item.batchId === next.editingBatchId);
+        if (!batch) {
+          next = { ...next, orderStep: 'tables', selectedTableId: null, orderMode: 'new', editingBatchId: null };
+          window.history.replaceState(next, '');
+          setToast({ msg: 'Phiếu này không còn ở trạng thái chờ để sửa.', type: 'info' });
+        } else if (orderMode !== 'edit' || editingBatchId !== next.editingBatchId) {
+          setCart(batch.items);
+        }
+      }
+
+      setView(next.view);
+      setOrderStep(next.orderStep);
+      setSelectedTableId(next.selectedTableId);
+      setOrderMode(next.orderMode);
+      setEditingBatchId(next.editingBatchId);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [editingBatchId, orderMode, tables, waitingBatchesByTable]);
+
   useEffect(() => {
     let mounted = true;
 
     checkApiSession()
-      .then(() => { if (mounted) setAuthStatus('authenticated'); })
+      .then(session => {
+        if (!mounted) return;
+        setAuthenticatedUsername(session.username);
+        setAuthStatus('authenticated');
+      })
       .catch(error => {
         if (!mounted) return;
         if (error instanceof ApiError && error.status === 401) {
           clearApiCredentials();
+          setAuthenticatedUsername('');
           setAuthStatus('required');
           return;
         }
@@ -106,10 +239,13 @@ export default function App() {
         setRestaurantSettings(settings);
         setTables(operations.tables);
         setTableOrders(operations.tableOrders);
+        setWaitingBatchesByTable(operations.waitingBatchesByTable);
         setKitchen(operations.kitchen);
         setCompletedPayments(payments);
         setCategories(catalog.categories);
         setMenuItems(catalog.items);
+        setOperationsSyncStatus('online');
+        setLastOperationsSyncAt(new Date());
         setSettingsStatus('saved');
         setBootstrapStatus('ready');
       })
@@ -117,6 +253,7 @@ export default function App() {
         if (!mounted) return;
         if (error instanceof ApiError && error.status === 401) {
           clearApiCredentials();
+          setAuthenticatedUsername('');
           setAuthStatus('required');
           setLoginError('Phiên đăng nhập không còn hợp lệ.');
           return;
@@ -143,13 +280,19 @@ export default function App() {
         if (!stopped) {
           setTables(operations.tables);
           setTableOrders(operations.tableOrders);
+          setWaitingBatchesByTable(operations.waitingBatchesByTable);
           setKitchen(operations.kitchen);
+          setOperationsSyncStatus('online');
+          setLastOperationsSyncAt(new Date());
         }
       } catch (error) {
         if (!stopped && error instanceof ApiError && error.status === 401) {
           clearApiCredentials();
+          setAuthenticatedUsername('');
           setAuthStatus('required');
           setLoginError('Phiên đăng nhập không còn hợp lệ.');
+        } else if (!stopped) {
+          setOperationsSyncStatus('stale');
         }
       } finally {
         refreshing = false;
@@ -163,11 +306,41 @@ export default function App() {
     };
   }, [authStatus, bootstrapStatus]);
 
+  useEffect(() => {
+    if (
+      bootstrapStatus !== 'ready'
+      || orderMode !== 'edit'
+      || (orderStep !== 'menu' && orderStep !== 'confirm')
+      || !selectedTableId
+      || editingBatchId === null
+    ) return;
+
+    const remainsWaiting = waitingBatchesByTable[selectedTableId]?.some(batch => batch.batchId === editingBatchId);
+    if (remainsWaiting) return;
+
+    const next: AppNavigationState = {
+      casNavigation: true,
+      view: 'order',
+      orderStep: 'tables',
+      selectedTableId: null,
+      orderMode: 'new',
+      editingBatchId: null,
+    };
+    window.history.replaceState(next, '');
+    setOrderStep('tables');
+    setSelectedTableId(null);
+    setOrderMode('new');
+    setEditingBatchId(null);
+    setCart([]);
+    showToast('Phiếu đã được bếp nhận nấu nên không thể tiếp tục sửa.', 'info');
+  }, [bootstrapStatus, editingBatchId, orderMode, orderStep, selectedTableId, waitingBatchesByTable]);
+
   const handleLogin = async (username: string, password: string) => {
     setLoginBusy(true);
     setLoginError(null);
     try {
       await authenticate(username, password);
+      setAuthenticatedUsername(username);
       setAuthStatus('authenticated');
       setReloadKey(key => key + 1);
     } catch (error) {
@@ -177,78 +350,141 @@ export default function App() {
     }
   };
 
+  /** Xóa credential của tab và quay lại màn đăng nhập mà không reload toàn trang. */
+  const handleLogout = () => {
+    clearApiCredentials();
+    setAuthenticatedUsername('');
+    setLoginError(null);
+    setAuthStatus('required');
+    setBootstrapStatus('idle');
+    setView('order');
+    setOrderStep('tables');
+    setSelectedTableId(null);
+    setOrderMode('new');
+    setEditingBatchId(null);
+    setCart([]);
+    window.history.replaceState({
+      casNavigation: true,
+      view: 'order',
+      orderStep: 'tables',
+      selectedTableId: null,
+      orderMode: 'new',
+      editingBatchId: null,
+    } satisfies AppNavigationState, '');
+    historyReadyRef.current = false;
+  };
+
   const selectedTable = tables.find(t => t.id === selectedTableId) ?? null;
 
   /* ─── Order Flow ─── */
-  const handleSelectTable = (tableId: string) => {
-    setSelectedTableId(tableId);
-    // Pre-fill cart with existing order if any
-    const existing = tableOrders[tableId];
-    setCart(existing ? existing.map(i => ({ ...i, cartId: i.cartId })) : []);
-    setOrderStep('menu');
+  const handleStartOrder = (tableId: string) => {
+    const hasExistingOrder = Boolean(tableOrders[tableId]?.length);
+    // Gọi thêm luôn bắt đầu bằng giỏ rỗng để tạo một phiếu bếp riêng.
+    setCart([]);
+    navigate({
+      view: 'order',
+      orderStep: 'menu',
+      selectedTableId: tableId,
+      orderMode: hasExistingOrder ? 'addition' : 'new',
+      editingBatchId: null,
+    });
   };
 
-  const handleBackToTables = () => {
-    setSelectedTableId(null);
+  const handleEditWaitingOrder = (tableId: string, batchId: number) => {
+    const batch = waitingBatchesByTable[tableId]?.find(item => item.batchId === batchId);
+    if (!batch) {
+      showToast('Phiếu này không còn ở trạng thái chờ để sửa.', 'error');
+      return;
+    }
+
+    setCart(batch.items.map(item => ({
+      ...item,
+      selectedSize: item.selectedSize ? { ...item.selectedSize } : undefined,
+      selectedToppings: item.selectedToppings.map(topping => ({ ...topping })),
+    })));
+    navigate({
+      view: 'order',
+      orderStep: 'menu',
+      selectedTableId: tableId,
+      orderMode: 'edit',
+      editingBatchId: batchId,
+    });
+  };
+
+  const handleBrowserBack = () => {
+    if (isAppNavigationState(window.history.state) && orderStep !== 'tables') {
+      window.history.back();
+      return;
+    }
+    navigate({ orderStep: 'tables', selectedTableId: null, orderMode: 'new', editingBatchId: null });
+  };
+
+  const handleFinishOrder = () => {
     setCart([]);
-    setOrderStep('tables');
+    navigate({ view: 'order', orderStep: 'tables', selectedTableId: null, orderMode: 'new', editingBatchId: null });
   };
 
   /** Lưu order ở server rồi tải lại snapshot queue đã được điều phối. */
   const handlePlaceOrder = async () => {
     if (!selectedTableId || cart.length === 0) return;
     try {
-      const saved = await saveOrder(selectedTableId, cart);
+      if (orderMode === 'edit' && editingBatchId === null) {
+        throw new Error('Không xác định được phiếu chờ cần sửa.');
+      }
+      const saved = orderMode === 'edit'
+        ? await updateWaitingOrderBatch(selectedTableId, editingBatchId!, cart)
+        : await saveOrder(selectedTableId, cart, orderMode === 'addition');
       const operations = await fetchOperations();
       setLastOrderNumber(String(saved.orderNumber).padStart(4, '0'));
+      setLastOrderBatch(saved);
       setTableOrders(operations.tableOrders);
+      setWaitingBatchesByTable(operations.waitingBatchesByTable);
       setTables(operations.tables);
       setKitchen(operations.kitchen);
       setCart(saved.items);
-      setOrderStep('success');
+      // Thay mốc xác nhận bằng thành công để Back không gửi trùng cùng một phiếu.
+      navigate({ orderStep: 'success' }, 'replace');
     } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Không thể lưu order', 'error');
+      showToast(error instanceof Error ? error.message : orderMode === 'edit' ? 'Không thể cập nhật phiếu chờ' : 'Không thể lưu order', 'error');
       throw error;
     }
   };
 
-  /* ─── Overview Actions ─── */
-  const handleOverviewStartOrder = (tableId: string) => {
-    setSelectedTableId(tableId);
-    const existing = tableOrders[tableId];
-    setCart(existing ? [...existing] : []);
-    setOrderStep('menu');
-    setView('order');
-  };
-
   const handleDeleteOrder = async (tableId: string) => {
     const table = tables.find(t => t.id === tableId);
-    if (table?.status === 'cooking') {
-      showToast('Không thể hủy khi bàn đang nấu!', 'error');
-      return;
+    if (!table || !canDeleteWaitingOrder(table, Boolean(tableOrders[tableId]?.length))) {
+      const error = new Error('Chỉ có thể hủy khi toàn bộ phiếu của order còn đang chờ.');
+      showToast(error.message, 'error');
+      throw error;
     }
     try {
       await deleteOrder(tableId);
       const operations = await fetchOperations();
       setTableOrders(operations.tableOrders);
+      setWaitingBatchesByTable(operations.waitingBatchesByTable);
       setTables(operations.tables);
       setKitchen(operations.kitchen);
       showToast('Đã hủy order', 'info');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Không thể hủy order', 'error');
+      throw error;
     }
   };
 
   const handleMarkDone = async (tableId: string) => {
     try {
-      await updateTableStatus(tableId, 'done');
+      const expectedBatchId = tables.find(table => table.id === tableId)?.cookingBatchId;
+      if (!expectedBatchId) throw new Error('Phiếu đang nấu đã thay đổi. Hãy tải lại trạng thái bàn.');
+      await updateTableStatus(tableId, 'done', expectedBatchId);
       const operations = await fetchOperations();
       setTableOrders(operations.tableOrders);
+      setWaitingBatchesByTable(operations.waitingBatchesByTable);
       setTables(operations.tables);
       setKitchen(operations.kitchen);
       showToast('Đã hoàn thành; queue đang lấy order kế tiếp', 'success');
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Không thể đổi trạng thái bàn', 'error');
+      throw error;
     }
   };
 
@@ -259,6 +495,7 @@ export default function App() {
       const savedPayment = await recordPayment(payment);
       const operations = await fetchOperations();
       setTableOrders(operations.tableOrders);
+      setWaitingBatchesByTable(operations.waitingBatchesByTable);
       setTables(operations.tables);
       setKitchen(operations.kitchen);
       setCompletedPayments(prev => [savedPayment, ...prev.filter(item => item.invoiceCode !== savedPayment.invoiceCode)].slice(0, 100));
@@ -291,6 +528,7 @@ export default function App() {
     const [operations, catalog] = await Promise.all([fetchOperations(), fetchCatalog()]);
     setTables(operations.tables);
     setTableOrders(operations.tableOrders);
+    setWaitingBatchesByTable(operations.waitingBatchesByTable);
     setKitchen(operations.kitchen);
     setCategories(catalog.categories);
     setMenuItems(catalog.items);
@@ -298,13 +536,8 @@ export default function App() {
 
   /* ─── View Change ─── */
   const handleViewChange = (v: AppView) => {
-    setView(v);
-    if (v !== 'order') {
-      // Reset order flow when navigating away
-      setOrderStep('tables');
-      setSelectedTableId(null);
-      setCart([]);
-    }
+    if (v === view) return;
+    navigate({ view: v });
   };
 
   const toastColors = {
@@ -343,35 +576,46 @@ export default function App() {
   }
 
   return (
-    <div className="cas-app-shell" style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: '#F9FAFB', overflow: 'hidden', width: '100%', maxWidth: 1440, margin: '0 auto', position: 'relative' }}>
+    <div className="cas-app-shell" style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: '#F9FAFB', overflow: 'hidden', width: '100vw', position: 'relative' }}>
       {/* Top Bar */}
       <header className="cas-topbar" style={{
         background: '#111827', padding: '11px 16px',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         flexShrink: 0, boxShadow: '0 1px 0 rgba(255,255,255,0.05)',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 11, minWidth: 0 }}>
-          <div style={{ width: 42, height: 42, borderRadius: 12, background: '#0F172A', border: '1px solid rgba(45,212,191,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-            <img src={BRAND_ASSETS.mark} alt="CAS" style={{ width: 28, height: 28 }} />
-          </div>
-          <div style={{ minWidth: 0 }}>
-            <img src={BRAND_ASSETS.logoHorizontalWhite} alt="CAS" style={{ display: 'block', width: 96, height: 24, objectFit: 'contain', marginBottom: 1 }} />
-            <div style={{ color: '#E5E7EB', fontWeight: 700, fontSize: '12px', letterSpacing: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 230 }}>
-              {restaurantSettings.restaurantName}
-            </div>
-            <div style={{ color: '#6B7280', fontSize: '11px' }}>
-              {APP_VIEW_LABELS[view]}
-            </div>
-          </div>
+        <div className="cas-topbar-brand" aria-label={`${restaurantSettings.restaurantName} · ${APP_VIEW_LABELS[view]}`}>
+          <img className="cas-topbar-logo" src={BRAND_ASSETS.logoHorizontalWhite} alt="CAS" />
+          <span className="cas-topbar-context">{APP_VIEW_LABELS[view]}</span>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{ textAlign: 'right' }}>
+        <div className="cas-topbar-meta">
+          <span
+            className="cas-sync-indicator"
+            data-status={operationsSyncStatus}
+            title={operationsSyncStatus === 'online'
+              ? `Đồng bộ lần cuối ${lastOperationsSyncAt?.toLocaleTimeString('vi-VN') ?? 'vừa xong'}`
+              : 'Không thể làm mới dữ liệu. Thông tin trên màn hình có thể đã cũ.'}
+          >
+            <span aria-hidden="true" />
+            {operationsSyncStatus === 'online' ? 'Đã đồng bộ' : 'Mất đồng bộ'}
+          </span>
+          <div className="cas-topbar-date" style={{ textAlign: 'right' }}>
             <div style={{ color: '#9CA3AF', fontSize: '11px' }}>
               {new Date().toLocaleDateString('vi-VN', { weekday: 'short', day: '2-digit', month: '2-digit' })}
             </div>
             <div style={{ color: '#F97316', fontSize: '12px', fontWeight: 600 }}>
               {tables.filter(t => t.status !== 'empty').length}/{tables.length} bàn
             </div>
+          </div>
+          <div className="cas-account" aria-label={`Đã đăng nhập: ${authenticatedUsername || 'Người dùng'}`}>
+            <span className="cas-account-avatar"><UserRound size={16} /></span>
+            <span className="cas-account-copy">
+              <small>Đã đăng nhập</small>
+              <strong>{authenticatedUsername || 'Người dùng'}</strong>
+            </span>
+            <button className="cas-signout-button" type="button" onClick={handleLogout} title="Đăng xuất">
+              <LogOut size={16} />
+              <span>Đăng xuất</span>
+            </button>
           </div>
         </div>
       </header>
@@ -423,8 +667,12 @@ export default function App() {
                 <TableSelectStep
                   tables={tables}
                   tableOrders={tableOrders}
+                  waitingBatchesByTable={waitingBatchesByTable}
                   kitchen={kitchen}
-                  onSelectTable={handleSelectTable}
+                  onStartOrder={handleStartOrder}
+                  onEditOrder={handleEditWaitingOrder}
+                  onDeleteOrder={handleDeleteOrder}
+                  onMarkDone={handleMarkDone}
                 />
               </div>
             )}
@@ -434,18 +682,22 @@ export default function App() {
                 cart={cart}
                 categories={categories}
                 menuItems={menuItems}
+                isAddition={orderMode === 'addition'}
+                isEditing={orderMode === 'edit'}
                 onCartChange={setCart}
-                onBack={handleBackToTables}
-                onConfirm={() => setOrderStep('confirm')}
+                onBack={handleBrowserBack}
+                onConfirm={() => navigate({ orderStep: 'confirm' })}
               />
             )}
             {orderStep === 'confirm' && selectedTable && (
               <OrderConfirmStep
                 table={selectedTable}
                 cart={cart}
+                isAddition={orderMode === 'addition'}
+                isEditing={orderMode === 'edit'}
                 onCartChange={setCart}
-                onBack={handleBackToTables}
-                onEdit={() => setOrderStep('menu')}
+                onBack={handleBrowserBack}
+                onEdit={handleBrowserBack}
                 onPlaceOrder={handlePlaceOrder}
               />
             )}
@@ -454,8 +706,13 @@ export default function App() {
                 orderNumber={lastOrderNumber}
                 table={selectedTable}
                 cart={cart}
-                onAddMore={() => setOrderStep('menu')}
-                onDone={handleBackToTables}
+                batch={lastOrderBatch}
+                isEditing={orderMode === 'edit'}
+                onAddMore={() => {
+                  setCart([]);
+                  navigate({ orderStep: 'menu', orderMode: 'addition', editingBatchId: null });
+                }}
+                onDone={handleFinishOrder}
               />
             )}
           </>
@@ -466,7 +723,9 @@ export default function App() {
             <OverviewPage
               tables={tables}
               tableOrders={tableOrders}
-              onStartOrder={handleOverviewStartOrder}
+              waitingBatchesByTable={waitingBatchesByTable}
+              onStartOrder={handleStartOrder}
+              onEditOrder={handleEditWaitingOrder}
               onDeleteOrder={handleDeleteOrder}
               onMarkDone={handleMarkDone}
             />
@@ -539,7 +798,8 @@ export default function App() {
           border: `1.5px solid ${toastColors[toast.type].border}`,
           color: toastColors[toast.type].text,
           padding: '10px 18px', borderRadius: 12, fontSize: '13px', fontWeight: 600,
-          whiteSpace: 'nowrap', boxShadow: '0 4px 12px rgba(0,0,0,0.12)',
+          maxWidth: 'calc(100vw - 24px)', whiteSpace: 'normal', textAlign: 'center',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.12)',
           animation: 'fadeInUp 0.2s ease',
         }}>
           {toast.msg}
@@ -551,9 +811,6 @@ export default function App() {
           from { opacity: 0; transform: translateX(-50%) translateY(8px); }
           to { opacity: 1; transform: translateX(-50%) translateY(0); }
         }
-        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-        button { -webkit-tap-highlight-color: transparent; }
-        ::-webkit-scrollbar { width: 0; height: 0; }
       `}</style>
     </div>
   );

@@ -1,5 +1,7 @@
 const PAYMENT_METHODS = new Set(['cash', 'card', 'qr']);
+const EMPLOYEE_ROLES = new Set(['manager', 'cashier', 'server', 'chef']);
 const PAYMENT_CODE_PATTERN = /^[A-Z0-9-]{8,64}$/;
+const EMPLOYEE_CODE_PATTERN = /^[A-Z0-9_-]{2,24}$/;
 const MAX_MONEY = 2_000_000_000;
 
 function invalid(message, field) {
@@ -48,6 +50,41 @@ function allowedArray(value, field, allowed, fallback) {
   return normalized;
 }
 
+function optionalTime(value, field) {
+  if (value == null || value === '') return null;
+  if (typeof value !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) {
+    throw invalid(`${field} phải có định dạng HH:mm`, field);
+  }
+  return value;
+}
+
+/** Chuẩn hóa hồ sơ nhân viên để API tạo/cập nhật dùng chung một bộ quy tắc. */
+export function normalizeEmployee(input, fallback = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw invalid('Hồ sơ nhân viên không hợp lệ', 'employee');
+  }
+  const source = { role: 'server', phone: '', shiftStart: null, shiftEnd: null, active: true, ...fallback, ...input };
+  const code = requiredString(source.code, 'code', 24).toUpperCase();
+  if (!EMPLOYEE_CODE_PATTERN.test(code)) {
+    throw invalid('Mã nhân viên chỉ gồm chữ in hoa, số, _ hoặc -', 'code');
+  }
+  if (!EMPLOYEE_ROLES.has(source.role)) throw invalid('Vai trò nhân viên không hợp lệ', 'role');
+  if (typeof source.active !== 'boolean') throw invalid('Trạng thái nhân viên không hợp lệ', 'active');
+
+  const phone = optionalString(source.phone, 'phone', 32);
+  if (phone && !/^[0-9+().\s-]+$/.test(phone)) throw invalid('Số điện thoại không hợp lệ', 'phone');
+
+  return {
+    code,
+    name: requiredString(source.name, 'name', 120),
+    role: source.role,
+    phone,
+    shiftStart: optionalTime(source.shiftStart, 'shiftStart'),
+    shiftEnd: optionalTime(source.shiftEnd, 'shiftEnd'),
+    active: source.active,
+  };
+}
+
 /** Chuẩn hóa toàn bộ cấu hình thương hiệu/hóa đơn tại ranh giới API. */
 export function sanitizeSettings(input, fallback) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
@@ -80,9 +117,9 @@ export function sanitizeSettings(input, fallback) {
 }
 
 /** Kiểm tra cấu trúc order và đặt giới hạn an toàn trước khi truy vấn catalog. */
-export function validateOrderItems(input) {
-  if (!Array.isArray(input) || input.length === 0 || input.length > 100) {
-    throw invalid('Order phải có từ 1 đến 100 món', 'items');
+export function validateOrderItems(input, { maxItems = 100 } = {}) {
+  if (!Array.isArray(input) || input.length === 0 || input.length > maxItems) {
+    throw invalid(`Order phải có từ 1 đến ${maxItems} dòng món`, 'items');
   }
 
   return input.map((item, index) => {

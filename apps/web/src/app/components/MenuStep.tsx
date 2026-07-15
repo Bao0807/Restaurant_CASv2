@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { ArrowLeft, ShoppingCart, Plus, Minus, X, Star, Sparkles, ChevronRight } from 'lucide-react';
 import {
   STATUS_CONFIG,
@@ -11,6 +12,8 @@ interface MenuStepProps {
   cart: CartItem[];
   categories: MenuCategory[];
   menuItems: MenuItem[];
+  isAddition: boolean;
+  isEditing: boolean;
   onCartChange: (cart: CartItem[]) => void;
   onBack: () => void;
   onConfirm: () => void;
@@ -25,6 +28,69 @@ interface CustomizerState {
   note: string;
 }
 
+type MenuOverlayHistory =
+  | { type: 'customizer'; itemId: string }
+  | { type: 'cart' };
+
+const MENU_OVERLAY_HISTORY_KEY = 'casMenuOverlay';
+
+function getMenuOverlayHistory(state: unknown = window.history.state): MenuOverlayHistory | null {
+  if (!state || typeof state !== 'object') return null;
+  const value = (state as Record<string, unknown>)[MENU_OVERLAY_HISTORY_KEY];
+  if (!value || typeof value !== 'object') return null;
+  const overlay = value as Partial<MenuOverlayHistory>;
+  if (overlay.type === 'cart') return { type: 'cart' };
+  if (overlay.type === 'customizer' && typeof overlay.itemId === 'string') {
+    return { type: 'customizer', itemId: overlay.itemId };
+  }
+  return null;
+}
+
+/** Khóa focus trong sheet, hỗ trợ Escape và trả focus về nút đã mở sheet. */
+function useAccessibleSheet(onClose: () => void) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const initialFocusRef = useRef<HTMLButtonElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ) ?? []);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.body.style.overflow = 'hidden';
+    document.addEventListener('keydown', handleKeyDown);
+    initialFocusRef.current?.focus();
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener('keydown', handleKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, []);
+
+  return { dialogRef, initialFocusRef };
+}
+
 function ItemCustomizerModal({
   state,
   onClose,
@@ -34,6 +100,7 @@ function ItemCustomizerModal({
   onClose: () => void;
   onAdd: (state: CustomizerState) => void;
 }) {
+  const { dialogRef, initialFocusRef } = useAccessibleSheet(onClose);
   const [qty, setQty] = useState(state.quantity);
   const [size, setSize] = useState<MenuItemSize | undefined>(state.selectedSize);
   const [toppings, setToppings] = useState<Topping[]>(state.selectedToppings);
@@ -50,8 +117,9 @@ function ItemCustomizerModal({
     );
   };
 
-  return (
+  return createPortal(
     <div
+      role="presentation"
       style={{
         position: 'fixed', inset: 0, zIndex: 100,
         background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(2px)',
@@ -60,6 +128,10 @@ function ItemCustomizerModal({
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Tùy chỉnh món ${item.name}`}
         style={{
           background: '#fff', borderRadius: '24px 24px 0 0', width: '100%',
           maxWidth: 520, maxHeight: '92vh', display: 'flex', flexDirection: 'column',
@@ -77,11 +149,13 @@ function ItemCustomizerModal({
           />
           <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(to top, rgba(0,0,0,0.5) 0%, transparent 60%)' }} />
           <button
+            ref={initialFocusRef}
+            aria-label="Đóng tùy chỉnh món"
             onClick={onClose}
             style={{
               position: 'absolute', top: 12, right: 12,
               background: 'rgba(0,0,0,0.5)', border: 'none', borderRadius: '50%',
-              width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center',
+              width: 44, height: 44, display: 'flex', alignItems: 'center', justifyContent: 'center',
               cursor: 'pointer', color: '#fff',
             }}
           >
@@ -127,7 +201,7 @@ function ItemCustomizerModal({
                         background: selected ? '#FFF7ED' : '#fff',
                         color: selected ? '#EA580C' : '#374151',
                         cursor: 'pointer', fontWeight: selected ? 600 : 400,
-                        fontSize: '13px',
+                        fontSize: '13px', minHeight: 44,
                       }}
                     >
                       {s.label}
@@ -161,7 +235,7 @@ function ItemCustomizerModal({
                         padding: '10px 12px', borderRadius: 10,
                         border: selected ? '2px solid #F97316' : '2px solid #F3F4F6',
                         background: selected ? '#FFF7ED' : '#FAFAFA',
-                        cursor: 'pointer', textAlign: 'left',
+                        cursor: 'pointer', textAlign: 'left', minHeight: 44,
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -266,7 +340,8 @@ function ItemCustomizerModal({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -281,6 +356,7 @@ function CartSheet({
   onCartChange: (cart: CartItem[]) => void;
   onConfirm: () => void;
 }) {
+  const { dialogRef, initialFocusRef } = useAccessibleSheet(onClose);
   const total = cartTotal(cart);
 
   const updateQty = (cartId: string, delta: number) => {
@@ -295,12 +371,17 @@ function CartSheet({
     onCartChange(cart.filter(i => i.cartId !== cartId));
   };
 
-  return (
+  return createPortal(
     <div
+      role="presentation"
       style={{ position: 'fixed', inset: 0, zIndex: 90, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'flex-end' }}
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Giỏ hàng"
         style={{
           background: '#fff', borderRadius: '24px 24px 0 0', width: '100%',
           maxHeight: '80vh', display: 'flex', flexDirection: 'column', overflow: 'hidden',
@@ -309,7 +390,7 @@ function CartSheet({
       >
         <div style={{ padding: '16px 16px 12px', borderBottom: '1px solid #F3F4F6', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <h3 style={{ margin: 0, color: '#111827' }}>Giỏ hàng ({cart.length} món)</h3>
-          <button onClick={onClose} style={{ background: '#F3F4F6', border: 'none', borderRadius: '50%', width: 32, height: 32, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <button ref={initialFocusRef} aria-label="Đóng giỏ hàng" onClick={onClose} style={{ background: '#F3F4F6', border: 'none', borderRadius: '50%', width: 44, height: 44, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <X size={16} color="#374151" />
           </button>
         </div>
@@ -328,15 +409,15 @@ function CartSheet({
                 <div style={{ fontSize: '13px', fontWeight: 600, color: '#F97316', marginTop: 4 }}>{formatVND(cartItemTotal(item))}</div>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
-                <button onClick={() => remove(item.cartId)} style={{ background: '#FEF2F2', border: 'none', borderRadius: 8, width: 28, height: 28, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <button aria-label={`Xóa ${item.menuItem.name} khỏi giỏ`} onClick={() => remove(item.cartId)} style={{ background: '#FEF2F2', border: 'none', borderRadius: 8, width: 44, height: 44, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                   <X size={13} color="#EF4444" />
                 </button>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 0, background: '#F3F4F6', borderRadius: 8 }}>
-                  <button onClick={() => updateQty(item.cartId, -1)} style={{ width: 28, height: 28, border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <button aria-label={`Giảm số lượng ${item.menuItem.name}`} onClick={() => updateQty(item.cartId, -1)} style={{ width: 44, height: 44, border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                     <Minus size={12} color="#374151" />
                   </button>
                   <span style={{ fontSize: '13px', fontWeight: 700, minWidth: 20, textAlign: 'center', color: '#111827' }}>{item.quantity}</span>
-                  <button onClick={() => updateQty(item.cartId, 1)} style={{ width: 28, height: 28, border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <button aria-label={`Tăng số lượng ${item.menuItem.name}`} disabled={item.quantity >= 99} onClick={() => updateQty(item.cartId, 1)} style={{ width: 44, height: 44, border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                     <Plus size={12} color={item.quantity >= 99 ? '#D1D5DB' : '#374151'} />
                   </button>
                 </div>
@@ -363,11 +444,12 @@ function CartSheet({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
-export function MenuStep({ table, cart, categories, menuItems, onCartChange, onBack, onConfirm }: MenuStepProps) {
+export function MenuStep({ table, cart, categories, menuItems, isAddition, isEditing, onCartChange, onBack, onConfirm }: MenuStepProps) {
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [customizer, setCustomizer] = useState<CustomizerState | null>(null);
   const [showCart, setShowCart] = useState(false);
@@ -376,11 +458,57 @@ export function MenuStep({ table, cart, categories, menuItems, onCartChange, onB
   const cartCount = cart.reduce((s, i) => s + i.quantity, 0);
   const total = cartTotal(cart);
 
+  const pushMenuOverlay = (overlay: MenuOverlayHistory) => {
+    const current = window.history.state && typeof window.history.state === 'object'
+      ? window.history.state as Record<string, unknown>
+      : {};
+    window.history.pushState({ ...current, [MENU_OVERLAY_HISTORY_KEY]: overlay }, '');
+  };
+
+  const closeMenuOverlay = () => {
+    setCustomizer(null);
+    setShowCart(false);
+    if (getMenuOverlayHistory()) window.history.back();
+  };
+
+  useEffect(() => {
+    const syncOverlayFromHistory = (state: unknown) => {
+      const overlay = getMenuOverlayHistory(state);
+      if (overlay?.type === 'cart') {
+        setCustomizer(null);
+        setShowCart(true);
+        return;
+      }
+      if (overlay?.type === 'customizer') {
+        const item = menuItems.find(candidate => candidate.id === overlay.itemId && candidate.available);
+        if (item) {
+          setShowCart(false);
+          setCustomizer({
+            item,
+            quantity: 1,
+            selectedSize: item.sizes?.[0],
+            selectedToppings: [],
+            note: '',
+          });
+          return;
+        }
+      }
+      setCustomizer(null);
+      setShowCart(false);
+    };
+    const handlePopState = (event: PopStateEvent) => syncOverlayFromHistory(event.state);
+
+    syncOverlayFromHistory(window.history.state);
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [menuItems]);
+
   const filteredItems = selectedCategory === 'all'
     ? menuItems.filter(item => item.available)
     : menuItems.filter(item => item.available && item.categoryId === selectedCategory);
 
   const openCustomizer = (item: MenuItem) => {
+    pushMenuOverlay({ type: 'customizer', itemId: item.id });
     setCustomizer({
       item,
       quantity: 1,
@@ -422,19 +550,41 @@ export function MenuStep({ table, cart, categories, menuItems, onCartChange, onB
         onCartChange([...cart, newItem]);
       }
     }
+    closeMenuOverlay();
+  };
+
+  const openCart = () => {
+    if (cartCount <= 0) return;
+    pushMenuOverlay({ type: 'cart' });
     setCustomizer(null);
+    setShowCart(true);
+  };
+
+  const confirmCart = () => {
+    setShowCart(false);
+    if (getMenuOverlayHistory()?.type === 'cart') {
+      window.addEventListener('popstate', () => onConfirm(), { once: true });
+      window.history.back();
+      return;
+    }
+    onConfirm();
   };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
       {/* Header */}
       <div style={{ padding: '12px 16px', background: '#fff', borderBottom: '1px solid #F3F4F6', display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
-        <button onClick={onBack} style={{ background: '#F3F4F6', border: 'none', borderRadius: 10, width: 40, height: 40, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+        <button aria-label="Quay lại chọn bàn" onClick={onBack} style={{ background: '#F3F4F6', border: 'none', borderRadius: 10, width: 44, height: 44, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
           <ArrowLeft size={20} color="#374151" />
         </button>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontWeight: 700, color: '#111827', fontSize: '16px' }}>Bàn {table.number}</span>
+            {isEditing ? (
+              <span style={{ padding: '3px 8px', borderRadius: 999, background: '#EDE9FE', color: '#6D28D9', fontSize: 10, fontWeight: 800 }}>SỬA PHIẾU CHỜ</span>
+            ) : isAddition ? (
+              <span style={{ padding: '3px 8px', borderRadius: 999, background: '#EDE9FE', color: '#6D28D9', fontSize: 10, fontWeight: 800 }}>GỌI THÊM</span>
+            ) : null}
             <span style={{
               display: 'inline-flex', alignItems: 'center', gap: 4,
               background: cfg.bg, border: `1px solid ${cfg.border}`,
@@ -447,10 +597,11 @@ export function MenuStep({ table, cart, categories, menuItems, onCartChange, onB
           <div style={{ fontSize: '12px', color: '#9CA3AF' }}>{table.seats} chỗ ngồi</div>
         </div>
         <button
-          onClick={() => cartCount > 0 && setShowCart(true)}
+          onClick={openCart}
           style={{
             position: 'relative', background: cartCount > 0 ? '#111827' : '#F3F4F6',
             border: 'none', borderRadius: 12, padding: '8px 14px',
+            minHeight: 44,
             cursor: cartCount > 0 ? 'pointer' : 'default',
             display: 'flex', alignItems: 'center', gap: 8,
             color: cartCount > 0 ? '#fff' : '#9CA3AF',
@@ -484,7 +635,7 @@ export function MenuStep({ table, cart, categories, menuItems, onCartChange, onB
                   background: active ? '#FFF7ED' : '#fff',
                   color: active ? '#EA580C' : '#374151',
                   cursor: 'pointer', whiteSpace: 'nowrap', fontWeight: active ? 600 : 400,
-                  fontSize: '13px',
+                  fontSize: '13px', minHeight: 44,
                 }}
               >
                 <span>{cat.emoji}</span>
@@ -557,7 +708,7 @@ export function MenuStep({ table, cart, categories, menuItems, onCartChange, onB
         <div style={{ padding: '10px 16px 12px', background: '#fff', borderTop: '1px solid #F3F4F6', flexShrink: 0 }}>
           <button
             data-action="open-cart"
-            onClick={() => setShowCart(true)}
+            onClick={openCart}
             style={{
               width: '100%', background: '#F97316', color: '#fff', border: 'none',
               borderRadius: 16, padding: '14px 20px', cursor: 'pointer',
@@ -569,7 +720,9 @@ export function MenuStep({ table, cart, categories, menuItems, onCartChange, onB
               <div style={{ background: 'rgba(255,255,255,0.25)', borderRadius: 8, padding: '4px 10px', fontWeight: 700, fontSize: '13px' }}>
                 {cartCount} món
               </div>
-              <span style={{ fontWeight: 600, fontSize: '14px' }}>Xem giỏ hàng</span>
+              <span style={{ fontWeight: 600, fontSize: '14px' }}>
+                {isEditing ? 'Xem phiếu đang sửa' : isAddition ? 'Xem phiếu gọi thêm' : 'Xem giỏ hàng'}
+              </span>
             </div>
             <span style={{ fontWeight: 700, fontSize: '15px' }}>{formatVND(total)}</span>
           </button>
@@ -580,7 +733,7 @@ export function MenuStep({ table, cart, categories, menuItems, onCartChange, onB
       {customizer && (
         <ItemCustomizerModal
           state={customizer}
-          onClose={() => setCustomizer(null)}
+          onClose={closeMenuOverlay}
           onAdd={handleAdd}
         />
       )}
@@ -588,9 +741,9 @@ export function MenuStep({ table, cart, categories, menuItems, onCartChange, onB
       {showCart && (
         <CartSheet
           cart={cart}
-          onClose={() => setShowCart(false)}
+          onClose={closeMenuOverlay}
           onCartChange={onCartChange}
-          onConfirm={() => { setShowCart(false); onConfirm(); }}
+          onConfirm={confirmCart}
         />
       )}
     </div>

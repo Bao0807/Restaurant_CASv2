@@ -33,7 +33,7 @@ export function LoginPage({ busy, error, onLogin }: LoginPageProps) {
           <div className="login-feature-list">
             <span><ShieldCheck size={18} /> Dữ liệu đồng bộ với MySQL</span>
             <span><ShieldCheck size={18} /> Queue bếp FIFO minh bạch</span>
-            <span><ShieldCheck size={18} /> Phân quyền truy cập an toàn</span>
+            <span><ShieldCheck size={18} /> Giá và ETA xác thực tại máy chủ</span>
           </div>
         </div>
         <span className="login-showcase-footer">CAS · Core Advanced Solutions</span>

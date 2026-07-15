@@ -3,13 +3,14 @@ import {
   Banknote, Building2, CreditCard, QrCode, ReceiptText,
   Save, Settings, ShoppingBag, SlidersHorizontal, Users, WalletCards, Wrench,
 } from 'lucide-react';
-import type { CartItem, KitchenStatus, MenuCategory, MenuItem, PaymentMethodId, PaymentRecord, Table } from '../data';
+import type { CartItem, KitchenStatus, MenuCategory, MenuItem, PaymentMethodId, PaymentRecord, ReportSummary, Table } from '../data';
 import { cartTotal, formatVND } from '../data';
 import {
   BRAND_ASSETS, DASHBOARD_WIDGETS, DEFAULT_RESTAURANT_SETTINGS,
   PAYMENT_METHOD_LABELS, calculateInvoiceTotals, type RestaurantSettings,
 } from '../config/restaurant';
-import { buildHourlyReport, paymentsForLocalDay } from '../reporting';
+import { buildHourlyReport, buildStaffReport, paymentsForLocalDay } from '../reporting';
+import { fetchReportSummary } from '../services/api';
 
 const ManagementPanel = lazy(() => import('./ManagementPanel').then(module => ({ default: module.ManagementPanel })));
 const RevenueChart = lazy(() => import('./DashboardCharts').then(module => ({ default: module.RevenueChart })));
@@ -119,6 +120,8 @@ export function DashboardPage({
 }: DashboardPageProps) {
   const [tab, setTab] = useState<DashboardTab>(mode === 'reports' ? 'reports' : 'management');
   const [draft, setDraft] = useState<RestaurantSettings>(settings);
+  const [reportSummary, setReportSummary] = useState<ReportSummary | null>(null);
+  const [reportState, setReportState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
 
   useEffect(() => {
     setDraft(settings);
@@ -126,6 +129,32 @@ export function DashboardPage({
   useEffect(() => {
     setTab(mode === 'reports' ? 'reports' : 'management');
   }, [mode]);
+  useEffect(() => {
+    if (mode !== 'reports') return undefined;
+    let active = true;
+    const loadReport = async () => {
+      if (document.visibilityState === 'hidden') return;
+      const from = new Date();
+      from.setHours(0, 0, 0, 0);
+      const to = new Date(from);
+      to.setDate(to.getDate() + 1);
+      try {
+        const summary = await fetchReportSummary(from, to);
+        if (!active) return;
+        setReportSummary(summary);
+        setReportState('ready');
+      } catch {
+        if (active) setReportState('error');
+      }
+    };
+    setReportState('loading');
+    void loadReport();
+    const timer = window.setInterval(() => { void loadReport(); }, 30_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [mode, payments.length, payments[0]?.invoiceCode]);
 
   const activeOrders = useMemo(() => flattenOrders(tableOrders), [tableOrders]);
   const todayPayments = useMemo(() => paymentsForLocalDay(payments), [payments]);
@@ -133,35 +162,44 @@ export function DashboardPage({
     (sum, order) => sum + calculateInvoiceTotals(cartTotal(order), settings).total,
     0,
   ), [settings, tableOrders]);
-  const paidRevenue = useMemo(
-    () => todayPayments.reduce((sum, payment) => sum + payment.total, 0),
-    [todayPayments],
-  );
-  const paidOrders = todayPayments.length;
+  const paidRevenue = reportSummary?.totals.revenue
+    ?? todayPayments.reduce((sum, payment) => sum + payment.total, 0);
+  const paidOrders = reportSummary?.totals.orders ?? todayPayments.length;
   const servingTables = tables.filter(table => ['waiting', 'cooking', 'done'].includes(table.status)).length;
 
-  const hourlyData = useMemo(() => buildHourlyReport(todayPayments), [todayPayments]);
+  const hourlyData = useMemo(() => {
+    if (!reportSummary) return buildHourlyReport(todayPayments);
+    const byHour = new Map(reportSummary.hourly.map(row => [row.hour, row]));
+    return Array.from({ length: 24 }, (_, hour) => ({
+      hour: `${hour}h`,
+      revenue: byHour.get(hour)?.revenue ?? 0,
+      orders: byHour.get(hour)?.orders ?? 0,
+    }));
+  }, [reportSummary, todayPayments]);
+  const staffPerformance = useMemo(() => {
+    if (!reportSummary) return buildStaffReport(todayPayments);
+    return reportSummary.staff.map(staff => ({
+      ...staff,
+      key: staff.employeeId || `name:${staff.name.toLocaleLowerCase('vi-VN')}`,
+      averageBill: staff.orders ? Math.round(staff.revenue / staff.orders) : 0,
+    }));
+  }, [reportSummary, todayPayments]);
 
-  const paymentMix = (['cash', 'card', 'qr'] as PaymentMethodId[]).map(method => ({
-    method,
-    label: PAYMENT_METHOD_LABELS[method],
-    amount: todayPayments.filter(payment => payment.method === method).reduce((sum, payment) => sum + payment.total, 0),
-    count: todayPayments.filter(payment => payment.method === method).length,
-    ...METHOD_META[method],
-  }));
+  const paymentMix = (['cash', 'card', 'qr'] as PaymentMethodId[]).map(method => {
+    const aggregated = reportSummary?.paymentMethods.find(row => row.method === method);
+    return {
+      method,
+      label: PAYMENT_METHOD_LABELS[method],
+      amount: aggregated?.revenue
+        ?? todayPayments.filter(payment => payment.method === method).reduce((sum, payment) => sum + payment.total, 0),
+      count: aggregated?.orders ?? todayPayments.filter(payment => payment.method === method).length,
+      ...METHOD_META[method],
+    };
+  });
 
-  const topItems = useMemo(() => {
-    const grouped = activeOrders.reduce<Record<string, { name: string; qty: number; revenue: number; category: string }>>((acc, item) => {
-      const current = acc[item.menuItem.id] ?? { name: item.menuItem.name, qty: 0, revenue: 0, category: item.menuItem.categoryId };
-      current.qty += item.quantity;
-      current.revenue += cartTotal([item]);
-      acc[item.menuItem.id] = current;
-      return acc;
-    }, {});
-
-    const currentItems = Object.values(grouped).sort((a, b) => b.qty - a.qty).slice(0, 5);
-    return currentItems;
-  }, [activeOrders]);
+  const topItems = reportSummary?.topItems.slice(0, 5) ?? [];
+  const categoryRevenue = reportSummary?.categories ?? [];
+  const categoryTotal = categoryRevenue.reduce((sum, category) => sum + category.revenue, 0);
 
   const updateDraft = <K extends keyof RestaurantSettings>(key: K, value: RestaurantSettings[K]) => {
     setDraft(prev => ({ ...prev, [key]: value }));
@@ -255,6 +293,11 @@ export function DashboardPage({
 
       {tab === 'reports' ? (
         <div className="dashboard-reports-page" style={{ padding: '14px 14px 96px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {reportState === 'error' && (
+            <div role="status" style={{ padding: '10px 12px', border: '1px solid #FDE68A', background: '#FFFBEB', color: '#92400E', borderRadius: 8, fontSize: 12 }}>
+              Chưa tải được API tổng hợp; các KPI cơ bản đang dùng danh sách hóa đơn gần nhất.
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {widgetVisible('revenue') && (
               <KpiCard
@@ -330,17 +373,18 @@ export function DashboardPage({
           <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 14 }}>
             {widgetVisible('topItems') && (
               <div style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 8, padding: 16 }}>
-                <SectionTitle title="Món đang nổi bật" sub={activeOrders.length ? 'Tính theo các order đang mở' : 'Chưa có order đang mở'} />
-                {topItems.length === 0 && <div style={{ color: '#9CA3AF', fontSize: 13, padding: '14px 0' }}>Chưa có dữ liệu món.</div>}
+                <SectionTitle title="Món bán chạy" sub="Tính theo món trên hóa đơn đã thanh toán hôm nay" />
+                {reportState === 'loading' && <div role="status" style={{ color: '#64748B', fontSize: 13, padding: '14px 0' }}>Đang tổng hợp dữ liệu món…</div>}
+                {reportState !== 'loading' && topItems.length === 0 && <div style={{ color: '#9CA3AF', fontSize: 13, padding: '14px 0' }}>Chưa có món đã thanh toán hôm nay.</div>}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
                   {topItems.map((item, index) => (
-                    <div key={item.name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: index < topItems.length - 1 ? '1px solid #F3F4F6' : 'none' }}>
+                    <div key={item.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: index < topItems.length - 1 ? '1px solid #F3F4F6' : 'none' }}>
                       <div style={{ width: 28, height: 28, borderRadius: 8, background: index === 0 ? '#0D9488' : '#F3F4F6', color: index === 0 ? '#fff' : '#6B7280', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '12px' }}>
                         {index + 1}
                       </div>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: '13px', color: '#111827', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</div>
-                        <div style={{ fontSize: '11px', color: '#9CA3AF', marginTop: 2 }}>{item.qty} phần · {item.category}</div>
+                        <div style={{ fontSize: '11px', color: '#9CA3AF', marginTop: 2 }}>{item.quantity} phần đã thanh toán</div>
                       </div>
                       <div style={{ fontSize: '13px', color: '#0D9488', fontWeight: 800 }}>{formatShort(item.revenue)}</div>
                     </div>
@@ -359,14 +403,55 @@ export function DashboardPage({
 
           {widgetVisible('staff') && (
             <div style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 8, padding: 16 }}>
-              <SectionTitle title="Nhân viên" sub={settings.staffName} />
-              <div style={{ color: '#9CA3AF', fontSize: 13, padding: '14px 0' }}>Chưa có dữ liệu phân ca để tính hiệu suất nhân viên.</div>
+              <SectionTitle title="Hiệu suất nhân viên" sub={`${staffPerformance.length} nhân viên có giao dịch hôm nay`} />
+              {staffPerformance.length === 0 ? (
+                <div style={{ color: '#9CA3AF', fontSize: 13, padding: '14px 0' }}>Chưa có hóa đơn thanh toán hôm nay để tính hiệu suất.</div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  {staffPerformance.map((staff, index) => (
+                    <div key={staff.key} style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center', padding: '12px 0', borderBottom: index < staffPerformance.length - 1 ? '1px solid #F3F4F6' : 'none', minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: '1 1 180px' }}>
+                        <div style={{ width: 34, height: 34, borderRadius: 10, background: index === 0 ? '#CCFBF1' : '#F3F4F6', color: index === 0 ? '#0F766E' : '#64748B', display: 'grid', placeItems: 'center', fontWeight: 900, flexShrink: 0 }}>{index + 1}</div>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ color: '#111827', fontSize: 13, fontWeight: 800, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{staff.name}</div>
+                          <div style={{ color: '#9CA3AF', fontSize: 11, marginTop: 2 }}>{staff.itemCount} phần đã phục vụ</div>
+                        </div>
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8, flex: '1 1 240px', minWidth: 0 }}>
+                        <div><div style={{ color: '#9CA3AF', fontSize: 9, textTransform: 'uppercase' }}>Hóa đơn</div><strong style={{ color: '#334155', fontSize: 12 }}>{staff.orders}</strong></div>
+                        <div><div style={{ color: '#9CA3AF', fontSize: 9, textTransform: 'uppercase' }}>TB / đơn</div><strong style={{ color: '#334155', fontSize: 12 }}>{formatShort(staff.averageBill)}</strong></div>
+                        <div style={{ textAlign: 'right', minWidth: 0 }}><div style={{ color: '#9CA3AF', fontSize: 9, textTransform: 'uppercase' }}>Doanh thu</div><strong style={{ color: '#0F766E', fontSize: 12, whiteSpace: 'nowrap' }}>{formatShort(staff.revenue)}</strong></div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
           <div style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 8, padding: 16 }}>
-            <SectionTitle title="Danh mục doanh thu" sub="Tỷ trọng món trong ngày" />
-            <div style={{ color: '#9CA3AF', fontSize: 13, padding: '14px 0' }}>Chưa có API tổng hợp món đã thanh toán theo danh mục.</div>
+            <SectionTitle title="Danh mục doanh thu" sub="Giá trị món trước giảm giá, phí dịch vụ và thuế" />
+            {reportState === 'loading' && <div role="status" style={{ color: '#64748B', fontSize: 13, padding: '14px 0' }}>Đang tổng hợp danh mục…</div>}
+            {reportState !== 'loading' && categoryRevenue.length === 0 && <div style={{ color: '#9CA3AF', fontSize: 13, padding: '14px 0' }}>Chưa có món đã thanh toán hôm nay.</div>}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {categoryRevenue.map(category => {
+                const percentage = categoryTotal ? Math.round((category.revenue / categoryTotal) * 100) : 0;
+                return (
+                  <div key={category.id}>
+                    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10, marginBottom: 6 }}>
+                      <div style={{ minWidth: 0 }}>
+                        <strong style={{ color: '#111827', fontSize: 13 }}>{category.name}</strong>
+                        <span style={{ color: '#94A3B8', fontSize: 11, marginLeft: 7 }}>{category.quantity} phần</span>
+                      </div>
+                      <div style={{ color: '#0F766E', fontSize: 12, fontWeight: 800, whiteSpace: 'nowrap' }}>{formatVND(category.revenue)} · {percentage}%</div>
+                    </div>
+                    <div style={{ height: 7, background: '#F1F5F9', borderRadius: 999, overflow: 'hidden' }}>
+                      <div style={{ width: `${percentage}%`, height: '100%', borderRadius: 999, background: 'linear-gradient(90deg, #0D9488, #2DD4BF)' }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
       ) : tab === 'management' ? (

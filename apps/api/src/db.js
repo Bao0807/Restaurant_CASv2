@@ -125,6 +125,27 @@ const schemaStatements = [
       ON DELETE CASCADE,
     INDEX idx_active_order_queue (queued_at, id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS order_batches (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    order_id BIGINT UNSIGNED NOT NULL,
+    table_id VARCHAR(32) NOT NULL,
+    batch_number INT UNSIGNED NOT NULL,
+    items JSON NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'waiting',
+    is_addition BOOLEAN NOT NULL DEFAULT FALSE,
+    queued_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    cooking_started_at DATETIME(3) NULL,
+    completed_at DATETIME(3) NULL,
+    estimated_cook_minutes INT UNSIGNED NOT NULL DEFAULT 10,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_order_batch_order FOREIGN KEY (order_id) REFERENCES active_orders(id) ON DELETE CASCADE,
+    CONSTRAINT uq_order_batch_number UNIQUE (order_id, batch_number),
+    CONSTRAINT chk_order_batch_status CHECK (status IN ('waiting', 'cooking', 'done')),
+    CONSTRAINT chk_order_batch_eta CHECK (estimated_cook_minutes BETWEEN 1 AND 23760),
+    INDEX idx_order_batch_queue (status, queued_at, id),
+    INDEX idx_order_batch_table (table_id, status)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS kitchen_queue_state (
     id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
     concurrency INT UNSIGNED NOT NULL DEFAULT 2,
@@ -132,6 +153,20 @@ const schemaStatements = [
     automation_enabled BOOLEAN NOT NULL DEFAULT TRUE,
     paused BOOLEAN NOT NULL DEFAULT FALSE,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS employees (
+    id VARCHAR(64) NOT NULL PRIMARY KEY,
+    employee_code VARCHAR(24) NOT NULL UNIQUE,
+    full_name VARCHAR(120) NOT NULL,
+    role VARCHAR(20) NOT NULL DEFAULT 'server',
+    phone VARCHAR(32) NOT NULL DEFAULT '',
+    shift_start TIME NULL,
+    shift_end TIME NULL,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT chk_employee_role CHECK (role IN ('manager', 'cashier', 'server', 'chef')),
+    INDEX idx_employee_active_name (active, full_name)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS payment_transactions (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -146,20 +181,25 @@ const schemaStatements = [
     vat INT NOT NULL DEFAULT 0,
     total INT NOT NULL DEFAULT 0,
     item_count INT NOT NULL DEFAULT 0,
+    staff_id VARCHAR(64) NULL,
     staff_name VARCHAR(120) NULL,
     cashier_name VARCHAR(120) NULL,
     status VARCHAR(32) NOT NULL DEFAULT 'PAID',
     paid_at DATETIME(3) NOT NULL,
     raw_payload JSON NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_payment_staff FOREIGN KEY (staff_id) REFERENCES employees(id) ON DELETE SET NULL,
     INDEX idx_paid_at (paid_at),
-    INDEX idx_table_id (table_id)
+    INDEX idx_table_id (table_id),
+    INDEX idx_payment_staff (staff_id, paid_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS payment_items (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
     transaction_id BIGINT UNSIGNED NOT NULL,
     cart_id VARCHAR(64) NULL,
     menu_item_id VARCHAR(64) NULL,
+    category_id VARCHAR(64) NULL,
+    category_name VARCHAR(120) NULL,
     name VARCHAR(255) NOT NULL,
     quantity INT NOT NULL,
     price INT NOT NULL,
@@ -169,7 +209,8 @@ const schemaStatements = [
     CONSTRAINT fk_payment_items_transaction
       FOREIGN KEY (transaction_id) REFERENCES payment_transactions(id)
       ON DELETE CASCADE,
-    INDEX idx_payment_item_transaction (transaction_id)
+    INDEX idx_payment_item_transaction (transaction_id),
+    INDEX idx_payment_item_category (category_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 ];
 
@@ -178,6 +219,67 @@ const defaultTables = [
   ['t5', 5, 4], ['t6', 6, 8], ['t7', 7, 4], ['t8', 8, 2],
   ['t9', 9, 6], ['t10', 10, 4], ['t11', 11, 8], ['t12', 12, 4],
 ];
+
+const defaultEmployees = [
+  ['employee-server-default', 'NV001', 'Nhân viên phục vụ', 'server', '0900 111 001', '08:00', '16:00'],
+  ['employee-cashier-default', 'NV002', 'Thu ngân CAS', 'cashier', '0900 111 002', '08:00', '16:00'],
+  ['employee-chef-default', 'NV003', 'Bếp trưởng CAS', 'chef', '0900 111 003', '09:00', '17:00'],
+  ['employee-manager-default', 'NV004', 'Quản lý CAS', 'manager', '0900 111 004', '09:00', '18:00'],
+];
+
+/** Bổ sung liên kết nhân viên cho database cũ mà không làm thay đổi các hóa đơn lịch sử. */
+async function ensureEmployeePaymentColumn(connection) {
+  const [columns] = await connection.query(
+    `SELECT column_name AS columnName FROM information_schema.columns
+     WHERE table_schema = ? AND table_name = 'payment_transactions' AND column_name = 'staff_id'`,
+    [databaseName],
+  );
+  if (columns.length === 0) {
+    await connection.query(
+      `ALTER TABLE payment_transactions
+       ADD COLUMN staff_id VARCHAR(64) NULL AFTER item_count,
+       ADD INDEX idx_payment_staff (staff_id, paid_at),
+       ADD CONSTRAINT fk_payment_staff FOREIGN KEY (staff_id) REFERENCES employees(id) ON DELETE SET NULL`,
+    );
+  }
+}
+
+/** Lưu snapshot danh mục trên dòng hóa đơn để báo cáo lịch sử không đổi theo catalog hiện tại. */
+async function ensurePaymentItemCategoryColumns(connection) {
+  const migrationId = '20260714_payment_item_category_snapshot';
+  const [applied] = await connection.query('SELECT id FROM schema_migrations WHERE id = ? LIMIT 1', [migrationId]);
+  if (applied.length > 0) return;
+
+  const [columns] = await connection.query(
+    `SELECT column_name AS columnName FROM information_schema.columns
+     WHERE table_schema = ? AND table_name = 'payment_items'`,
+    [databaseName],
+  );
+  const columnNames = new Set(columns.map(column => column.columnName));
+  if (!columnNames.has('category_id')) {
+    await connection.query('ALTER TABLE payment_items ADD COLUMN category_id VARCHAR(64) NULL AFTER menu_item_id');
+  }
+  if (!columnNames.has('category_name')) {
+    await connection.query('ALTER TABLE payment_items ADD COLUMN category_name VARCHAR(120) NULL AFTER category_id');
+  }
+  const [indexes] = await connection.query(
+    `SELECT index_name AS indexName FROM information_schema.statistics
+     WHERE table_schema = ? AND table_name = 'payment_items' AND index_name = 'idx_payment_item_category'`,
+    [databaseName],
+  );
+  if (indexes.length === 0) {
+    await connection.query('ALTER TABLE payment_items ADD INDEX idx_payment_item_category (category_id)');
+  }
+  await connection.query(
+    `UPDATE payment_items pi
+     LEFT JOIN menu_items mi ON mi.id = pi.menu_item_id
+     LEFT JOIN menu_categories mc ON mc.id = mi.category_id
+     SET pi.category_id = COALESCE(pi.category_id, mi.category_id),
+       pi.category_name = COALESCE(pi.category_name, mc.name, 'Khác')
+     WHERE pi.category_id IS NULL OR pi.category_name IS NULL`,
+  );
+  await connection.query('INSERT INTO schema_migrations (id) VALUES (?)', [migrationId]);
+}
 
 /** Nâng cấp an toàn database cũ lên schema queue hiện tại và chuyển timestamp legacy về UTC. */
 async function ensureKitchenQueueColumns(connection) {
@@ -246,6 +348,46 @@ async function ensureKitchenQueueColumns(connection) {
     }
     await connection.query('INSERT INTO schema_migrations (id) VALUES (?)', [migrationId]);
   }
+
+  // Mỗi active order cũ trở thành lượt gọi đầu tiên để nâng cấp không mất dữ liệu.
+  await connection.query(
+    `INSERT INTO order_batches (
+      order_id, table_id, batch_number, items, status, is_addition,
+      queued_at, cooking_started_at, completed_at, estimated_cook_minutes
+    )
+    SELECT o.id, o.table_id, 1, o.items,
+      CASE WHEN t.status IN ('waiting', 'cooking', 'done') THEN t.status ELSE 'waiting' END,
+      FALSE, o.queued_at, o.cooking_started_at,
+      CASE WHEN t.status = 'done' THEN o.updated_at ELSE NULL END,
+      o.estimated_cook_minutes
+    FROM active_orders o
+    INNER JOIN restaurant_tables t ON t.id = o.table_id
+    LEFT JOIN order_batches b ON b.order_id = o.id
+    WHERE b.id IS NULL`,
+  );
+}
+
+/** Fail-fast khi production tắt auto-migrate nhưng schema chưa đúng phiên bản ứng dụng. */
+async function verifyDatabaseSchema(connection) {
+  const probes = [
+    'SELECT id, settings FROM restaurant_settings LIMIT 0',
+    'SELECT id, table_number, seats, status, reserved_time FROM restaurant_tables LIMIT 0',
+    'SELECT id, category_id, cook_minutes, available FROM menu_items LIMIT 0',
+    'SELECT id, table_id, items, estimated_cook_minutes FROM active_orders LIMIT 0',
+    'SELECT id, order_id, table_id, batch_number, items, status, estimated_cook_minutes FROM order_batches LIMIT 0',
+    'SELECT id, concurrency, stale_after_minutes, automation_enabled, paused FROM kitchen_queue_state LIMIT 0',
+    'SELECT id, employee_code, full_name, role, active FROM employees LIMIT 0',
+    'SELECT id, invoice_code, staff_id, paid_at FROM payment_transactions LIMIT 0',
+    'SELECT id, transaction_id, category_id, category_name FROM payment_items LIMIT 0',
+  ];
+  for (const probe of probes) await connection.query(probe);
+  const [[settingsRow], [queueRow]] = await Promise.all([
+    connection.query('SELECT id FROM restaurant_settings WHERE id = 1 LIMIT 1'),
+    connection.query('SELECT id FROM kitchen_queue_state WHERE id = 1 LIMIT 1'),
+  ]);
+  if (!settingsRow[0] || !queueRow[0]) {
+    throw new Error('Database thiếu hàng cấu hình bắt buộc; hãy chạy npm run db:migrate trước khi khởi động.');
+  }
 }
 
 /** Bootstrap database/pool; production có thể tắt DDL tự động bằng DB_AUTO_MIGRATE=false. */
@@ -280,6 +422,8 @@ export async function initDatabase({ migrate = autoMigrate } = {}) {
   pool = createPool();
   if (migrate) {
     for (const statement of schemaStatements) await pool.query(statement);
+    await ensureEmployeePaymentColumn(pool);
+    await ensurePaymentItemCategoryColumns(pool);
     await ensureKitchenQueueColumns(pool);
 
     await pool.query(
@@ -287,18 +431,39 @@ export async function initDatabase({ migrate = autoMigrate } = {}) {
       [JSON.stringify(defaultSettings)],
     );
 
-    const placeholders = defaultTables.map(() => '(?, ?, ?)').join(', ');
-    await pool.query(
-      `INSERT IGNORE INTO restaurant_tables (id, table_number, seats) VALUES ${placeholders}`,
-      defaultTables.flat(),
+    // Bàn mẫu chỉ được tạo một lần; bàn quản trị đã xóa không xuất hiện lại sau khi restart API.
+    const tableSeedMigration = '20260714_seed_default_tables_once';
+    const [tableSeedRows] = await pool.query(
+      'SELECT id FROM schema_migrations WHERE id = ? LIMIT 1',
+      [tableSeedMigration],
     );
+    if (tableSeedRows.length === 0) {
+      const [tableCounts] = await pool.query('SELECT COUNT(*) AS total FROM restaurant_tables');
+      if (Number(tableCounts[0]?.total) === 0) {
+        const placeholders = defaultTables.map(() => '(?, ?, ?)').join(', ');
+        await pool.query(
+          `INSERT INTO restaurant_tables (id, table_number, seats) VALUES ${placeholders}`,
+          defaultTables.flat(),
+        );
+      }
+      await pool.query('INSERT INTO schema_migrations (id) VALUES (?)', [tableSeedMigration]);
+    }
     await pool.query(
       'INSERT IGNORE INTO kitchen_queue_state (id, concurrency, stale_after_minutes, automation_enabled, paused) VALUES (1, ?, ?, TRUE, FALSE)',
       [initialKitchenConcurrency(), initialKitchenStaleMinutes()],
     );
+    const [employeeCounts] = await pool.query('SELECT COUNT(*) AS total FROM employees');
+    if (Number(employeeCounts[0].total) === 0) {
+      const employeePlaceholders = defaultEmployees.map(() => '(?, ?, ?, ?, ?, ?, ?, TRUE)').join(', ');
+      await pool.query(
+        `INSERT INTO employees (
+          id, employee_code, full_name, role, phone, shift_start, shift_end, active
+         ) VALUES ${employeePlaceholders}`,
+        defaultEmployees.flat(),
+      );
+    }
   } else {
-    await pool.query('SELECT 1 FROM restaurant_settings LIMIT 1');
-    await pool.query('SELECT 1 FROM restaurant_tables LIMIT 1');
+    await verifyDatabaseSchema(pool);
   }
 
   return pool;

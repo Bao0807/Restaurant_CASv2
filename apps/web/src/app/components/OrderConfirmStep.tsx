@@ -5,13 +5,15 @@ import { Table, CartItem, cartEstimatedCookMinutes, cartItemCookMinutes, cartIte
 interface OrderConfirmStepProps {
   table: Table;
   cart: CartItem[];
+  isAddition: boolean;
+  isEditing: boolean;
   onCartChange: (cart: CartItem[]) => void;
   onBack: () => void;
   onEdit: () => void;
   onPlaceOrder: () => Promise<void>;
 }
 
-export function OrderConfirmStep({ table, cart, onCartChange, onBack, onEdit, onPlaceOrder }: OrderConfirmStepProps) {
+export function OrderConfirmStep({ table, cart, isAddition, isEditing, onCartChange, onBack, onEdit, onPlaceOrder }: OrderConfirmStepProps) {
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const cfg = STATUS_CONFIG[table.status];
@@ -60,14 +62,17 @@ export function OrderConfirmStep({ table, cart, onCartChange, onBack, onEdit, on
       {/* Header */}
       <div style={{ padding: '12px 16px', background: '#fff', borderBottom: '1px solid #F3F4F6', display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
         <button
+          aria-label="Quay lại chọn món"
           onClick={onBack}
-          style={{ background: '#F3F4F6', border: 'none', borderRadius: 10, width: 40, height: 40, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
+          style={{ background: '#F3F4F6', border: 'none', borderRadius: 10, width: 44, height: 44, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
         >
           <ArrowLeft size={20} color="#374151" />
         </button>
         <div style={{ flex: 1 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontWeight: 700, color: '#111827', fontSize: '16px' }}>Xác nhận order</span>
+            <span style={{ fontWeight: 700, color: '#111827', fontSize: '16px' }}>
+              {isEditing ? 'Xác nhận sửa phiếu chờ' : isAddition ? 'Xác nhận gọi thêm' : 'Xác nhận order'}
+            </span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
             <span style={{ fontSize: '13px', color: '#374151' }}>Bàn {table.number}</span>
@@ -82,20 +87,22 @@ export function OrderConfirmStep({ table, cart, onCartChange, onBack, onEdit, on
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button
+            aria-label="Quay lại sửa món"
             onClick={onEdit}
             style={{
               background: '#EEF2FF', border: 'none', borderRadius: 10,
-              width: 40, height: 40, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              width: 44, height: 44, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
             }}
             title="Thêm/sửa món"
           >
             <Pencil size={18} color="#4F46E5" />
           </button>
           <button
+            aria-label="Xóa toàn bộ món"
             onClick={() => setShowClearConfirm(true)}
             style={{
               background: '#FEF2F2', border: 'none', borderRadius: 10,
-              width: 40, height: 40, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              width: 44, height: 44, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
             }}
             title="Xóa tất cả"
           >
@@ -132,8 +139,9 @@ export function OrderConfirmStep({ table, cart, onCartChange, onBack, onEdit, on
                     {item.menuItem.name}
                   </span>
                   <button
+                    aria-label={`Xóa ${item.menuItem.name} khỏi order`}
                     onClick={() => remove(item.cartId)}
-                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, flexShrink: 0 }}
+                    style={{ width: 44, height: 44, background: 'none', border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0, display: 'grid', placeItems: 'center' }}
                   >
                     <X size={16} color="#D1D5DB" />
                   </button>
@@ -162,8 +170,9 @@ export function OrderConfirmStep({ table, cart, onCartChange, onBack, onEdit, on
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 10 }}>
                   <div style={{ display: 'flex', alignItems: 'center', background: '#F9FAFB', borderRadius: 10, overflow: 'hidden' }}>
                     <button
+                      aria-label={`Giảm số lượng ${item.menuItem.name}`}
                       onClick={() => updateQty(item.cartId, -1)}
-                      style={{ width: 36, height: 36, border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                      style={{ width: 44, height: 44, border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                     >
                       <Minus size={14} color={item.quantity <= 1 ? '#D1D5DB' : '#374151'} />
                     </button>
@@ -171,9 +180,10 @@ export function OrderConfirmStep({ table, cart, onCartChange, onBack, onEdit, on
                       {item.quantity}
                     </span>
                     <button
+                      aria-label={`Tăng số lượng ${item.menuItem.name}`}
                       onClick={() => updateQty(item.cartId, 1)}
                       disabled={item.quantity >= 99}
-                      style={{ width: 36, height: 36, border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                      style={{ width: 44, height: 44, border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                     >
                       <Plus size={14} color={item.quantity >= 99 ? '#D1D5DB' : '#374151'} />
                     </button>
@@ -220,7 +230,9 @@ export function OrderConfirmStep({ table, cart, onCartChange, onBack, onEdit, on
           }}
         >
           <Save size={20} />
-          {submitting ? 'Đang lưu order…' : 'Lưu order'}
+          {submitting
+            ? isEditing ? 'Đang cập nhật…' : 'Đang gửi bếp…'
+            : isEditing ? 'Cập nhật phiếu chờ' : isAddition ? 'Gửi phiếu gọi thêm' : 'Lưu order'}
         </button>
       </div>
 

@@ -2,6 +2,20 @@ export type TableStatus = 'empty' | 'waiting' | 'cooking' | 'done' | 'reserved';
 export type AppView = 'order' | 'overview' | 'payment' | 'reports' | 'dashboard';
 export type OrderStep = 'tables' | 'menu' | 'confirm' | 'success';
 export type PaymentMethodId = 'cash' | 'card' | 'qr';
+export type EmployeeRole = 'manager' | 'cashier' | 'server' | 'chef';
+
+export interface Employee {
+  id: string;
+  code: string;
+  name: string;
+  role: EmployeeRole;
+  phone: string;
+  shiftStart?: string;
+  shiftEnd?: string;
+  active: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
 
 export interface Table {
   id: string;
@@ -12,9 +26,16 @@ export interface Table {
   orderNumber?: number;
   queuedAt?: string;
   cookingStartedAt?: string;
+  cookingBatchId?: number;
   queuePosition?: number;
   estimatedCookMinutes?: number;
   kitchenStale?: boolean;
+  batchCount?: number;
+  additionalBatchCount?: number;
+  waitingBatchCount?: number;
+  cookingBatchCount?: number;
+  doneBatchCount?: number;
+  latestBatchNumber?: number;
 }
 
 export interface KitchenStatus {
@@ -70,6 +91,15 @@ export interface CartItem {
   note: string;
 }
 
+/** Một phiếu FIFO còn chờ và vì thế vẫn được phép chỉnh sửa. */
+export interface EditableOrderBatch {
+  batchId: number;
+  batchNumber: number;
+  items: CartItem[];
+  queuedAt: string;
+  estimatedCookMinutes: number;
+}
+
 export interface PaymentRecord {
   id: string;
   invoiceCode: string;
@@ -84,8 +114,19 @@ export interface PaymentRecord {
   total: number;
   itemCount: number;
   paidAt: string;
+  employeeId?: string;
   staffName: string;
   cashierName: string;
+}
+
+export interface ReportSummary {
+  range: { from: string; to: string; timezoneOffsetMinutes?: number };
+  totals: { revenue: number; orders: number; itemCount: number; averageBill: number };
+  hourly: Array<{ hour: number; revenue: number; orders: number }>;
+  paymentMethods: Array<{ method: PaymentMethodId; revenue: number; orders: number }>;
+  topItems: Array<{ id: string; name: string; quantity: number; revenue: number }>;
+  categories: Array<{ id: string; name: string; quantity: number; revenue: number }>;
+  staff: Array<{ employeeId?: string; name: string; revenue: number; orders: number; itemCount: number }>;
 }
 
 /** Tính thành tiền một dòng giỏ hàng, bao gồm size, topping và số lượng. */

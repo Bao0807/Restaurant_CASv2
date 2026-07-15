@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { defaultSettings } from '../src/defaultSettings.js';
-import { calculateTotals, createPayment, sanitizeSettings, validateOrderItems } from '../src/domain.js';
+import { calculateTotals, createPayment, normalizeEmployee, sanitizeSettings, validateOrderItems } from '../src/domain.js';
 import { availableKitchenSlots } from '../src/kitchenQueue.js';
 import { estimateCookMinutes, normalizeMenuItem } from '../src/catalog.js';
 
@@ -70,6 +70,24 @@ test('từ chối quantity và VAT ngoài giới hạn', () => {
   assert.throws(
     () => sanitizeSettings({ ...defaultSettings, vatRate: 2 }, defaultSettings),
     error => error.code === 'VALIDATION_ERROR' && error.field === 'vatRate',
+  );
+});
+
+test('chuẩn hóa hồ sơ nhân viên, ca làm và mã viết hoa', () => {
+  assert.deepEqual(normalizeEmployee({
+    code: 'nv_05', name: '  Nguyễn Văn A  ', role: 'server', phone: '0901 234 567',
+    shiftStart: '08:30', shiftEnd: '17:30', active: true,
+  }), {
+    code: 'NV_05', name: 'Nguyễn Văn A', role: 'server', phone: '0901 234 567',
+    shiftStart: '08:30', shiftEnd: '17:30', active: true,
+  });
+  assert.throws(
+    () => normalizeEmployee({ code: 'NV 05', name: 'A', role: 'owner', active: true }),
+    error => error.code === 'VALIDATION_ERROR',
+  );
+  assert.throws(
+    () => normalizeEmployee({ code: 'NV05', name: 'A', role: 'server', shiftStart: '25:00', active: true }),
+    error => error.field === 'shiftStart',
   );
 });
 

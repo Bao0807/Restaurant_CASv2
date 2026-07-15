@@ -6,9 +6,19 @@ export interface HourlyReportRow {
   orders: number;
 }
 
-/** Các khung giờ phục vụ được hiển thị cố định để biểu đồ không bị nhảy cột. */
-export const REPORT_HOURS: HourlyReportRow[] = Array.from({ length: 17 }, (_, index) => ({
-  hour: `${index + 6}h`,
+export interface StaffReportRow {
+  key: string;
+  employeeId?: string;
+  name: string;
+  revenue: number;
+  orders: number;
+  itemCount: number;
+  averageBill: number;
+}
+
+/** Đủ 24 giờ để KPI và biểu đồ không lệch khi nhà hàng phục vụ qua đêm. */
+export const REPORT_HOURS: HourlyReportRow[] = Array.from({ length: 24 }, (_, index) => ({
+  hour: `${index}h`,
   revenue: 0,
   orders: 0,
 }));
@@ -39,4 +49,29 @@ export function buildHourlyReport(payments: PaymentRecord[]): HourlyReportRow[] 
     revenue: grouped[row.hour]?.revenue ?? 0,
     orders: grouped[row.hour]?.orders ?? 0,
   }));
+}
+
+/** Xếp hạng hiệu suất theo hóa đơn đã thanh toán, giữ staffName làm snapshot lịch sử. */
+export function buildStaffReport(payments: PaymentRecord[]): StaffReportRow[] {
+  const grouped = payments.reduce<Record<string, Omit<StaffReportRow, 'averageBill'>>>((result, payment) => {
+    const name = payment.staffName?.trim() || 'Chưa gán nhân viên';
+    const key = payment.employeeId || `name:${name.toLocaleLowerCase('vi-VN')}`;
+    const current = result[key] ?? {
+      key,
+      ...(payment.employeeId ? { employeeId: payment.employeeId } : {}),
+      name,
+      revenue: 0,
+      orders: 0,
+      itemCount: 0,
+    };
+    current.revenue += payment.total;
+    current.orders += 1;
+    current.itemCount += payment.itemCount;
+    result[key] = current;
+    return result;
+  }, {});
+
+  return Object.values(grouped)
+    .map(row => ({ ...row, averageBill: row.orders ? Math.round(row.revenue / row.orders) : 0 }))
+    .sort((left, right) => right.revenue - left.revenue || right.orders - left.orders || left.name.localeCompare(right.name, 'vi'));
 }

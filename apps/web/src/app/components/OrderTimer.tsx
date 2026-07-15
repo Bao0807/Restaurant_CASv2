@@ -1,6 +1,37 @@
-import { useEffect, useState } from 'react';
+import { useSyncExternalStore } from 'react';
 import { Clock3, Flame } from 'lucide-react';
 import type { Table } from '../data';
+
+let clockNow = Date.now();
+let clockTimer: number | null = null;
+const clockListeners = new Set<() => void>();
+
+/** Một đồng hồ dùng chung cho mọi thẻ bàn, tránh tạo một interval cho từng OrderTimer. */
+function subscribeClock(listener: () => void) {
+  clockListeners.add(listener);
+  if (clockTimer === null) {
+    clockNow = Date.now();
+    clockTimer = window.setInterval(() => {
+      clockNow = Date.now();
+      clockListeners.forEach(notify => notify());
+    }, 1000);
+  }
+  return () => {
+    clockListeners.delete(listener);
+    if (clockListeners.size === 0 && clockTimer !== null) {
+      window.clearInterval(clockTimer);
+      clockTimer = null;
+    }
+  };
+}
+
+function subscribeDisabled() {
+  return () => undefined;
+}
+
+function getClockSnapshot() {
+  return clockNow;
+}
 
 /** Định dạng timer bếp dạng mm:ss hoặc h:mm:ss mà không phụ thuộc timezone. */
 function formatElapsed(milliseconds: number): string {
@@ -15,14 +46,8 @@ function formatElapsed(milliseconds: number): string {
 /** Hiển thị thời gian chờ/nấu và đổi màu khi vượt ETA backend. */
 export function OrderTimer({ table, compact = false }: { table: Table; compact?: boolean }) {
   const startedAt = table.status === 'cooking' ? table.cookingStartedAt : table.queuedAt;
-  const [now, setNow] = useState(Date.now());
-
-  useEffect(() => {
-    if (!startedAt || (table.status !== 'waiting' && table.status !== 'cooking')) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [startedAt, table.status]);
+  const active = Boolean(startedAt && (table.status === 'waiting' || table.status === 'cooking'));
+  const now = useSyncExternalStore(active ? subscribeClock : subscribeDisabled, getClockSnapshot, getClockSnapshot);
 
   if (!startedAt || (table.status !== 'waiting' && table.status !== 'cooking')) return null;
 
