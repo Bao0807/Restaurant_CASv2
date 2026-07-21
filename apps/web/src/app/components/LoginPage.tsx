@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { ChefHat, Eye, EyeOff, LockKeyhole, ShieldCheck, UserRound } from 'lucide-react';
+import { AlertCircle, ChefHat, Eye, EyeOff, LockKeyhole, UserRound } from 'lucide-react';
 import { BRAND_ASSETS } from '../config/restaurant';
 
 interface LoginPageProps {
@@ -27,16 +27,10 @@ export function LoginPage({ busy, error, onLogin }: LoginPageProps) {
       <section className="login-showcase" aria-label="Giới thiệu CAS POS">
         <img className="login-showcase-logo" src={BRAND_ASSETS.logoHorizontalWhite} alt="CAS" />
         <div className="login-showcase-content">
-          <div className="login-kicker"><ChefHat size={17} /> Quản lý vận hành</div>
-          <h1>Vận hành nhà hàng<br />trong một màn hình.</h1>
-          <p>Quản lý bàn, gọi món, hàng chờ bếp và thanh toán theo thời gian thực.</p>
-          <div className="login-feature-list">
-            <span><ShieldCheck size={18} /> Dữ liệu vận hành luôn đồng bộ</span>
-            <span><ShieldCheck size={18} /> Hàng đợi bếp FIFO minh bạch</span>
-            <span><ShieldCheck size={18} /> Giá và thời gian nấu nhất quán</span>
-          </div>
+          <div className="login-kicker"><ChefHat size={17} /> Dành cho nhân viên</div>
+          <h1>CAS đồng hành<br />cùng mỗi ca phục vụ.</h1>
+          <p>Đăng nhập để bắt đầu làm việc.</p>
         </div>
-        <span className="login-showcase-footer">CAS · Core Advanced Solutions</span>
       </section>
 
       <section className="login-panel">
@@ -91,7 +85,7 @@ export function LoginPage({ busy, error, onLogin }: LoginPageProps) {
 
           {error && (
             <div className="login-error" role="alert">
-              <ShieldCheck size={17} />
+              <AlertCircle size={17} />
               <span>{error}</span>
             </div>
           )}
@@ -99,8 +93,6 @@ export function LoginPage({ busy, error, onLogin }: LoginPageProps) {
           <button className="login-submit" type="submit" disabled={busy || !username.trim() || !password}>
             {busy ? <><span className="login-spinner" /> Đang xác thực…</> : <>Đăng nhập <span aria-hidden="true">→</span></>}
           </button>
-
-          <p className="login-security-note"><ShieldCheck size={14} /> Phiên đăng nhập chỉ được lưu trong tab trình duyệt này.</p>
         </form>
       </section>
     </main>

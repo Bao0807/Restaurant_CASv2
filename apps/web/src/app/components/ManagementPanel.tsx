@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Bot, ChefHat, CirclePlus, Pause, Play, RotateCcw, Save, StepForward, Trash2, UserRoundPlus, UsersRound, UtensilsCrossed } from 'lucide-react';
+import { useEffect, useId, useRef, useState } from 'react';
+import { AlertTriangle, Bot, Check, ChefHat, ChevronDown, CirclePlus, Pause, Play, RotateCcw, Save, StepForward, Trash2, UserRoundPlus, UsersRound, UtensilsCrossed } from 'lucide-react';
 import type { Employee, EmployeeRole, KitchenStaleBatch, KitchenStatus, MenuCategory, MenuItem, Table } from '../data';
 import { formatVND, STATUS_CONFIG } from '../data';
 import {
@@ -38,9 +38,145 @@ const EMPLOYEE_ROLE_LABELS: Record<EmployeeRole, string> = {
 type ConfirmAction = (title: string, message: string, confirmLabel: string) => Promise<boolean>;
 type ManagementSection = 'kitchen' | 'menu' | 'tables' | 'employees';
 
-function TableEditor({ table, onChanged, report, confirmAction }: { table: Table; onChanged: Props['onChanged']; report: (message: string, error?: boolean) => void; confirmAction: ConfirmAction }) {
+/** Danh sách khu vực đã lưu, loại trùng không phân biệt hoa thường. */
+function getTableAreaOptions(tables: Table[]): string[] {
+  const areas = new Map<string, string>();
+  for (const table of tables) {
+    const area = table.area?.trim() || 'Khu vực chung';
+    const key = area.toLocaleLowerCase('vi-VN');
+    if (!areas.has(key)) areas.set(key, area);
+  }
+  return [...areas.values()].sort((left, right) => left.localeCompare(right, 'vi-VN'));
+}
+
+function AreaCombobox({
+  value,
+  options,
+  ariaLabel,
+  onChange,
+}: {
+  value: string;
+  options: string[];
+  ariaLabel: string;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const listboxId = useId();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const normalizedValue = value.trim().toLocaleLowerCase('vi-VN');
+  const isExistingArea = options.some(option => option.toLocaleLowerCase('vi-VN') === normalizedValue);
+
+  return (
+    <div
+      className={`management-area-combobox${open ? ' open' : ''}`}
+      onBlur={event => {
+        const nextTarget = event.relatedTarget;
+        if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) setOpen(false);
+      }}
+    >
+      <div className="management-area-input-wrap">
+        <input
+          ref={inputRef}
+          aria-autocomplete="list"
+          aria-controls={listboxId}
+          aria-expanded={open}
+          aria-haspopup="listbox"
+          aria-label={ariaLabel}
+          className={inputClass}
+          maxLength={80}
+          placeholder="Chọn hoặc nhập khu vực mới"
+          role="combobox"
+          spellCheck={false}
+          value={value}
+          onChange={event => { onChange(event.target.value); setOpen(true); }}
+          onFocus={() => setOpen(true)}
+          onKeyDown={event => {
+            if (event.key === 'Escape') setOpen(false);
+            if (event.key === 'ArrowDown') setOpen(true);
+          }}
+        />
+        <button
+          type="button"
+          className="management-area-toggle"
+          aria-label={open ? 'Đóng danh sách khu vực' : 'Mở danh sách khu vực có sẵn'}
+          aria-expanded={open}
+          onMouseDown={event => event.preventDefault()}
+          onClick={() => {
+            if (open) setOpen(false);
+            else { setOpen(true); inputRef.current?.focus(); }
+          }}
+        >
+          <ChevronDown size={17} aria-hidden="true" />
+        </button>
+      </div>
+      {open && (
+        <div className="management-area-menu" id={listboxId} role="listbox" aria-label="Khu vực có sẵn">
+          {options.map(option => {
+            const selected = option.toLocaleLowerCase('vi-VN') === normalizedValue;
+            return (
+              <button
+                type="button"
+                role="option"
+                aria-selected={selected}
+                className={`management-area-option${selected ? ' selected' : ''}`}
+                key={option}
+                onMouseDown={event => event.preventDefault()}
+                onClick={() => { onChange(option); setOpen(false); }}
+              >
+                <span>{option}</span>{selected && <Check size={15} aria-hidden="true" />}
+              </button>
+            );
+          })}
+          <div className={`management-area-hint${value.trim() && !isExistingArea ? ' new-area' : ''}`}>
+            {value.trim() && !isExistingArea
+              ? `Sẽ tạo khu vực mới “${value.trim()}” khi lưu.`
+              : 'Không thấy khu vực phù hợp? Gõ tên mới trực tiếp.'}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Tìm ô sơ đồ đầu tiên còn trống trong khu vực để việc thêm bàn không tạo xung đột. */
+function nextAvailableTablePosition(
+  tables: Table[],
+  area: string,
+  extra?: { x: number; y: number },
+): { positionX: number; positionY: number } {
+  const normalizedArea = area.trim().toLocaleLowerCase('vi-VN');
+  const occupied = new Set(
+    tables
+      .filter(table => (table.area?.trim() || 'Khu vực chung').toLocaleLowerCase('vi-VN') === normalizedArea)
+      .filter(table => table.positionX != null && table.positionY != null)
+      .map(table => `${table.positionX}:${table.positionY}`),
+  );
+  if (extra) occupied.add(`${extra.x}:${extra.y}`);
+
+  for (let y = 1; y <= 24; y += 1) {
+    for (let x = 1; x <= 24; x += 1) {
+      if (!occupied.has(`${x}:${y}`)) return { positionX: x, positionY: y };
+    }
+  }
+  return { positionX: 1, positionY: 1 };
+}
+
+function TableEditor({ table, tables, areaOptions, onChanged, report, confirmAction }: { table: Table; tables: Table[]; areaOptions: string[]; onChanged: Props['onChanged']; report: (message: string, error?: boolean) => void; confirmAction: ConfirmAction }) {
   const [draft, setDraft] = useState(table);
-  useEffect(() => setDraft(table), [table.number, table.seats, table.status]);
+  useEffect(() => setDraft(table), [table.area, table.number, table.positionX, table.positionY, table.seats, table.status]);
+
+  const changeArea = (area: string) => {
+    setDraft(current => {
+      const currentArea = (current.area?.trim() || 'Khu vực chung').toLocaleLowerCase('vi-VN');
+      const nextArea = area.trim().toLocaleLowerCase('vi-VN');
+      if (currentArea === nextArea) return { ...current, area };
+      return {
+        ...current,
+        area,
+        ...nextAvailableTablePosition(tables.filter(row => row.id !== table.id), area),
+      };
+    });
+  };
 
   const persist = async () => {
     try {
@@ -64,15 +200,16 @@ function TableEditor({ table, onChanged, report, confirmAction }: { table: Table
 
   return (
     <div className="management-row">
-      <input aria-label="Số bàn" className={inputClass} type="number" min={1} value={draft.number} onChange={event => setDraft({ ...draft, number: Number(event.target.value) })} />
-      <input aria-label="Số ghế" className={inputClass} type="number" min={1} value={draft.seats} onChange={event => setDraft({ ...draft, seats: Number(event.target.value) })} />
-      <div className="management-table-status" title="Trạng thái được đồng bộ từ đặt bàn và hàng đợi bếp">
+      <label className="management-table-field table-number-field"><span>Số bàn</span><input aria-label="Số bàn" className={inputClass} type="number" min={1} value={draft.number} disabled={Boolean(table.orderNumber)} title={table.orderNumber ? 'Không thể đổi khi bàn đang phục vụ' : undefined} onChange={event => setDraft({ ...draft, number: Number(event.target.value) })} /></label>
+      <label className="management-table-field table-seats-field"><span>Số ghế</span><input aria-label="Số ghế" className={inputClass} type="number" min={1} value={draft.seats} disabled={Boolean(table.orderNumber)} title={table.orderNumber ? 'Không thể đổi khi bàn đang phục vụ' : undefined} onChange={event => setDraft({ ...draft, seats: Number(event.target.value) })} /></label>
+      <div className="management-table-field table-area-field"><span>Khu vực</span><AreaCombobox ariaLabel={`Khu vực của bàn ${table.number}`} options={areaOptions} value={draft.area ?? ''} onChange={changeArea} /></div>
+      <div className="management-table-status" title="Trạng thái hiện tại của bàn">
         <strong>{STATUS_CONFIG[table.status].label}</strong>
         <small>{table.nextReservation
           ? `${new Date(table.nextReservation.reservedAt).toLocaleString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })} · ${table.nextReservation.customerName}`
-          : table.orderNumber ? 'Bếp tự đồng bộ' : 'Sẵn sàng phục vụ'}</small>
+          : table.orderNumber ? 'Theo tiến độ bếp' : 'Sẵn sàng phục vụ'}</small>
       </div>
-      <button className="management-icon-button primary" aria-label={`Lưu bàn ${table.number}`} onClick={() => void persist()} title="Lưu bàn"><Save size={16} /></button>
+      <button className="management-icon-button primary" aria-label={`Lưu bàn ${table.number}`} onClick={() => void persist()} title={table.orderNumber ? 'Lưu khu vực; số bàn và số ghế đang được khóa' : 'Lưu bàn'}><Save size={16} /></button>
       <button className="management-icon-button danger" aria-label={`Xóa bàn ${table.number}`} onClick={() => void remove()} title="Xóa bàn"><Trash2 size={16} /></button>
     </div>
   );
@@ -87,9 +224,14 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
   const [kitchenVersion, setKitchenVersion] = useState(kitchen.version);
   const [kitchenBusy, setKitchenBusy] = useState(false);
   const kitchenBusyRef = useRef(false);
-  const [newTable, setNewTable] = useState({ number: Math.max(0, ...tables.map(table => table.number)) + 1, seats: 4 });
+  const [newTable, setNewTable] = useState(() => ({
+    number: Math.max(0, ...tables.map(table => table.number)) + 1,
+    seats: 4,
+    area: 'Khu vực chung',
+    ...nextAvailableTablePosition(tables, 'Khu vực chung'),
+  }));
   const [selectedItemId, setSelectedItemId] = useState('new');
-  const emptyDish = { name: '', description: '', price: 0, image: '', categoryId: categories[0]?.id ?? '', cookMinutes: 10, available: true };
+  const emptyDish = { name: '', description: '', price: 0, image: '', categoryId: categories[0]?.id ?? '', cookMinutes: 10, dailyLimit: 50, available: true };
   const [dish, setDish] = useState<Partial<MenuItem>>(emptyDish);
   const [newCategory, setNewCategory] = useState({ name: '', emoji: '🍽️' });
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -101,6 +243,7 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
     title: string; message: string; confirmLabel: string; resolve: (confirmed: boolean) => void;
   } | null>(null);
   const staleBatches = kitchen.staleBatches ?? [];
+  const areaOptions = getTableAreaOptions(tables);
 
   useEffect(() => {
     if (kitchen.version <= kitchenVersion) return;
@@ -113,7 +256,14 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
   useEffect(() => {
     if (selectedItemId === 'new') return;
     const selected = menuItems.find(item => item.id === selectedItemId);
-    if (selected) setDish(selected);
+    if (selected) setDish(current => current.id === selected.id
+      ? {
+        ...current,
+        dailyUsed: selected.dailyUsed,
+        dailyRemaining: selected.dailyRemaining,
+        inventoryDate: selected.inventoryDate,
+      }
+      : selected);
   }, [selectedItemId, menuItems]);
   useEffect(() => {
     let active = true;
@@ -140,7 +290,20 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
   };
 
   const addTable = async () => {
-    try { await createTable(newTable.number, newTable.seats); await onChanged(); setNewTable(current => ({ ...current, number: current.number + 1 })); report('Đã thêm bàn mới'); }
+    try {
+      await createTable(newTable.number, newTable.seats, {
+        area: newTable.area,
+        positionX: newTable.positionX,
+        positionY: newTable.positionY,
+      });
+      await onChanged();
+      setNewTable(current => ({
+        ...current,
+        number: current.number + 1,
+        ...nextAvailableTablePosition(tables, current.area, { x: current.positionX, y: current.positionY }),
+      }));
+      report('Đã thêm bàn mới');
+    }
     catch (error) { report(error instanceof Error ? error.message : 'Không thể thêm bàn', true); }
   };
 
@@ -305,7 +468,7 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
 
       {activeSection === 'kitchen' && staleBatches.length > 0 && (
         <section className="management-stale-alert">
-          <div className="management-title"><AlertTriangle size={21} /><div><strong>{staleBatches.length} phiếu bếp quá hạn</strong><span>Đã vượt ETA thêm {kitchen.staleAfterMinutes} phút và đang chiếm công suất bếp</span></div></div>
+          <div className="management-title"><AlertTriangle size={21} /><div><strong>{staleBatches.length} phiếu bếp quá hạn</strong><span>Đã quá thời gian dự kiến thêm {kitchen.staleAfterMinutes} phút</span></div></div>
           <div className="management-stale-list">
             {staleBatches.map(batch => (
               <div key={batch.batchId} className="management-stale-row">
@@ -325,10 +488,10 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
         aria-labelledby="management-tab-kitchen"
         className="management-card management-primary-card"
       >
-        <div className="management-title"><ChefHat size={20} /><div><strong>Cấu hình bếp</strong><span>{kitchen.cookingCount} đang nấu · {kitchen.waitingCount} đang chờ</span></div><span className={`kitchen-mode-badge ${paused ? 'paused' : automationEnabled ? 'auto' : 'manual'}`}>{paused ? 'Đang tạm dừng' : automationEnabled ? 'Tự động FIFO' : 'Điều phối thủ công'}</span></div>
-        <div className="management-actions"><label>Số phiếu nấu song song<input className={inputClass} type="number" min={1} max={20} value={concurrency} disabled={kitchenBusy} onChange={event => setConcurrency(Number(event.target.value))} /></label><label>Cảnh báo sau ETA (phút)<input className={inputClass} type="number" min={15} max={1440} value={staleAfterMinutes} disabled={kitchenBusy} onChange={event => setStaleAfterMinutes(Number(event.target.value))} /></label><button type="button" className="management-button" disabled={kitchenBusy} onClick={() => void persistKitchen({ concurrency, staleAfterMinutes })}><Save size={16} /> {kitchenBusy ? 'Đang lưu…' : 'Lưu cấu hình'}</button></div>
+        <div className="management-title"><ChefHat size={20} /><div><strong>Cấu hình bếp</strong><span>{kitchen.cookingCount} đang nấu · {kitchen.waitingCount} đang chờ</span></div><span className={`kitchen-mode-badge ${paused ? 'paused' : automationEnabled ? 'auto' : 'manual'}`}>{paused ? 'Đang tạm dừng' : automationEnabled ? 'Tự động theo thứ tự gọi' : 'Chế độ thủ công'}</span></div>
+        <div className="management-actions"><label>Số phiếu nấu song song<input className={inputClass} type="number" min={1} max={20} value={concurrency} disabled={kitchenBusy} onChange={event => setConcurrency(Number(event.target.value))} /></label><label>Cảnh báo trễ (phút)<input className={inputClass} type="number" min={15} max={1440} value={staleAfterMinutes} disabled={kitchenBusy} onChange={event => setStaleAfterMinutes(Number(event.target.value))} /></label><button type="button" className="management-button" disabled={kitchenBusy} onClick={() => void persistKitchen({ concurrency, staleAfterMinutes })}><Save size={16} /> {kitchenBusy ? 'Đang lưu…' : 'Lưu cấu hình'}</button></div>
         <div className="kitchen-control-grid">
-          <button type="button" aria-pressed={automationEnabled} className={`kitchen-control ${automationEnabled ? 'active' : ''}`} disabled={kitchenBusy} onClick={() => void persistKitchen({ automationEnabled: !automationEnabled })}><Bot size={18} /><span><strong>Tự động FIFO</strong><small>{automationEnabled ? 'Tự lấy phiếu theo thứ tự chờ' : 'Bật chế độ vận hành tự động'}</small></span></button>
+          <button type="button" aria-pressed={automationEnabled} className={`kitchen-control ${automationEnabled ? 'active' : ''}`} disabled={kitchenBusy} onClick={() => void persistKitchen({ automationEnabled: !automationEnabled })}><Bot size={18} /><span><strong>Tự động theo thứ tự gọi</strong><small>{automationEnabled ? 'Tự lấy phiếu đến trước' : 'Bật chế độ vận hành tự động'}</small></span></button>
           <button type="button" aria-pressed={paused} className={`kitchen-control ${paused ? 'warning' : ''}`} disabled={kitchenBusy} onClick={() => void persistKitchen({ paused: !paused })}>{paused ? <Play size={18} /> : <Pause size={18} />}<span><strong>{paused ? 'Tiếp tục bếp' : 'Tạm dừng bếp'}</strong><small>Chỉ dừng nhận phiếu; món đang nấu vẫn chạy</small></span></button>
           <button type="button" className="kitchen-control" disabled={!canDispatch} onClick={() => void dispatchNext()}><StepForward size={18} /><span><strong>{kitchenBusy ? 'Đang điều phối…' : 'Lấy phiếu tiếp'}</strong><small>{automationEnabled ? 'Chỉ dùng khi điều phối thủ công' : kitchen.waitingCount === 0 ? 'Không có phiếu đang chờ' : 'Đưa đúng một phiếu đầu hàng chờ vào bếp'}</small></span></button>
         </div>
@@ -395,10 +558,15 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
         aria-labelledby="management-tab-tables"
         className="management-card management-primary-card"
       >
-        <div className="management-title"><CirclePlus size={20} /><div><strong>Quản lý bàn</strong><span>Thêm, sửa bàn; trạng thái phục vụ được đồng bộ với bếp</span></div></div>
-        <div className="management-row add-row"><input className={inputClass} type="number" value={newTable.number} onChange={event => setNewTable({ ...newTable, number: Number(event.target.value) })} placeholder="Số bàn" /><input className={inputClass} type="number" value={newTable.seats} onChange={event => setNewTable({ ...newTable, seats: Number(event.target.value) })} placeholder="Số ghế" /><button className="management-button" onClick={() => void addTable()}><CirclePlus size={16} /> Thêm bàn</button></div>
-        <div className="management-table-head"><span>Số bàn</span><span>Số ghế</span><span>Trạng thái</span><span></span></div>
-        <div className="management-list">{tables.map(table => <TableEditor key={table.id} table={table} onChanged={onChanged} report={report} confirmAction={confirmAction} />)}</div>
+        <div className="management-title"><CirclePlus size={20} /><div><strong>Quản lý bàn & sơ đồ</strong><span>Chọn khu vực; hệ thống tự sắp bàn vào vị trí còn trống</span></div></div>
+        <div className="management-row add-row table-add-row">
+          <label className="management-table-field table-number-field"><span>Số bàn</span><input aria-label="Số bàn mới" className={inputClass} type="number" min={1} value={newTable.number} onChange={event => setNewTable({ ...newTable, number: Number(event.target.value) })} placeholder="Số bàn" /></label>
+          <label className="management-table-field table-seats-field"><span>Số ghế</span><input aria-label="Số ghế bàn mới" className={inputClass} type="number" min={1} value={newTable.seats} onChange={event => setNewTable({ ...newTable, seats: Number(event.target.value) })} placeholder="Số ghế" /></label>
+          <div className="management-table-field table-area-field"><span>Khu vực</span><AreaCombobox ariaLabel="Khu vực bàn mới" options={areaOptions} value={newTable.area} onChange={area => setNewTable({ ...newTable, area, ...nextAvailableTablePosition(tables, area) })} /></div>
+          <button className="management-button" onClick={() => void addTable()}><CirclePlus size={16} /> Thêm bàn</button>
+        </div>
+        <div className="management-table-head"><span>Số bàn</span><span>Số ghế</span><span>Khu vực</span><span>Trạng thái</span><span>Thao tác</span></div>
+        <div className="management-list">{tables.map(table => <TableEditor key={table.id} table={table} tables={tables} areaOptions={areaOptions} onChanged={onChanged} report={report} confirmAction={confirmAction} />)}</div>
       </section>}
 
       {activeSection === 'menu' && <div
@@ -415,6 +583,11 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
           <label>Danh mục<select className={inputClass} value={dish.categoryId ?? ''} onChange={event => setDish({ ...dish, categoryId: event.target.value })}>{categories.map(category => <option key={category.id} value={category.id}>{category.emoji} {category.name}</option>)}</select></label>
           <label>Giá bán<input className={inputClass} type="number" min={0} value={dish.price ?? 0} onChange={event => setDish({ ...dish, price: Number(event.target.value) })} /></label>
           <label>Thời gian nấu (phút)<input className={inputClass} type="number" min={1} max={240} value={dish.cookMinutes ?? 10} onChange={event => setDish({ ...dish, cookMinutes: Number(event.target.value) })} /></label>
+          <label>Số phần tối đa/ngày<input className={inputClass} type="number" min={0} max={1000000} value={dish.dailyLimit ?? ''} placeholder="Để trống = không giới hạn" onChange={event => setDish({ ...dish, dailyLimit: event.target.value === '' ? null : Number(event.target.value) })} /></label>
+          <div className="management-inventory-summary" role="status">
+            <strong>{dish.dailyLimit == null ? 'Không giới hạn số phần' : `Còn ${dish.dailyRemaining ?? Math.max(0, Number(dish.dailyLimit) - Number(dish.dailyUsed ?? 0))}/${dish.dailyLimit} phần`}</strong>
+            <span>{dish.dailyLimit == null ? 'Có thể đặt hạn mức bất kỳ lúc nào' : `Đã nhận ${dish.dailyUsed ?? 0} phần · tự đặt lại khi sang ngày mới`}</span>
+          </div>
           <label className="wide">Liên kết hình ảnh<input className={inputClass} value={dish.image ?? ''} onChange={event => setDish({ ...dish, image: event.target.value })} /></label>
           <label className="wide">Mô tả<textarea className={inputClass} rows={3} value={dish.description ?? ''} onChange={event => setDish({ ...dish, description: event.target.value })} /></label>
           <label className="management-check"><input type="checkbox" checked={dish.available !== false} onChange={event => setDish({ ...dish, available: event.target.checked })} /> Đang phục vụ</label>

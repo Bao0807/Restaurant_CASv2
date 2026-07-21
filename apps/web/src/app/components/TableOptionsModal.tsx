@@ -2,9 +2,11 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   AlertCircle,
+  BadgeCheck,
   CheckCircle2,
   ChevronRight,
   ClipboardList,
+  DoorOpen,
   Pencil,
   Trash2,
   X,
@@ -23,6 +25,7 @@ interface TableOptionsModalProps {
   onEditOrder: (batchId: number) => void;
   onDeleteOrder: () => Promise<void>;
   onMarkDone: () => Promise<void>;
+  onConfirmDeparture: () => Promise<void>;
 }
 
 const TABLE_OPTIONS_HISTORY_KEY = 'casTableOptionsId';
@@ -35,7 +38,7 @@ export function getTableOptionsHistoryTableId(state: unknown = window.history.st
 
 /** Chỉ cho phép hủy khi mọi phiếu của order vẫn nằm trong hàng chờ. */
 export function canDeleteWaitingOrder(table: Table, hasOrder: boolean): boolean {
-  if (!hasOrder || table.status !== 'waiting') return false;
+  if (!hasOrder || table.status !== 'waiting' || table.isPaid) return false;
 
   const totalBatches = table.batchCount ?? 0;
   const waitingBatches = table.waitingBatchCount ?? 0;
@@ -68,6 +71,7 @@ function StatusDot({ status, animate }: { status: TableStatus; animate?: boolean
 }
 
 function deleteBlockedReason(table: Table): string {
+  if (table.isPaid) return 'Không thể hủy vì bàn đã thanh toán';
   if ((table.cookingBatchCount ?? 0) > 0 || table.status === 'cooking') {
     return 'Không thể hủy vì đã có phiếu đang nấu';
   }
@@ -83,7 +87,7 @@ function formatReservationTime(value: string): string {
   });
 }
 
-/** Modal thao tác bàn dùng chung cho trang Gọi món và Tổng quan. */
+/** Modal thao tác trực tiếp từ màn Vận hành bàn. */
 export function TableOptionsModal({
   table,
   order,
@@ -93,22 +97,25 @@ export function TableOptionsModal({
   onEditOrder,
   onDeleteOrder,
   onMarkDone,
+  onConfirmDeparture,
 }: TableOptionsModalProps) {
   const titleId = useId();
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
-  const deleteConfirmationRef = useRef(false);
+  const confirmationOpenRef = useRef(false);
   const [showDeleteConfirmation, setShowDeleteConfirmation] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [markDoneBusy, setMarkDoneBusy] = useState(false);
+  const [departureBusy, setDepartureBusy] = useState(false);
+  const [showDepartureConfirmation, setShowDepartureConfirmation] = useState(false);
   const cfg = STATUS_CONFIG[table.status];
   const hasOrder = Boolean(order?.length);
   const checkedInReservation = table.nextReservation?.status === 'seated';
   const isCooking = table.status === 'cooking';
   const total = hasOrder ? cartTotal(order!) : 0;
   const canDelete = canDeleteWaitingOrder(table, hasOrder);
-  deleteConfirmationRef.current = showDeleteConfirmation;
+  confirmationOpenRef.current = showDeleteConfirmation || showDepartureConfirmation;
   onCloseRef.current = onClose;
 
   const requestClose = () => {
@@ -129,7 +136,7 @@ export function TableOptionsModal({
     const previousOverflow = document.body.style.overflow;
     const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (deleteConfirmationRef.current) return;
+      if (confirmationOpenRef.current) return;
       if (event.key === 'Escape') requestClose();
       if (event.key === 'Tab') {
         const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>(
@@ -204,6 +211,11 @@ export function TableOptionsModal({
                 <span style={{ fontSize: 13, color: cfg.text, fontWeight: 600 }}>{cfg.label}</span>
               </span>
               <span style={{ fontSize: 12, color: '#9CA3AF' }}>· {table.seats} chỗ</span>
+              {table.isPaid && (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, borderRadius: 999, padding: '3px 8px', background: '#DCFCE7', color: '#166534', fontSize: 11, fontWeight: 900 }}>
+                  <BadgeCheck size={13} /> Đã thanh toán
+                </span>
+              )}
               {table.nextReservation && (
                 <span style={{ fontSize: 12, color: '#2563EB' }}>
                   · {formatReservationTime(table.nextReservation.reservedAt)} · {table.nextReservation.customerName}
@@ -214,6 +226,12 @@ export function TableOptionsModal({
             {(table.additionalBatchCount ?? 0) > 0 && (
               <div style={{ marginTop: 6, color: '#6D28D9', fontSize: 11, fontWeight: 800 }}>
                 {table.batchCount} lượt gọi · +{table.additionalBatchCount} gọi thêm
+              </div>
+            )}
+            {table.isPaid && (
+              <div style={{ marginTop: 6, color: '#166534', fontSize: 12, fontWeight: 700 }}>
+                {table.paidAt ? `Đã thu lúc ${new Date(table.paidAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}` : 'Đã thu tiền'}
+                {table.paymentId ? ` · ${table.paymentId}` : ''}
               </div>
             )}
           </div>
@@ -244,14 +262,14 @@ export function TableOptionsModal({
                 </div>
               ))}
               <div className="table-options-total">
-                <span>Tổng</span>
-                <strong>{formatVND(total)}</strong>
+                <span>{table.isPaid ? 'Đã thu' : 'Tổng'}</span>
+                <strong>{formatVND(table.isPaid && table.paidTotal != null ? table.paidTotal : total)}</strong>
               </div>
             </div>
           )}
 
           <div className="table-options-actions">
-            {(table.status === 'empty' || hasOrder || checkedInReservation)
+            {!table.isPaid && (table.status === 'empty' || hasOrder || checkedInReservation)
               && (table.status !== 'reserved' || checkedInReservation) && (
               <button
                 type="button"
@@ -263,13 +281,13 @@ export function TableOptionsModal({
                 </span>
                 <span className="table-option-action-copy">
                   <strong>{hasOrder ? 'Gọi thêm món' : 'Gọi món cho bàn này'}</strong>
-                  <small>{hasOrder ? 'Tạo phiếu bếp mới và xếp FIFO riêng' : 'Mở menu và chọn món'}</small>
+                  <small>{hasOrder ? 'Tạo một lượt gọi thêm' : 'Mở menu và chọn món'}</small>
                 </span>
                 <ChevronRight size={18} />
               </button>
             )}
 
-            {waitingBatches.length > 0 && (
+            {!table.isPaid && waitingBatches.length > 0 && (
               <section className="table-options-edit-section" aria-label="Các phiếu đang chờ có thể sửa">
                 {waitingBatches.length > 1 && (
                   <div className="table-options-section-label">Chọn phiếu đang chờ cần sửa</div>
@@ -285,7 +303,7 @@ export function TableOptionsModal({
                     <span className="table-option-action-copy">
                       <strong>Sửa phiếu chờ #{batch.batchNumber}</strong>
                       <small>
-                        {batch.items.reduce((sum, item) => sum + item.quantity, 0)} phần · ETA khoảng {batch.estimatedCookMinutes} phút
+                        {batch.items.reduce((sum, item) => sum + item.quantity, 0)} phần · dự kiến {batch.estimatedCookMinutes} phút
                       </small>
                     </span>
                     <ChevronRight size={18} />
@@ -315,13 +333,36 @@ export function TableOptionsModal({
                 <span className="table-option-action-icon table-option-action-icon-done"><CheckCircle2 size={19} /></span>
                 <span className="table-option-action-copy">
                   <strong>{markDoneBusy ? 'Đang hoàn tất…' : 'Đánh dấu xong nấu'}</strong>
-                  <small>{markDoneBusy ? 'Đang xác nhận đúng phiếu với máy chủ' : 'Chuyển phiếu đang nấu sang “Đã xong”'}</small>
+                  <small>{markDoneBusy ? 'Đang cập nhật…' : 'Chuyển phiếu đang nấu sang “Đã xong”'}</small>
                 </span>
                 <ChevronRight size={18} />
               </button>
             )}
 
-            {hasOrder && (
+            {table.isPaid && table.status !== 'done' && (
+              <div className="table-options-information" style={{ background: '#F0FDF4', borderColor: '#86EFAC', color: '#166534' }}>
+                <BadgeCheck size={17} />
+                Bàn đã thanh toán và vẫn đang phục vụ. Chờ bếp hoàn tất món trước khi xác nhận khách rời.
+              </div>
+            )}
+
+            {table.isPaid && table.status === 'done' && (
+              <button
+                type="button"
+                onClick={() => setShowDepartureConfirmation(true)}
+                disabled={departureBusy}
+                className="table-option-action table-option-action-done"
+              >
+                <span className="table-option-action-icon table-option-action-icon-done"><DoorOpen size={19} /></span>
+                <span className="table-option-action-copy">
+                  <strong>{departureBusy ? 'Đang đóng bàn…' : 'Xác nhận khách đã rời'}</strong>
+                  <small>Đưa bàn về trạng thái trống</small>
+                </span>
+                <ChevronRight size={18} />
+              </button>
+            )}
+
+            {hasOrder && !table.isPaid && (
               <button
                 type="button"
                 onClick={() => {
@@ -335,7 +376,7 @@ export function TableOptionsModal({
                   <strong>Hủy phiếu gọi món</strong>
                   <small>
                     {!canDelete && <AlertCircle size={11} />}
-                    {canDelete ? 'Xóa toàn bộ lượt gọi còn trong hàng chờ' : deleteBlockedReason(table)}
+                    {canDelete ? 'Xóa toàn bộ lượt gọi còn đang chờ' : deleteBlockedReason(table)}
                   </small>
                 </span>
               </button>
@@ -352,7 +393,7 @@ export function TableOptionsModal({
         {showDeleteConfirmation && (
           <ConfirmationDialog
             title="Hủy toàn bộ lượt gọi?"
-            message={`Toàn bộ phiếu đang chờ của bàn ${table.number} sẽ bị xóa khỏi hàng đợi. Thao tác này không thể hoàn tác.`}
+            message={`Toàn bộ phiếu đang chờ của bàn ${table.number} sẽ bị xóa. Thao tác này không thể hoàn tác.`}
             confirmLabel="Xác nhận hủy"
             busy={deleteBusy}
             onCancel={() => { if (!deleteBusy) setShowDeleteConfirmation(false); }}
@@ -368,6 +409,30 @@ export function TableOptionsModal({
                 () => {
                   setDeleteBusy(false);
                   setShowDeleteConfirmation(false);
+                },
+              );
+            }}
+          />
+        )}
+        {showDepartureConfirmation && (
+          <ConfirmationDialog
+            title="Xác nhận khách đã rời?"
+            message={`Bàn ${table.number} đã thanh toán và món đã hoàn tất. Xác nhận để đóng lượt phục vụ và đưa bàn về trạng thái trống.`}
+            confirmLabel="Khách đã rời"
+            busy={departureBusy}
+            onCancel={() => { if (!departureBusy) setShowDepartureConfirmation(false); }}
+            onConfirm={() => {
+              if (departureBusy) return;
+              setDepartureBusy(true);
+              void onConfirmDeparture().then(
+                () => {
+                  setDepartureBusy(false);
+                  setShowDepartureConfirmation(false);
+                  closeAfterAction();
+                },
+                () => {
+                  setDepartureBusy(false);
+                  setShowDepartureConfirmation(false);
                 },
               );
             }}

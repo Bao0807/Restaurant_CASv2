@@ -1,16 +1,19 @@
 import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
-  Banknote, Building2, CalendarDays, CreditCard, QrCode, ReceiptText,
-  Save, Settings, ShoppingBag, SlidersHorizontal, Users, WalletCards, Wrench,
+  Banknote, Building2, CalendarDays, ChevronLeft, ChevronRight, CreditCard, QrCode, ReceiptText,
+  Save, Settings, ShoppingBag, SlidersHorizontal, WalletCards, Wrench,
 } from 'lucide-react';
 import type { CartItem, KitchenStatus, MenuCategory, MenuItem, PaymentMethodId, PaymentRecord, ReportSummary, Table } from '../data';
-import { cartTotal, formatVND } from '../data';
+import { formatVND } from '../data';
 import {
-  BRAND_ASSETS, DASHBOARD_WIDGETS, DEFAULT_RESTAURANT_SETTINGS,
-  PAYMENT_METHOD_LABELS, calculateInvoiceTotals, type RestaurantSettings,
+  BRAND_ASSETS, DASHBOARD_WIDGETS,
+  PAYMENT_METHOD_LABELS, type RestaurantSettings,
 } from '../config/restaurant';
-import { buildReportTimeline, buildStaffReport, type ReportPeriod } from '../reporting';
-import { fetchReportSummary } from '../services/api';
+import {
+  buildReportRange, buildReportTimeline, buildStaffReport, parseReportReferenceInput,
+  reportReferenceInputValue, shiftReportReference, type ReportPeriod,
+} from '../reporting';
+import { fetchReportSummary, getServerNowMs } from '../services/api';
 
 const ManagementPanel = lazy(() => import('./ManagementPanel').then(module => ({ default: module.ManagementPanel })));
 const RevenueChart = lazy(() => import('./DashboardCharts').then(module => ({ default: module.RevenueChart })));
@@ -18,13 +21,6 @@ const OrdersChart = lazy(() => import('./DashboardCharts').then(module => ({ def
 
 type DashboardTab = 'reports' | 'management' | 'settings';
 type SettingsStatus = 'idle' | 'loading' | 'saving' | 'saved' | 'error';
-
-interface ReportRange {
-  from: Date;
-  to: Date;
-  label: string;
-  contextLabel: string;
-}
 
 interface DashboardPageProps {
   mode: 'reports' | 'admin';
@@ -60,6 +56,18 @@ const REPORT_PERIODS: Array<{ id: ReportPeriod; label: string }> = [
   { id: 'month', label: 'Tháng' },
 ];
 
+const REPORT_PICKER_LABELS: Record<ReportPeriod, string> = {
+  day: 'Chọn ngày',
+  week: 'Chọn ngày thuộc tuần',
+  month: 'Chọn tháng',
+};
+
+const REPORT_CURRENT_LABELS: Record<ReportPeriod, string> = {
+  day: 'Hôm nay',
+  week: 'Tuần này',
+  month: 'Tháng này',
+};
+
 const REPORT_TIMELINE_COPY: Record<ReportPeriod, {
   revenueTitle: string;
   ordersTitle: string;
@@ -78,44 +86,9 @@ const REPORT_TIMELINE_COPY: Record<ReportPeriod, {
   month: {
     revenueTitle: 'Doanh thu theo tuần',
     ordersTitle: 'Số hóa đơn theo tuần',
-    description: 'Tuần đầu và cuối được cắt đúng theo phạm vi tháng',
+    description: 'Tổng hợp theo từng tuần trong tháng',
   },
 };
-
-const formatReportDate = (date: Date) => date.toLocaleDateString('vi-VN', {
-  day: '2-digit', month: '2-digit', year: 'numeric',
-});
-
-/** Tạo khoảng [from, to) theo giờ địa phương để khớp bộ lọc của API báo cáo. */
-function buildReportRange(period: ReportPeriod, reference = new Date()): ReportRange {
-  const from = new Date(reference);
-  from.setHours(0, 0, 0, 0);
-
-  if (period === 'week') {
-    const dayFromMonday = (from.getDay() + 6) % 7;
-    from.setDate(from.getDate() - dayFromMonday);
-  } else if (period === 'month') {
-    from.setDate(1);
-  }
-
-  const to = new Date(from);
-  if (period === 'day') to.setDate(to.getDate() + 1);
-  else if (period === 'week') to.setDate(to.getDate() + 7);
-  else to.setMonth(to.getMonth() + 1);
-
-  const inclusiveTo = new Date(to);
-  inclusiveTo.setDate(inclusiveTo.getDate() - 1);
-  const label = period === 'day'
-    ? formatReportDate(from)
-    : `${formatReportDate(from)} – ${formatReportDate(inclusiveTo)}`;
-
-  return {
-    from,
-    to,
-    label,
-    contextLabel: period === 'day' ? 'trong ngày' : period === 'week' ? 'trong tuần' : 'trong tháng',
-  };
-}
 
 function SectionTitle({ title, sub }: { title: string; sub?: string }) {
   return (
@@ -190,11 +163,6 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-/** Chuyển map order theo bàn thành danh sách dòng món để tổng hợp báo cáo. */
-function flattenOrders(tableOrders: Record<string, CartItem[]>): CartItem[] {
-  return Object.values(tableOrders).flat();
-}
-
 export function DashboardPage({
   mode,
   tables,
@@ -214,8 +182,13 @@ export function DashboardPage({
   const [reportSummary, setReportSummary] = useState<ReportSummary | null>(null);
   const [reportState, setReportState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [reportPeriod, setReportPeriod] = useState<ReportPeriod>('day');
-  const [reportReference, setReportReference] = useState(() => new Date());
+  const [reportReference, setReportReference] = useState(() => new Date(getServerNowMs()));
   const reportRange = useMemo(() => buildReportRange(reportPeriod, reportReference), [reportPeriod, reportReference]);
+  const currentDate = new Date(getServerNowMs());
+  const currentReportRange = buildReportRange(reportPeriod, currentDate);
+  const isCurrentReportPeriod = reportRange.from.getTime() === currentReportRange.from.getTime();
+  const reportPickerValue = reportReferenceInputValue(reportPeriod, reportReference);
+  const reportPickerMax = reportReferenceInputValue(reportPeriod, currentDate);
 
   useEffect(() => {
     setDraft(settings);
@@ -224,12 +197,13 @@ export function DashboardPage({
     setTab(mode === 'reports' ? 'reports' : 'management');
   }, [mode]);
   useEffect(() => {
-    const now = new Date();
+    if (!isCurrentReportPeriod) return undefined;
+    const now = new Date(getServerNowMs());
     const nextDay = new Date(now);
     nextDay.setHours(24, 0, 1, 0);
-    const timer = window.setTimeout(() => setReportReference(new Date()), nextDay.getTime() - now.getTime());
+    const timer = window.setTimeout(() => setReportReference(new Date(getServerNowMs())), nextDay.getTime() - now.getTime());
     return () => window.clearTimeout(timer);
-  }, [reportReference]);
+  }, [isCurrentReportPeriod, reportPeriod, reportReference]);
   useEffect(() => {
     if (mode !== 'reports') return undefined;
     let active = true;
@@ -254,19 +228,17 @@ export function DashboardPage({
     };
   }, [mode, payments.length, payments[0]?.invoiceCode, reportRange.from.getTime(), reportRange.to.getTime()]);
 
-  const activeOrders = useMemo(() => flattenOrders(tableOrders), [tableOrders]);
   const periodPayments = useMemo(() => payments.filter(payment => {
     const paidAt = new Date(payment.paidAt).getTime();
     return paidAt >= reportRange.from.getTime() && paidAt < reportRange.to.getTime();
   }), [payments, reportRange.from, reportRange.to]);
-  const pendingTotal = useMemo(() => Object.values(tableOrders).reduce(
-    (sum, order) => sum + calculateInvoiceTotals(cartTotal(order), settings).total,
-    0,
-  ), [settings, tableOrders]);
   const paidRevenue = reportSummary?.totals.revenue
     ?? periodPayments.reduce((sum, payment) => sum + payment.total, 0);
   const paidOrders = reportSummary?.totals.orders ?? periodPayments.length;
-  const servingTables = tables.filter(table => ['waiting', 'cooking', 'done'].includes(table.status)).length;
+  const paidItemCount = reportSummary?.totals.itemCount
+    ?? periodPayments.reduce((sum, payment) => sum + payment.itemCount, 0);
+  const averageBill = reportSummary?.totals.averageBill
+    ?? (paidOrders ? Math.round(paidRevenue / paidOrders) : 0);
 
   const timelineData = useMemo(() => buildReportTimeline({
     period: reportPeriod,
@@ -274,7 +246,8 @@ export function DashboardPage({
     to: reportRange.to,
     payments: periodPayments,
     summary: reportSummary,
-  }), [reportPeriod, reportRange.from, reportRange.to, reportSummary, periodPayments]);
+    now: currentDate,
+  }), [reportPeriod, reportRange.from, reportRange.to, reportSummary, periodPayments, currentDate.getTime()]);
   const timelineCopy = REPORT_TIMELINE_COPY[reportPeriod];
   const staffPerformance = useMemo(() => {
     if (!reportSummary) return buildStaffReport(periodPayments);
@@ -300,6 +273,20 @@ export function DashboardPage({
   const topItems = reportSummary?.topItems.slice(0, 5) ?? [];
   const categoryRevenue = reportSummary?.categories ?? [];
   const categoryTotal = categoryRevenue.reduce((sum, category) => sum + category.revenue, 0);
+
+  const selectReportReference = (value: string) => {
+    const parsed = parseReportReferenceInput(reportPeriod, value);
+    if (parsed && parsed <= new Date(getServerNowMs())) setReportReference(parsed);
+  };
+
+  const moveReportPeriod = (amount: -1 | 1) => {
+    setReportReference(current => {
+      const shifted = shiftReportReference(current, reportPeriod, amount);
+      const shiftedRange = buildReportRange(reportPeriod, shifted);
+      const latestRange = buildReportRange(reportPeriod, new Date(getServerNowMs()));
+      return shiftedRange.from > latestRange.from ? latestRange.from : shifted;
+    });
+  };
 
   const updateDraft = <K extends keyof RestaurantSettings>(key: K, value: RestaurantSettings[K]) => {
     setDraft(prev => ({ ...prev, [key]: value }));
@@ -333,7 +320,7 @@ export function DashboardPage({
     void onSaveSettings(draft);
   };
 
-  const resetDraft = () => setDraft(DEFAULT_RESTAURANT_SETTINGS);
+  const resetDraft = () => setDraft(settings);
 
   const widgetVisible = (id: string) => settings.visibleDashboardWidgets.includes(id);
 
@@ -348,13 +335,13 @@ export function DashboardPage({
             <div style={{ minWidth: 0 }}>
               <h1 style={{ margin: 0, color: '#111827', fontSize: '22px' }}>{mode === 'reports' ? 'Báo cáo vận hành' : 'Quản trị nhà hàng'}</h1>
               <p style={{ margin: '3px 0 0', color: '#6B7280', fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {settings.restaurantName} · {new Date().toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' })}
+                {settings.restaurantName} · {currentDate.toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' })}
               </p>
             </div>
           </div>
           {mode === 'admin' && (
             <div role="status" style={{ background: settingsStatus === 'error' ? '#FEF2F2' : '#F0FDFA', color: settingsStatus === 'error' ? '#B91C1C' : '#0F766E', border: `1px solid ${settingsStatus === 'error' ? '#FECACA' : '#99F6E4'}`, borderRadius: 8, padding: '7px 10px', fontSize: '11px', fontWeight: 800 }}>
-              {settingsStatus === 'saving' ? 'Đang lưu' : settingsStatus === 'saved' ? 'Đã đồng bộ' : settingsStatus === 'loading' ? 'Đang tải' : settingsStatus === 'error' ? 'Chưa đồng bộ' : 'Sẵn sàng'}
+              {settingsStatus === 'saving' ? 'Đang lưu' : settingsStatus === 'saved' ? 'Đã lưu' : settingsStatus === 'loading' ? 'Đang tải' : settingsStatus === 'error' ? 'Chưa lưu' : 'Sẵn sàng'}
             </div>
           )}
         </div>
@@ -396,30 +383,70 @@ export function DashboardPage({
       {tab === 'reports' ? (
         <div className="dashboard-reports-page" style={{ padding: '14px 14px 96px', display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div className="report-filter-bar">
-            <div className="report-range-copy">
-              <span className="report-range-icon" aria-hidden="true"><CalendarDays size={19} /></span>
-              <span>
-                <strong>Khoảng báo cáo</strong>
-                <small>{reportRange.label}</small>
-              </span>
+            <div className="report-filter-top">
+              <div className="report-range-copy">
+                <span className="report-range-icon" aria-hidden="true"><CalendarDays size={19} /></span>
+                <span>
+                  <strong>Khoảng báo cáo</strong>
+                  <small>{reportRange.label}</small>
+                </span>
+              </div>
+              <div className="report-period-selector" role="group" aria-label="Chọn kỳ báo cáo">
+                {REPORT_PERIODS.map(period => (
+                  <button
+                    key={period.id}
+                    type="button"
+                    className={reportPeriod === period.id ? 'active' : ''}
+                    aria-pressed={reportPeriod === period.id}
+                    onClick={() => setReportPeriod(period.id)}
+                  >
+                    {period.label}
+                  </button>
+                ))}
+              </div>
             </div>
-            <div className="report-period-selector" role="group" aria-label="Chọn kỳ báo cáo">
-              {REPORT_PERIODS.map(period => (
-                <button
-                  key={period.id}
-                  type="button"
-                  className={reportPeriod === period.id ? 'active' : ''}
-                  aria-pressed={reportPeriod === period.id}
-                  onClick={() => setReportPeriod(period.id)}
-                >
-                  {period.label}
-                </button>
-              ))}
+            <div className="report-date-navigation">
+              <button
+                type="button"
+                className="report-period-step"
+                aria-label="Xem kỳ trước"
+                title="Xem kỳ trước"
+                onClick={() => moveReportPeriod(-1)}
+              >
+                <ChevronLeft size={19} />
+              </button>
+              <label className="report-date-picker">
+                <span>{REPORT_PICKER_LABELS[reportPeriod]}</span>
+                <input
+                  type={reportPeriod === 'month' ? 'month' : 'date'}
+                  value={reportPickerValue}
+                  max={reportPickerMax}
+                  onChange={event => selectReportReference(event.target.value)}
+                />
+              </label>
+              <button
+                type="button"
+                className="report-period-step"
+                aria-label="Xem kỳ sau"
+                title="Xem kỳ sau"
+                disabled={isCurrentReportPeriod}
+                onClick={() => moveReportPeriod(1)}
+              >
+                <ChevronRight size={19} />
+              </button>
+              <button
+                type="button"
+                className={`report-current-period${isCurrentReportPeriod ? ' active' : ''}`}
+                aria-pressed={isCurrentReportPeriod}
+                onClick={() => setReportReference(new Date(getServerNowMs()))}
+              >
+                {REPORT_CURRENT_LABELS[reportPeriod]}
+              </button>
             </div>
           </div>
           {reportState === 'error' && (
             <div role="status" style={{ padding: '10px 12px', border: '1px solid #FDE68A', background: '#FFFBEB', color: '#92400E', borderRadius: 8, fontSize: 12 }}>
-              Không thể tải dữ liệu tổng hợp. Biểu đồ được tạm ẩn để tránh hiển thị số liệu thiếu; hãy kiểm tra kết nối và thử lại.
+              Không thể tải báo cáo. Vui lòng kiểm tra kết nối và thử lại.
             </div>
           )}
           <div className="report-kpi-grid">
@@ -434,25 +461,25 @@ export function DashboardPage({
             )}
             {widgetVisible('orders') && (
               <KpiCard
-                icon={<ShoppingBag size={18} />}
-                label="Dự thu đang phục vụ"
-                value={formatShort(pendingTotal)}
-                sub={`${activeOrders.reduce((sum, item) => sum + item.quantity, 0)} phần chưa thanh toán`}
+                icon={<ReceiptText size={18} />}
+                label="Hóa đơn đã thanh toán"
+                value={String(paidOrders)}
+                sub={`Giao dịch ${reportRange.contextLabel}`}
                 color="#EA580C"
               />
             )}
             <KpiCard
-              icon={<Users size={18} />}
-              label="Bàn đang dùng"
-              value={`${servingTables}/${tables.length}`}
-              sub={`${tables.length ? Math.round((servingTables / tables.length) * 100) : 0}% công suất bàn`}
+              icon={<ShoppingBag size={18} />}
+              label="Số phần đã bán"
+              value={String(paidItemCount)}
+              sub={`Món đã thanh toán ${reportRange.contextLabel}`}
               color="#2563EB"
             />
             <KpiCard
-              icon={<ReceiptText size={18} />}
-              label="Hóa đơn gần đây"
-              value={periodPayments[0]?.invoiceCode ?? '—'}
-              sub={periodPayments[0] ? formatVND(periodPayments[0].total) : 'Chưa có giao dịch trong kỳ'}
+              icon={<Banknote size={18} />}
+              label="Trung bình hóa đơn"
+              value={averageBill ? formatShort(averageBill) : '0đ'}
+              sub={paidOrders ? `${formatVND(averageBill)} mỗi giao dịch` : 'Chưa có giao dịch trong kỳ'}
               color="#7C3AED"
             />
           </div>
@@ -742,7 +769,7 @@ export function DashboardPage({
               onClick={resetDraft}
               style={{ flex: 1, border: '1.5px solid #D1D5DB', background: '#fff', color: '#374151', borderRadius: 8, padding: '13px 12px', fontSize: '13px', fontWeight: 800, cursor: 'pointer' }}
             >
-              Mặc định
+              Hoàn tác thay đổi
             </button>
             <button
               onClick={handleSave}

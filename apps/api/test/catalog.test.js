@@ -5,7 +5,8 @@ import { completeExpiredKitchenBatches, isKitchenOrderStale, promoteKitchenQueue
 
 const catalogRow = {
   id: 'm1', name: 'Phở bò', description: 'Món thử', price: 65_000, image: '',
-  categoryId: 'pho', cookMinutes: 12, available: 1, isBestseller: 1, isNew: 0,
+  categoryId: 'pho', cookMinutes: 12, dailyLimit: 20, dailyUsed: 4, dailyRemaining: 16,
+  inventoryDate: '2026-07-21', available: 1, isBestseller: 1, isNew: 0,
   sizes: JSON.stringify([{ label: 'Lớn', extraPrice: 10_000 }]),
   toppings: JSON.stringify([{ id: 'egg', label: 'Trứng', price: 8_000 }]),
 };
@@ -13,7 +14,8 @@ const catalogRow = {
 function catalogConnection(rows = [catalogRow]) {
   return {
     async query(sql) {
-      assert.match(sql, /FROM menu_items WHERE id IN/);
+      assert.match(sql, /FROM menu_items item/);
+      assert.match(sql, /WHERE item\.id IN/);
       return [rows];
     },
   };
@@ -29,6 +31,7 @@ test('catalog ghi đè giá và tùy chọn giả từ client bằng dữ liệu
   assert.equal(items[0].menuItem.price, 65_000);
   assert.equal(items[0].selectedSize.extraPrice, 10_000);
   assert.equal(items[0].selectedToppings[0].price, 8_000);
+  assert.equal(items[0].menuItem.dailyRemaining, 16);
   assert.equal(estimateCookMinutes(items), 36);
 });
 
@@ -53,9 +56,15 @@ test('chuẩn hóa danh mục, món và giới hạn thời gian nấu', () => {
   const item = normalizeMenuItem({ id: 'ga', name: 'Gà nướng', price: 100_000, categoryId: category.id, cookMinutes: 30 });
   assert.equal(category.active, true);
   assert.equal(item.cookMinutes, 30);
+  assert.equal(item.dailyLimit, null);
+  assert.equal(normalizeMenuItem({ id: 'limited', name: 'Giới hạn', price: 1, categoryId: 'x', dailyLimit: 0 }).dailyLimit, 0);
   assert.throws(
     () => normalizeMenuItem({ id: 'x', name: 'X', price: 1, categoryId: 'x', cookMinutes: 241 }),
     error => error.field === 'cookMinutes',
+  );
+  assert.throws(
+    () => normalizeMenuItem({ id: 'x', name: 'X', price: 1, categoryId: 'x', dailyLimit: 1_000_001 }),
+    error => error.field === 'dailyLimit',
   );
 });
 

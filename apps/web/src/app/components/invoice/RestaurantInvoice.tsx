@@ -48,7 +48,19 @@ function formatCurrency(value: number) {
   return new Intl.NumberFormat('vi-VN').format(value) + 'đ';
 }
 
+function isConfigured(value: string): boolean {
+  const normalized = value.trim().toLocaleLowerCase('vi-VN');
+  return Boolean(normalized) && !normalized.startsWith('chưa cập nhật');
+}
+
 export function RestaurantInvoice({ data }: { data: PrintableInvoiceData }) {
+  const contacts: Array<[string, string]> = ([
+    ['Địa chỉ', data.restaurant.address],
+    ['Hotline', data.restaurant.phone],
+    ['Email', data.restaurant.email],
+    ['Website', data.restaurant.website],
+  ] as Array<[string, string]>).filter((entry) => isConfigured(entry[1]));
+
   return (
     <div className="invoice-page invoice-print-area">
       <div className="invoice-card">
@@ -72,12 +84,11 @@ export function RestaurantInvoice({ data }: { data: PrintableInvoiceData }) {
           </div>
         </div>
 
-        <div className="invoice-contact">
-          <div><span>Địa chỉ</span><strong>{data.restaurant.address}</strong></div>
-          <div><span>Hotline</span><strong>{data.restaurant.phone}</strong></div>
-          <div><span>Email</span><strong>{data.restaurant.email}</strong></div>
-          <div><span>Website</span><strong>{data.restaurant.website}</strong></div>
-        </div>
+        {contacts.length > 0 && (
+          <div className="invoice-contact">
+            {contacts.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}
+          </div>
+        )}
 
         <div className="invoice-info-grid">
           <div className="invoice-info-box icon-box">
@@ -130,7 +141,7 @@ export function RestaurantInvoice({ data }: { data: PrintableInvoiceData }) {
             <h4>Phương thức thanh toán</h4>
             <div className="payment-row"><span>Phương thức:</span><strong>{data.paymentMethod}</strong></div>
             <div className="payment-row"><span>Trạng thái:</span><strong>{data.paymentStatus}</strong></div>
-            <div className="payment-row"><span>Mã giao dịch:</span><strong>{data.transactionCode}</strong></div>
+            <div className="payment-row"><span>Mã ghi nhận:</span><strong>{data.transactionCode}</strong></div>
           </div>
 
           <div className="summary-box">
@@ -142,16 +153,14 @@ export function RestaurantInvoice({ data }: { data: PrintableInvoiceData }) {
           </div>
         </div>
 
-        <div className="invoice-footer">
+        <div className="invoice-footer invoice-footer-simple">
           <div className="footer-box"><h5>GHI CHÚ</h5><p>{data.note}</p></div>
-          <div className="footer-box center-box"><div className="qr-placeholder">QR</div><p>Quét để đánh giá / theo dõi</p></div>
-          <div className="footer-box"><h5>KHÁCH HÀNG THÂN THIẾT</h5><p>Tích điểm và nhận ưu đãi trong lần ghé tiếp theo.</p></div>
         </div>
 
         <div className="invoice-bottom-bar">
           <span>{data.restaurant.legalName}</span>
-          <span>{data.restaurant.phone}</span>
-          <span>{data.restaurant.website}</span>
+          {isConfigured(data.restaurant.phone) && <span>{data.restaurant.phone}</span>}
+          {isConfigured(data.restaurant.website) && <span>{data.restaurant.website}</span>}
         </div>
       </div>
     </div>

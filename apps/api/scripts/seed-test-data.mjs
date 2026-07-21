@@ -2,16 +2,17 @@ import 'dotenv/config';
 import { closePool, getPool, initDatabase } from '../src/db.js';
 import { calculateTotals, parseJsonColumn, sanitizeSettings } from '../src/domain.js';
 import { defaultSettings } from '../src/defaultSettings.js';
+import { aggregateMenuQuantities, businessDateFor } from '../src/dailyInventory.js';
 
 const DEMO_TABLES = [
-  ['demo-table-101', 101, 2, 'empty'],
-  ['demo-table-102', 102, 4, 'empty'],
-  ['demo-table-103', 103, 4, 'waiting'],
-  ['demo-table-104', 104, 6, 'waiting'],
-  ['demo-table-105', 105, 2, 'done'],
-  ['demo-table-106', 106, 8, 'waiting'],
-  ['demo-table-107', 107, 4, 'waiting'],
-  ['demo-table-108', 108, 10, 'empty'],
+  ['demo-table-101', 101, 2, 'empty', 'Tầng trệt', 1, 1],
+  ['demo-table-102', 102, 4, 'empty', 'Tầng trệt', 2, 1],
+  ['demo-table-103', 103, 4, 'waiting', 'Tầng trệt', 1, 2],
+  ['demo-table-104', 104, 6, 'waiting', 'Sân vườn', 1, 1],
+  ['demo-table-105', 105, 2, 'done', 'Sân vườn', 2, 1],
+  ['demo-table-106', 106, 8, 'waiting', 'Sân vườn', 1, 2],
+  ['demo-table-107', 107, 4, 'waiting', 'Phòng riêng', 1, 1],
+  ['demo-table-108', 108, 10, 'empty', 'Phòng riêng', 2, 1],
 ];
 
 const DEMO_RESERVATION_CODES = [
@@ -54,6 +55,21 @@ const FALLBACK_ITEMS = [
 
 const DEMO_IMAGE = 'https://images.unsplash.com/photo-1547592180-85f173990554?w=600&q=80';
 const demoTableIds = DEMO_TABLES.map(table => table[0]);
+const DEMO_MENU_ITEMS = [
+  ['demo-menu-core-pho', 'Phở bò demo', 65_000, 8],
+  ['demo-menu-core-bun', 'Bún bò demo', 72_000, 10],
+  ['demo-menu-core-com', 'Cơm sườn demo', 78_000, 12],
+  ['demo-menu-core-ga', 'Cơm gà demo', 82_000, 10],
+  ['demo-menu-core-nuong', 'Gà nướng demo', 145_000, 15],
+  ['demo-menu-core-heo', 'Ba chỉ nướng demo', 118_000, 14],
+  ['demo-menu-core-tra', 'Trà đào demo', 42_000, 3],
+  ['demo-menu-core-flan', 'Bánh flan demo', 32_000, 4],
+];
+const DEMO_LIMITED_ITEMS = [
+  ['demo-menu-limited', 'Món giới hạn trong ngày', 88_000, 10, 20, 14],
+  ['demo-menu-soldout', 'Món đã hết hôm nay', 95_000, 12, 8, 8],
+];
+const demoMenuIds = [...DEMO_MENU_ITEMS, ...DEMO_LIMITED_ITEMS].map(item => item[0]);
 
 async function ensureCatalog(connection) {
   const [counts] = await connection.query('SELECT COUNT(*) AS total FROM menu_items');
@@ -82,6 +98,41 @@ async function ensureCatalog(connection) {
   }
 }
 
+/** Catalog namespace demo tách khỏi món thật; gồm món còn hàng và hết hàng để kiểm thử UI số lượng. */
+async function ensureDemoCatalog(connection) {
+  await connection.query(
+    `INSERT INTO menu_categories (id, name, emoji, sort_order, active)
+     VALUES ('demo-daily-stock', 'Món demo số lượng', '🧪', 9000, TRUE)
+     ON DUPLICATE KEY UPDATE name = VALUES(name), emoji = VALUES(emoji), active = TRUE`,
+  );
+  for (const [id, name, price, cookMinutes] of DEMO_MENU_ITEMS) {
+    await connection.query(
+      `INSERT INTO menu_items (
+        id, name, description, price, image, category_id, cook_minutes, daily_limit,
+        available, is_bestseller, is_new, sizes_json, toppings_json
+      ) VALUES (?, ?, 'Dữ liệu tự động phục vụ kiểm thử nghiệp vụ.', ?, ?, 'demo-daily-stock', ?, NULL,
+        TRUE, FALSE, FALSE, ?, ?)
+      ON DUPLICATE KEY UPDATE name = VALUES(name), price = VALUES(price), image = VALUES(image),
+        category_id = VALUES(category_id), cook_minutes = VALUES(cook_minutes), daily_limit = NULL,
+        available = TRUE`,
+      [id, name, price, DEMO_IMAGE, cookMinutes, JSON.stringify([]), JSON.stringify([])],
+    );
+  }
+  for (const [id, name, price, cookMinutes, dailyLimit] of DEMO_LIMITED_ITEMS) {
+    await connection.query(
+      `INSERT INTO menu_items (
+        id, name, description, price, image, category_id, cook_minutes, daily_limit,
+        available, is_bestseller, is_new, sizes_json, toppings_json
+      ) VALUES (?, ?, 'Dùng kiểm thử số phần tự đặt lại qua ngày.', ?, ?, 'demo-daily-stock', ?, ?,
+        TRUE, FALSE, TRUE, ?, ?)
+      ON DUPLICATE KEY UPDATE name = VALUES(name), price = VALUES(price), image = VALUES(image),
+        category_id = VALUES(category_id), cook_minutes = VALUES(cook_minutes),
+        daily_limit = VALUES(daily_limit), available = TRUE`,
+      [id, name, price, DEMO_IMAGE, cookMinutes, dailyLimit, JSON.stringify([]), JSON.stringify([])],
+    );
+  }
+}
+
 function menuRowToItem(row) {
   return {
     id: row.id,
@@ -91,6 +142,7 @@ function menuRowToItem(row) {
     image: row.image,
     categoryId: row.categoryId,
     cookMinutes: Number(row.cookMinutes),
+    dailyLimit: row.dailyLimit == null ? null : Number(row.dailyLimit),
     available: true,
     ...(row.isBestseller ? { isBestseller: true } : {}),
     ...(row.isNew ? { isNew: true } : {}),
@@ -125,11 +177,12 @@ async function createDemoOrder(connection, tableId, batches, reservationId = nul
   );
 
   for (const [index, batch] of batches.entries()) {
+    const inventoryDate = businessDateFor(batch.queuedAt);
     await connection.query(
       `INSERT INTO order_batches (
         order_id, table_id, batch_number, items, status, is_addition,
-        queued_at, cooking_started_at, completed_at, estimated_cook_minutes
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        queued_at, cooking_started_at, completed_at, estimated_cook_minutes, inventory_date
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         orderResult.insertId,
         tableId,
@@ -141,8 +194,17 @@ async function createDemoOrder(connection, tableId, batches, reservationId = nul
         batch.cookingStartedAt ?? null,
         batch.completedAt ?? null,
         batch.eta,
+        inventoryDate,
       ],
     );
+    for (const item of aggregateMenuQuantities(batch.items)) {
+      await connection.query(
+        `INSERT INTO menu_item_daily_usage (menu_item_id, business_date, used_quantity)
+         VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE used_quantity = used_quantity + VALUES(used_quantity)`,
+        [item.id, inventoryDate, item.quantity],
+      );
+    }
   }
 
   const nextStatus = batches.some(batch => batch.status === 'cooking')
@@ -303,14 +365,6 @@ async function seed() {
   try {
     await connection.beginTransaction();
     await connection.query('SELECT id FROM kitchen_queue_state WHERE id = 1 FOR UPDATE');
-    await connection.query(
-      `DELETE FROM payment_transactions
-       WHERE JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.demoSeed')) = ?
-          OR (invoice_code LIKE 'DEMO-%'
-            AND JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.demo')) = 'true')`,
-      [DEMO_SEED_MARKER],
-    );
-
     for (const demoEmployee of DEMO_EMPLOYEES) {
       const [updated] = await connection.query(
         `UPDATE employees SET employee_code = ?, full_name = ?, role = ?, phone = ?,
@@ -329,24 +383,48 @@ async function seed() {
 
     const placeholders = demoTableIds.map(() => '?').join(', ');
     await connection.query(`DELETE FROM active_orders WHERE table_id IN (${placeholders})`, demoTableIds);
+    // Active order phải xóa trước vì hóa đơn thanh toán sớm được FK RESTRICT bảo vệ khỏi xóa nhầm.
+    await connection.query(
+      `DELETE FROM payment_transactions
+       WHERE JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.demoSeed')) = ?
+          OR (invoice_code LIKE 'DEMO-%'
+            AND JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.demo')) = 'true')`,
+      [DEMO_SEED_MARKER],
+    );
     const reservationPlaceholders = DEMO_RESERVATION_CODES.map(() => '?').join(', ');
     await connection.query(
       `DELETE FROM reservations WHERE reservation_code IN (${reservationPlaceholders})`,
       DEMO_RESERVATION_CODES,
     );
     await ensureCatalog(connection);
+    await ensureDemoCatalog(connection);
+    const demoMenuPlaceholders = demoMenuIds.map(() => '?').join(', ');
+    await connection.query(
+      `DELETE FROM menu_item_daily_usage WHERE menu_item_id IN (${demoMenuPlaceholders})`,
+      demoMenuIds,
+    );
+    const seedInventoryDate = businessDateFor();
+    for (const [id, , , , , usedQuantity] of DEMO_LIMITED_ITEMS) {
+      await connection.query(
+        `INSERT INTO menu_item_daily_usage (menu_item_id, business_date, used_quantity)
+         VALUES (?, ?, ?)`,
+        [id, seedInventoryDate, usedQuantity],
+      );
+    }
 
     for (const table of DEMO_TABLES) {
       const [updated] = await connection.query(
         `UPDATE restaurant_tables
-         SET table_number = ?, seats = ?, status = ? WHERE id = ?`,
-        [table[1], table[2], table[3], table[0]],
+         SET table_number = ?, seats = ?, status = ?, area = ?, position_x = ?, position_y = ?
+         WHERE id = ?`,
+        [table[1], table[2], table[3], table[4], table[5], table[6], table[0]],
       );
       if (updated.affectedRows === 0) {
         // Không dùng ON DUPLICATE KEY: nếu số bàn trùng dữ liệu thật thì rollback thay vì sửa nhầm dòng đó.
         await connection.query(
-          `INSERT INTO restaurant_tables (id, table_number, seats, status)
-           VALUES (?, ?, ?, ?)`,
+          `INSERT INTO restaurant_tables (
+            id, table_number, seats, status, area, position_x, position_y
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
           table,
         );
       }
@@ -357,9 +435,12 @@ async function seed() {
 
     const [menuRows] = await connection.query(
       `SELECT id, name, description, price, image, category_id AS categoryId,
-        cook_minutes AS cookMinutes, is_bestseller AS isBestseller, is_new AS isNew,
+        cook_minutes AS cookMinutes, daily_limit AS dailyLimit,
+        is_bestseller AS isBestseller, is_new AS isNew,
         sizes_json AS sizes, toppings_json AS toppings
-       FROM menu_items WHERE available = TRUE ORDER BY category_id, id LIMIT 8`,
+       FROM menu_items
+       WHERE available = TRUE AND id LIKE 'demo-menu-core-%'
+       ORDER BY id LIMIT 8`,
     );
     if (menuRows.length < 4) throw new Error('Cần ít nhất 4 món đang bán để tạo dữ liệu test.');
 

@@ -1,4 +1,4 @@
-import { BarChart3, CalendarCheck2, ClipboardList, LayoutGrid, CreditCard, Settings2, type LucideIcon } from 'lucide-react';
+import { BarChart3, CalendarCheck2, ClipboardList, CreditCard, Settings2, type LucideIcon } from 'lucide-react';
 import type { AppView } from '../data';
 
 interface BottomNavProps {
@@ -7,8 +7,7 @@ interface BottomNavProps {
 }
 
 const TABS: { id: AppView; label: string; Icon: LucideIcon }[] = [
-  { id: 'order',     label: 'Gọi món',    Icon: ClipboardList },
-  { id: 'overview',  label: 'Tổng quan',  Icon: LayoutGrid    },
+  { id: 'order',     label: 'Vận hành',   Icon: ClipboardList },
   { id: 'reservations', label: 'Đặt bàn', Icon: CalendarCheck2 },
   { id: 'payment',   label: 'Thanh toán', Icon: CreditCard    },
   { id: 'reports',   label: 'Báo cáo',    Icon: BarChart3     },

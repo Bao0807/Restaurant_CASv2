@@ -2,6 +2,13 @@ import type { PaymentRecord, ReportSummary } from './data';
 
 export type ReportPeriod = 'day' | 'week' | 'month';
 
+export interface ReportRange {
+  from: Date;
+  to: Date;
+  label: string;
+  contextLabel: string;
+}
+
 export interface ReportTimelineRow {
   key: string;
   label: string;
@@ -39,6 +46,10 @@ const WEEKDAY_LONG = ['Chủ nhật', 'Thứ Hai', 'Thứ Ba', 'Thứ Tư', 'Th�
 
 const pad2 = (value: number) => String(value).padStart(2, '0');
 
+const formatReportDate = (date: Date) => date.toLocaleDateString('vi-VN', {
+  day: '2-digit', month: '2-digit', year: 'numeric',
+});
+
 function startOfLocalDay(value: Date): Date {
   return new Date(value.getFullYear(), value.getMonth(), value.getDate());
 }
@@ -59,6 +70,76 @@ function shortDate(value: Date): string {
 
 function fullDate(value: Date): string {
   return `${shortDate(value)}/${value.getFullYear()}`;
+}
+
+/** Tạo khoảng [from, to) theo giờ địa phương để khớp bộ lọc của API báo cáo. */
+export function buildReportRange(period: ReportPeriod, reference = new Date()): ReportRange {
+  const from = startOfLocalDay(reference);
+
+  if (period === 'week') {
+    const dayFromMonday = (from.getDay() + 6) % 7;
+    from.setDate(from.getDate() - dayFromMonday);
+  } else if (period === 'month') {
+    from.setDate(1);
+  }
+
+  const to = new Date(from);
+  if (period === 'day') to.setDate(to.getDate() + 1);
+  else if (period === 'week') to.setDate(to.getDate() + 7);
+  else to.setMonth(to.getMonth() + 1);
+
+  const inclusiveTo = addLocalDays(to, -1);
+  const label = period === 'day'
+    ? reference.toLocaleDateString('vi-VN', {
+      weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric',
+    })
+    : period === 'week'
+      ? `Tuần ${formatReportDate(from)} – ${formatReportDate(inclusiveTo)}`
+      : `Tháng ${pad2(from.getMonth() + 1)}/${from.getFullYear()}`;
+
+  return {
+    from,
+    to,
+    label,
+    contextLabel: period === 'day' ? 'trong ngày' : period === 'week' ? 'trong tuần' : 'trong tháng',
+  };
+}
+
+/** Giá trị cho date/month input; không dùng toISOString để tránh lệch ngày theo múi giờ. */
+export function reportReferenceInputValue(period: ReportPeriod, reference: Date): string {
+  const yearMonth = `${reference.getFullYear()}-${pad2(reference.getMonth() + 1)}`;
+  return period === 'month' ? yearMonth : `${yearMonth}-${pad2(reference.getDate())}`;
+}
+
+/** Đọc date/month input thành ngày địa phương và từ chối ngày bị JavaScript tự cuộn tháng. */
+export function parseReportReferenceInput(period: ReportPeriod, value: string): Date | null {
+  const match = period === 'month'
+    ? /^(\d{4})-(\d{2})$/.exec(value)
+    : /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const monthIndex = Number(match[2]) - 1;
+  const day = period === 'month' ? 1 : Number(match[3]);
+  const result = new Date(year, monthIndex, day);
+  if (
+    result.getFullYear() !== year
+    || result.getMonth() !== monthIndex
+    || result.getDate() !== day
+  ) return null;
+  return result;
+}
+
+/** Dịch đúng một kỳ lịch, tránh lỗi 31/01 cộng một tháng thành tháng 03. */
+export function shiftReportReference(reference: Date, period: ReportPeriod, amount: number): Date {
+  const result = startOfLocalDay(reference);
+  if (period === 'day') result.setDate(result.getDate() + amount);
+  else if (period === 'week') result.setDate(result.getDate() + amount * 7);
+  else {
+    result.setDate(1);
+    result.setMonth(result.getMonth() + amount);
+  }
+  return result;
 }
 
 function aggregatePaymentsByHour(payments: PaymentRecord[], from: Date, to: Date): Map<number, Aggregate> {

@@ -7,6 +7,7 @@ import {
 import type { Reservation, ReservationInput, ReservationStatus, Table } from '../data';
 import {
   createReservation, fetchReservationAvailability, fetchReservations,
+  getServerNowMs,
   updateReservation, updateReservationStatus,
 } from '../services/api';
 import { ConfirmationDialog } from './ConfirmationDialog';
@@ -67,13 +68,13 @@ function localTimeValue(date: Date): string {
 }
 
 function defaultStart(): Date {
-  const date = new Date(Date.now() + 60 * 60_000);
+  const date = new Date(getServerNowMs() + 60 * 60_000);
   date.setMinutes(Math.ceil(date.getMinutes() / 15) * 15, 0, 0);
   return date;
 }
 
 function rangeForScope(scope: ReservationScope): { from: Date; to: Date; label: string } {
-  const from = new Date();
+  const from = new Date(getServerNowMs());
   from.setHours(0, 0, 0, 0);
   const to = new Date(from);
   if (scope === 'month') {
@@ -128,6 +129,7 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
   const [formError, setFormError] = useState<string | null>(null);
   const [availableTableIds, setAvailableTableIds] = useState<Set<string> | null>(null);
   const [availabilityLoading, setAvailabilityLoading] = useState(false);
+  const [availabilityError, setAvailabilityError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [actionId, setActionId] = useState<number | null>(null);
   const [transition, setTransition] = useState<{ reservation: Reservation; status: ReservationStatus } | null>(null);
@@ -194,16 +196,22 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
     ) {
       setAvailableTableIds(null);
       setAvailabilityLoading(false);
+      setAvailabilityError(null);
       return undefined;
     }
     const reservedAt = new Date(`${form.date}T${form.time}:00`);
     if (Number.isNaN(reservedAt.getTime())) return undefined;
     let active = true;
     setAvailabilityLoading(true);
+    setAvailabilityError(null);
     const timer = window.setTimeout(() => {
       fetchReservationAvailability(reservedAt, form.durationMinutes, form.partySize)
         .then(rows => { if (active) setAvailableTableIds(new Set(rows.map(row => row.id))); })
-        .catch(() => { if (active) setAvailableTableIds(null); })
+        .catch(() => {
+          if (!active) return;
+          setAvailableTableIds(null);
+          setAvailabilityError('Chưa kiểm tra được lịch trống. Vui lòng thử lại trước khi lưu.');
+        })
         .finally(() => { if (active) setAvailabilityLoading(false); });
     }, 250);
     return () => {
@@ -220,13 +228,14 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
       .some(value => value.toLocaleLowerCase('vi-VN').includes(normalizedSearch));
   }), [normalizedSearch, reservations, statusFilter]);
 
-  const todayKey = localDateValue(new Date());
+  const serverNow = getServerNowMs();
+  const todayKey = localDateValue(new Date(serverNow));
   const stats = useMemo(() => ({
     today: reservations.filter(row => localDateValue(new Date(row.reservedAt)) === todayKey).length,
-    upcoming: reservations.filter(row => row.status === 'booked' && new Date(row.endsAt).getTime() >= Date.now()).length,
+    upcoming: reservations.filter(row => row.status === 'booked' && new Date(row.endsAt).getTime() >= serverNow).length,
     seated: reservations.filter(row => row.status === 'seated').length,
     attention: reservations.filter(row => row.status === 'cancelled' || row.status === 'no_show').length,
-  }), [reservations, todayKey]);
+  }), [reservations, serverNow, todayKey]);
 
   const eligibleTables = useMemo(() => [...tables]
     .sort((left, right) => left.number - right.number), [tables]);
@@ -250,6 +259,7 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
     setForm(initialForm(tables, reservation));
     setFormError(null);
     setAvailableTableIds(null);
+    setAvailabilityError(null);
     setEditing(reservation ?? 'new');
   };
 
@@ -275,7 +285,7 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
     }
     const reservedAt = new Date(`${form.date}T${form.time}:00`);
     if (Number.isNaN(reservedAt.getTime())) { setFormError('Ngày hoặc giờ đặt bàn không hợp lệ.'); return null; }
-    if (editing === 'new' && reservedAt.getTime() < Date.now() - 60_000) {
+    if (editing === 'new' && reservedAt.getTime() < getServerNowMs() - 60_000) {
       setFormError('Thời gian đặt bàn phải ở hiện tại hoặc tương lai.');
       return null;
     }
@@ -428,12 +438,13 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
           const meta = STATUS_META[reservation.status];
           const busy = actionId === reservation.id;
           const anotherActionBusy = actionId !== null && !busy;
-          const now = Date.now();
+          const now = getServerNowMs();
           const reservedAt = new Date(reservation.reservedAt).getTime();
           const canCheckIn = now >= reservedAt - 60 * 60_000 && now < new Date(reservation.endsAt).getTime();
           const canMarkNoShow = now >= reservedAt + 15 * 60_000;
           const linkedTable = tables.find(table => table.id === reservation.tableId);
           const hasActiveOrder = Boolean(linkedTable?.orderNumber);
+          const isPaid = Boolean(linkedTable?.isPaid);
           return (
             <article className={`reservation-card status-${meta.className}`} key={reservation.id}>
               <div className="reservation-card-time">
@@ -466,15 +477,19 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
                   )}
                   {reservation.status === 'seated' && (
                     <>
-                      <button type="button" className="reservation-action check-in" disabled={busy || anotherActionBusy || !reservation.tableId} onClick={() => void openExistingOrder(reservation)}><LogIn size={16} /> Mở gọi món</button>
+                      {!isPaid && (
+                        <button type="button" className="reservation-action check-in" disabled={busy || anotherActionBusy || !reservation.tableId} onClick={() => void openExistingOrder(reservation)}><LogIn size={16} /> Mở gọi món</button>
+                      )}
                       <button
                         type="button"
                         className="reservation-action complete"
                         disabled={busy || anotherActionBusy || hasActiveOrder}
-                        title={hasActiveOrder ? 'Thanh toán order trước; lịch sẽ tự hoàn tất sau thanh toán' : 'Hoàn tất lượt đặt bàn'}
+                        title={isPaid
+                          ? 'Chờ món hoàn tất và xác nhận khách rời tại bàn'
+                          : hasActiveOrder ? 'Thanh toán trước khi hoàn tất lượt phục vụ' : 'Hoàn tất lượt đặt bàn'}
                         onClick={() => setTransition({ reservation, status: 'completed' })}
                       >
-                        <CheckCircle2 size={16} /> {hasActiveOrder ? 'Chờ thanh toán' : 'Hoàn tất'}
+                        <CheckCircle2 size={16} /> {isPaid ? (linkedTable?.status === 'done' ? 'Chờ khách rời' : 'Đã thanh toán') : hasActiveOrder ? 'Chờ thanh toán' : 'Hoàn tất'}
                       </button>
                     </>
                   )}
@@ -502,7 +517,7 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
                 <label className="wide">Tên khách *<input ref={firstFieldRef} value={form.customerName} maxLength={120} autoComplete="name" onChange={event => setForm(current => ({ ...current, customerName: event.target.value }))} placeholder="Nguyễn Văn A" /></label>
                 <label>Số điện thoại *<input type="tel" value={form.customerPhone} maxLength={32} autoComplete="tel" onChange={event => setForm(current => ({ ...current, customerPhone: event.target.value }))} placeholder="0901 234 567" /></label>
                 <label>Số khách *<input type="number" min={1} max={100} value={form.partySize} onChange={event => setForm(current => ({ ...current, partySize: Number(event.target.value) }))} /></label>
-                <label>Ngày *<input type="date" min={editing === 'new' ? localDateValue(new Date()) : undefined} value={form.date} onChange={event => setForm(current => ({ ...current, date: event.target.value }))} /></label>
+                <label>Ngày *<input type="date" min={editing === 'new' ? localDateValue(new Date(getServerNowMs())) : undefined} value={form.date} onChange={event => setForm(current => ({ ...current, date: event.target.value }))} /></label>
                 <label>Giờ *<input type="time" step={900} value={form.time} onChange={event => setForm(current => ({ ...current, time: event.target.value }))} /></label>
                 <label>Thời lượng (phút)<input type="number" min={30} max={480} step={15} value={form.durationMinutes} onChange={event => setForm(current => ({ ...current, durationMinutes: Number(event.target.value) }))} /></label>
                 <label>Bàn *{availabilityLoading && <small className="availability-label">Đang kiểm tra lịch trống…</small>}<select value={form.tableId} onChange={event => setForm(current => ({ ...current, tableId: event.target.value }))}>
@@ -516,10 +531,11 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
                 <label className="wide">Ghi chú<textarea rows={3} maxLength={500} value={form.notes} onChange={event => setForm(current => ({ ...current, notes: event.target.value }))} placeholder="Vị trí mong muốn, dị ứng, sinh nhật…" /></label>
               </div>
               {localConflict && <div className="reservation-conflict"><Clock3 size={16} /> Trùng lịch {localConflict.code} · {localConflict.customerName} tại bàn {localConflict.tableNumber}</div>}
+              {availabilityError && <div className="reservation-form-error" role="alert">{availabilityError}</div>}
             </div>
             <footer>
               <button type="button" className="reservation-dialog-cancel" disabled={saving} onClick={() => setEditing(null)}>Đóng</button>
-              <button type="button" className="reservation-primary-button" disabled={saving || Boolean(localConflict)} onClick={() => void submit()}>
+              <button type="button" className="reservation-primary-button" disabled={saving || Boolean(localConflict) || Boolean(availabilityError) || availabilityLoading} onClick={() => void submit()}>
                 {saving ? <><RefreshCw size={17} className="spin" /> Đang lưu…</> : editing === 'new' ? <><CalendarPlus size={17} /> Tạo lịch</> : <><CheckCircle2 size={17} /> Lưu thay đổi</>}
               </button>
             </footer>

@@ -1,6 +1,6 @@
 import type {
   CartItem, EditableOrderBatch, Employee, KitchenStatus, MenuCategory, MenuItem,
-  PaymentRecord, ReportSummary, Reservation, ReservationInput, ReservationStatus,
+  MenuAvailability, PaymentRecord, PaymentResult, ReportSummary, Reservation, ReservationInput, ReservationStatus,
   Table, TableStatus,
 } from '../data';
 import { normalizeSettings, type RestaurantSettings } from '../config/restaurant';
@@ -68,9 +68,9 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     });
   } catch (error) {
     if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
-      throw new ApiError('API không phản hồi sau 12 giây. Vui lòng kiểm tra kết nối.', 0, 'REQUEST_TIMEOUT');
+      throw new ApiError('Hệ thống phản hồi quá lâu. Vui lòng kiểm tra kết nối và thử lại.', 0, 'REQUEST_TIMEOUT');
     }
-    throw new ApiError('Không thể kết nối API. Vui lòng kiểm tra mạng hoặc backend.', 0, 'NETWORK_ERROR');
+    throw new ApiError('Không thể kết nối hệ thống. Vui lòng kiểm tra mạng và thử lại.', 0, 'NETWORK_ERROR');
   } finally {
     window.clearTimeout(timeout);
   }
@@ -82,7 +82,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     throw new ApiError(
-      body?.message || `API trả về lỗi ${response.status}`,
+      body?.message || `Không thể hoàn tất yêu cầu (mã ${response.status}).`,
       response.status,
       body?.error,
       body?.field,
@@ -240,6 +240,7 @@ export async function fetchOperations(): Promise<{
   tables: Table[];
   tableOrders: Record<string, CartItem[]>;
   waitingBatchesByTable: Record<string, EditableOrderBatch[]>;
+  menuAvailability: MenuAvailability[];
   kitchen: KitchenStatus;
 }> {
   const requestedAt = Date.now();
@@ -248,6 +249,7 @@ export async function fetchOperations(): Promise<{
     tables: Table[];
     tableOrders: Record<string, CartItem[]>;
     waitingBatchesByTable: Record<string, EditableOrderBatch[]>;
+    menuAvailability: MenuAvailability[];
     kitchen: KitchenStatus;
   }>('/operations');
   const receivedAt = Date.now();
@@ -310,9 +312,13 @@ export async function dispatchNextKitchenOrder(): Promise<number> {
   return data.count;
 }
 
-export async function createTable(number: number, seats: number): Promise<Table> {
+export async function createTable(
+  number: number,
+  seats: number,
+  layout: Pick<Table, 'area' | 'positionX' | 'positionY'> = {},
+): Promise<Table> {
   const data = await request<{ table: Table }>('/tables', {
-    method: 'POST', body: JSON.stringify({ table: { number, seats } }),
+    method: 'POST', body: JSON.stringify({ table: { number, seats, ...layout } }),
   });
   return data.table;
 }
@@ -338,6 +344,7 @@ export interface SavedOrderBatch {
   queuedAt: string;
   cookingStartedAt?: string;
   estimatedCookMinutes: number;
+  inventoryDate: string;
   items: CartItem[];
 }
 
@@ -376,6 +383,11 @@ export async function updateTableStatus(tableId: string, status: TableStatus, ex
   return data.status;
 }
 
+/** Đóng bàn đã trả trước sau khi bếp hoàn tất và nhân viên xác nhận khách đã rời. */
+export async function confirmTableDeparture(tableId: string): Promise<void> {
+  await request(`/orders/${encodeURIComponent(tableId)}/confirm-departure`, { method: 'POST' });
+}
+
 export async function fetchPayments(): Promise<PaymentRecord[]> {
   const from = new Date();
   from.setHours(0, 0, 0, 0);
@@ -409,8 +421,12 @@ export async function fetchReportSummary(from: Date, to: Date): Promise<ReportSu
 }
 
 /** Ghi thanh toán idempotent theo invoiceCode và nhận tổng tiền đã tính lại. */
-export async function recordPayment(payment: PaymentRecord): Promise<PaymentRecord> {
-  const data = await request<{ payment: PaymentRecord }>('/payments', {
+export async function recordPayment(payment: PaymentRecord): Promise<PaymentResult> {
+  const data = await request<{
+    payment: PaymentRecord;
+    requiresDepartureConfirmation: boolean;
+    orderClosed: boolean;
+  }>('/payments', {
     method: 'POST',
     body: JSON.stringify({ payment }),
   });
@@ -426,5 +442,7 @@ export async function recordPayment(payment: PaymentRecord): Promise<PaymentReco
     total: Number(data.payment.total),
     itemCount: Number(data.payment.itemCount),
     paidAt: new Date(data.payment.paidAt).toISOString(),
+    requiresDepartureConfirmation: Boolean(data.requiresDepartureConfirmation),
+    orderClosed: Boolean(data.orderClosed),
   };
 }

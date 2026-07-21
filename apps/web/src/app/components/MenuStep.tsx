@@ -4,7 +4,8 @@ import { ArrowLeft, ShoppingCart, Plus, Minus, X, Star, Sparkles, ChevronRight }
 import {
   STATUS_CONFIG,
   CartItem, MenuCategory, MenuItem, MenuItemSize, Topping, Table,
-  cartItemTotal, cartTotal, formatVND, genId,
+  cartItemTotal, cartQuantityForMenuItem, cartTotal, formatVND, genId,
+  getCartStockIssues, menuItemDailyAllowance,
 } from '../data';
 
 interface MenuStepProps {
@@ -14,6 +15,7 @@ interface MenuStepProps {
   menuItems: MenuItem[];
   isAddition: boolean;
   isEditing: boolean;
+  inventoryCredits: Record<string, number>;
   onCartChange: (cart: CartItem[]) => void;
   onBack: () => void;
   onConfirm: () => void;
@@ -93,15 +95,17 @@ function useAccessibleSheet(onClose: () => void) {
 
 function ItemCustomizerModal({
   state,
+  maxQuantity,
   onClose,
   onAdd,
 }: {
   state: CustomizerState;
+  maxQuantity: number;
   onClose: () => void;
   onAdd: (state: CustomizerState) => void;
 }) {
   const { dialogRef, initialFocusRef } = useAccessibleSheet(onClose);
-  const [qty, setQty] = useState(state.quantity);
+  const [qty, setQty] = useState(Math.min(state.quantity, Math.max(1, maxQuantity)));
   const [size, setSize] = useState<MenuItemSize | undefined>(state.selectedSize);
   const [toppings, setToppings] = useState<Topping[]>(state.selectedToppings);
   const [note, setNote] = useState(state.note);
@@ -308,12 +312,12 @@ function ItemCustomizerModal({
               </span>
               <button
                 aria-label="Tăng số lượng"
-                onClick={() => setQty(q => Math.min(99, q + 1))}
-                disabled={qty >= 99}
+                onClick={() => setQty(q => Math.min(maxQuantity, 99, q + 1))}
+                disabled={qty >= Math.min(maxQuantity, 99)}
                 style={{
                   width: 44, height: 44, border: 'none', background: 'none',
                   cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  color: qty >= 99 ? '#D1D5DB' : '#374151',
+                  color: qty >= Math.min(maxQuantity, 99) ? '#D1D5DB' : '#374151',
                 }}
               >
                 <Plus size={18} />
@@ -326,14 +330,20 @@ function ItemCustomizerModal({
           <div style={{ margin: '-4px 0 12px', textAlign: 'right', color: '#1D4ED8', fontSize: 11, fontWeight: 700 }}>
             Nấu dự kiến: {item.cookMinutes ?? 10} phút × {qty} = {(item.cookMinutes ?? 10) * qty} phút
           </div>
+          {item.dailyLimit != null && (
+            <div style={{ margin: '-5px 0 12px', textAlign: 'right', color: maxQuantity > 0 ? '#047857' : '#B91C1C', fontSize: 11, fontWeight: 800 }}>
+              {maxQuantity > 0 ? `Có thể chọn tối đa ${maxQuantity} phần` : 'Món đã hết trong ngày'}
+            </div>
+          )}
 
           <button
             data-action="save-cart-item"
             onClick={() => onAdd({ item, editCartId: state.editCartId, quantity: qty, selectedSize: size, selectedToppings: toppings, note })}
+            disabled={maxQuantity <= 0}
             style={{
-              width: '100%', background: '#F97316', color: '#fff', border: 'none',
-              borderRadius: 14, padding: '14px', cursor: 'pointer', fontWeight: 700,
-              fontSize: '15px',
+              width: '100%', background: maxQuantity > 0 ? '#F97316' : '#CBD5E1', color: '#fff', border: 'none',
+              borderRadius: 14, padding: '14px', cursor: maxQuantity > 0 ? 'pointer' : 'not-allowed', fontWeight: 700,
+              fontSize: '15px', opacity: maxQuantity > 0 ? 1 : .78,
             }}
           >
             {state.editCartId ? 'Cập nhật' : 'Thêm vào giỏ'} · {formatVND(lineTotal)}
@@ -347,24 +357,34 @@ function ItemCustomizerModal({
 
 function CartSheet({
   cart,
+  menuItems,
+  inventoryCredits,
   onClose,
   onCartChange,
   onConfirm,
 }: {
   cart: CartItem[];
+  menuItems: MenuItem[];
+  inventoryCredits: Record<string, number>;
   onClose: () => void;
   onCartChange: (cart: CartItem[]) => void;
   onConfirm: () => void;
 }) {
   const { dialogRef, initialFocusRef } = useAccessibleSheet(onClose);
   const total = cartTotal(cart);
+  const catalog = new Map(menuItems.map(item => [item.id, item]));
+  const stockIssues = getCartStockIssues(cart, menuItems, inventoryCredits);
 
   const updateQty = (cartId: string, delta: number) => {
-    onCartChange(cart.map(i =>
-      i.cartId === cartId
-        ? { ...i, quantity: Math.min(99, Math.max(1, i.quantity + delta)) }
-        : i
-    ));
+    const target = cart.find(item => item.cartId === cartId);
+    if (!target) return;
+    const latest = catalog.get(target.menuItem.id) ?? target.menuItem;
+    const allowance = menuItemDailyAllowance(latest, inventoryCredits[latest.id] ?? 0);
+    const currentTotal = cartQuantityForMenuItem(cart, latest.id);
+    if (delta > 0 && allowance != null && currentTotal >= allowance) return;
+    onCartChange(cart.map(item => item.cartId === cartId
+      ? { ...item, menuItem: latest, quantity: Math.min(99, Math.max(1, item.quantity + delta)) }
+      : item));
   };
 
   const remove = (cartId: string) => {
@@ -396,7 +416,12 @@ function CartSheet({
         </div>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
-          {cart.map(item => (
+          {cart.map(item => {
+            const latest = catalog.get(item.menuItem.id) ?? item.menuItem;
+            const allowance = menuItemDailyAllowance(latest, inventoryCredits[latest.id] ?? 0);
+            const totalForDish = cartQuantityForMenuItem(cart, latest.id);
+            const cannotIncrease = item.quantity >= 99 || (allowance != null && totalForDish >= allowance);
+            return (
             <div key={item.cartId} style={{ display: 'flex', gap: 10, paddingBottom: 12, marginBottom: 12, borderBottom: '1px solid #F9FAFB' }}>
               <img src={item.menuItem.image} alt={item.menuItem.name} style={{ width: 52, height: 52, borderRadius: 10, objectFit: 'cover', flexShrink: 0 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
@@ -407,6 +432,7 @@ function CartSheet({
                 )}
                 {item.note && <div style={{ fontSize: '11px', color: '#9CA3AF', fontStyle: 'italic' }}>"{item.note}"</div>}
                 <div style={{ fontSize: '13px', fontWeight: 600, color: '#F97316', marginTop: 4 }}>{formatVND(cartItemTotal(item))}</div>
+                {allowance != null && <div style={{ fontSize: 10, color: cannotIncrease ? '#B45309' : '#047857', fontWeight: 750, marginTop: 3 }}>Hạn mức khả dụng: {allowance} phần</div>}
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
                 <button aria-label={`Xóa ${item.menuItem.name} khỏi giỏ`} onClick={() => remove(item.cartId)} style={{ background: '#FEF2F2', border: 'none', borderRadius: 8, width: 44, height: 44, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -417,13 +443,13 @@ function CartSheet({
                     <Minus size={12} color="#374151" />
                   </button>
                   <span style={{ fontSize: '13px', fontWeight: 700, minWidth: 20, textAlign: 'center', color: '#111827' }}>{item.quantity}</span>
-                  <button aria-label={`Tăng số lượng ${item.menuItem.name}`} disabled={item.quantity >= 99} onClick={() => updateQty(item.cartId, 1)} style={{ width: 44, height: 44, border: 'none', background: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    <Plus size={12} color={item.quantity >= 99 ? '#D1D5DB' : '#374151'} />
+                  <button aria-label={`Tăng số lượng ${item.menuItem.name}`} disabled={cannotIncrease} onClick={() => updateQty(item.cartId, 1)} style={{ width: 44, height: 44, border: 'none', background: 'none', cursor: cannotIncrease ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <Plus size={12} color={cannotIncrease ? '#D1D5DB' : '#374151'} />
                   </button>
                 </div>
               </div>
             </div>
-          ))}
+          );})}
         </div>
 
         <div style={{ padding: '12px 16px 24px', borderTop: '1px solid #F3F4F6', background: '#FAFAFA' }}>
@@ -431,12 +457,18 @@ function CartSheet({
             <span style={{ color: '#374151', fontWeight: 600 }}>Tổng cộng</span>
             <span style={{ fontWeight: 700, fontSize: '18px', color: '#111827' }}>{formatVND(total)}</span>
           </div>
+          {stockIssues.length > 0 && (
+            <div role="alert" style={{ marginBottom: 10, padding: '9px 11px', borderRadius: 10, background: '#FEF2F2', color: '#B91C1C', fontSize: 11, fontWeight: 750 }}>
+              {stockIssues.map(issue => `${issue.name}: chọn ${issue.requested}, còn ${issue.allowance} phần`).join(' · ')}
+            </div>
+          )}
           <button
             data-action="confirm-cart"
             onClick={onConfirm}
+            disabled={stockIssues.length > 0}
             style={{
-              width: '100%', background: '#111827', color: '#fff', border: 'none',
-              borderRadius: 14, padding: '14px', cursor: 'pointer', fontWeight: 700,
+              width: '100%', background: stockIssues.length > 0 ? '#94A3B8' : '#111827', color: '#fff', border: 'none',
+              borderRadius: 14, padding: '14px', cursor: stockIssues.length > 0 ? 'not-allowed' : 'pointer', fontWeight: 700,
               fontSize: '15px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
             }}
           >
@@ -449,10 +481,16 @@ function CartSheet({
   );
 }
 
-export function MenuStep({ table, cart, categories, menuItems, isAddition, isEditing, onCartChange, onBack, onConfirm }: MenuStepProps) {
+export function MenuStep({ table, cart, categories, menuItems, isAddition, isEditing, inventoryCredits, onCartChange, onBack, onConfirm }: MenuStepProps) {
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [customizer, setCustomizer] = useState<CustomizerState | null>(null);
   const [showCart, setShowCart] = useState(false);
+  const menuItemsRef = useRef(menuItems);
+  const cartRef = useRef(cart);
+  const inventoryCreditsRef = useRef(inventoryCredits);
+  menuItemsRef.current = menuItems;
+  cartRef.current = cart;
+  inventoryCreditsRef.current = inventoryCredits;
 
   const cfg = STATUS_CONFIG[table.status];
   const cartCount = cart.reduce((s, i) => s + i.quantity, 0);
@@ -480,8 +518,14 @@ export function MenuStep({ table, cart, categories, menuItems, isAddition, isEdi
         return;
       }
       if (overlay?.type === 'customizer') {
-        const item = menuItems.find(candidate => candidate.id === overlay.itemId && candidate.available);
+        const item = menuItemsRef.current.find(candidate => candidate.id === overlay.itemId && candidate.available);
         if (item) {
+          const allowance = menuItemDailyAllowance(item, inventoryCreditsRef.current[item.id] ?? 0);
+          if (allowance != null && cartQuantityForMenuItem(cartRef.current, item.id) >= allowance) {
+            setCustomizer(null);
+            setShowCart(false);
+            return;
+          }
           setShowCart(false);
           setCustomizer({
             item,
@@ -501,13 +545,15 @@ export function MenuStep({ table, cart, categories, menuItems, isAddition, isEdi
     syncOverlayFromHistory(window.history.state);
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, [menuItems]);
+  }, []);
 
   const filteredItems = selectedCategory === 'all'
     ? menuItems.filter(item => item.available)
     : menuItems.filter(item => item.available && item.categoryId === selectedCategory);
 
   const openCustomizer = (item: MenuItem) => {
+    const allowance = menuItemDailyAllowance(item, inventoryCredits[item.id] ?? 0);
+    if (allowance != null && cartQuantityForMenuItem(cart, item.id) >= allowance) return;
     pushMenuOverlay({ type: 'customizer', itemId: item.id });
     setCustomizer({
       item,
@@ -519,15 +565,19 @@ export function MenuStep({ table, cart, categories, menuItems, isAddition, isEdi
   };
 
   const handleAdd = (state: CustomizerState) => {
+    const latest = menuItems.find(item => item.id === state.item.id) ?? state.item;
+    const allowance = menuItemDailyAllowance(latest, inventoryCredits[latest.id] ?? 0);
+    const currentQuantity = cartQuantityForMenuItem(cart, latest.id);
+    if (allowance != null && currentQuantity + state.quantity > allowance) return;
     if (state.editCartId) {
       onCartChange(cart.map(i =>
         i.cartId === state.editCartId
-          ? { ...i, quantity: state.quantity, selectedSize: state.selectedSize, selectedToppings: state.selectedToppings, note: state.note }
+          ? { ...i, menuItem: latest, quantity: state.quantity, selectedSize: state.selectedSize, selectedToppings: state.selectedToppings, note: state.note }
           : i
       ));
     } else {
       const existing = cart.find(i =>
-        i.menuItem.id === state.item.id &&
+          i.menuItem.id === latest.id &&
         i.selectedSize?.label === state.selectedSize?.label &&
         i.selectedToppings.length === 0 && state.selectedToppings.length === 0 &&
         i.note === state.note
@@ -535,13 +585,13 @@ export function MenuStep({ table, cart, categories, menuItems, isAddition, isEdi
       if (existing && state.selectedToppings.length === 0) {
         onCartChange(cart.map(i =>
           i.cartId === existing.cartId
-            ? { ...i, quantity: i.quantity + state.quantity }
+            ? { ...i, menuItem: latest, quantity: Math.min(99, i.quantity + state.quantity) }
             : i
         ));
       } else {
         const newItem: CartItem = {
           cartId: genId(),
-          menuItem: state.item,
+          menuItem: latest,
           quantity: state.quantity,
           selectedSize: state.selectedSize,
           selectedToppings: state.selectedToppings,
@@ -651,17 +701,21 @@ export function MenuStep({ table, cart, categories, menuItems, isAddition, isEdi
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
           {filteredItems.map(item => {
             const cartQty = cart.filter(c => c.menuItem.id === item.id).reduce((s, c) => s + c.quantity, 0);
+            const allowance = menuItemDailyAllowance(item, inventoryCredits[item.id] ?? 0);
+            const soldOut = allowance != null && cartQty >= allowance;
             return (
               <button
                 key={item.id}
                 data-menu-item-id={item.id}
                 onClick={() => openCustomizer(item)}
+                disabled={soldOut}
+                aria-label={soldOut ? `${item.name} đã hết trong ngày` : `Chọn món ${item.name}`}
                 style={{
                   background: '#fff', border: '1.5px solid #F3F4F6', borderRadius: 16,
-                  overflow: 'hidden', cursor: 'pointer', textAlign: 'left', padding: 0,
+                  overflow: 'hidden', cursor: soldOut ? 'not-allowed' : 'pointer', textAlign: 'left', padding: 0,
                   position: 'relative', display: 'flex', flexDirection: 'column',
                   boxShadow: cartQty > 0 ? '0 0 0 2.5px #F97316' : '0 1px 4px rgba(0,0,0,0.06)',
-                  transition: 'box-shadow 0.15s',
+                  transition: 'box-shadow 0.15s', opacity: soldOut ? .58 : 1,
                 }}
               >
                 <div style={{ position: 'relative', paddingTop: '68%' }}>
@@ -687,13 +741,18 @@ export function MenuStep({ table, cart, categories, menuItems, isAddition, isEdi
                       {cartQty}
                     </div>
                   )}
+                  {allowance != null && (
+                    <div style={{ position: 'absolute', bottom: 7, left: 7, background: soldOut ? '#991B1B' : 'rgba(6,95,70,.92)', color: '#fff', fontSize: 9, fontWeight: 800, padding: '3px 7px', borderRadius: 999 }}>
+                      {soldOut ? 'HẾT HÔM NAY' : `CÒN ${allowance} PHẦN`}
+                    </div>
+                  )}
                 </div>
                 <div style={{ padding: '10px 10px 12px', flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
                   <div style={{ fontSize: '13px', fontWeight: 600, color: '#111827', marginBottom: 4, lineHeight: 1.3 }}>{item.name}</div>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 6 }}>
                     <span style={{ fontSize: '13px', fontWeight: 700, color: '#F97316' }}>{formatVND(item.price)}</span>
-                    <div style={{ background: '#F97316', borderRadius: 8, width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                      <Plus size={16} color="#fff" strokeWidth={2.5} />
+                    <div style={{ background: soldOut ? '#94A3B8' : '#F97316', borderRadius: 8, width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                      {soldOut ? <X size={15} color="#fff" /> : <Plus size={16} color="#fff" strokeWidth={2.5} />}
                     </div>
                   </div>
                 </div>
@@ -732,7 +791,15 @@ export function MenuStep({ table, cart, categories, menuItems, isAddition, isEdi
       {/* Modals */}
       {customizer && (
         <ItemCustomizerModal
-          state={customizer}
+          state={{ ...customizer, item: menuItems.find(item => item.id === customizer.item.id) ?? customizer.item }}
+          maxQuantity={Math.max(0, Math.min(
+            99,
+            (() => {
+              const latest = menuItems.find(item => item.id === customizer.item.id) ?? customizer.item;
+              const allowance = menuItemDailyAllowance(latest, inventoryCredits[latest.id] ?? 0);
+              return allowance == null ? 99 : allowance - cartQuantityForMenuItem(cart, latest.id);
+            })(),
+          ))}
           onClose={closeMenuOverlay}
           onAdd={handleAdd}
         />
@@ -741,6 +808,8 @@ export function MenuStep({ table, cart, categories, menuItems, isAddition, isEdi
       {showCart && (
         <CartSheet
           cart={cart}
+          menuItems={menuItems}
+          inventoryCredits={inventoryCredits}
           onClose={closeMenuOverlay}
           onCartChange={onCartChange}
           onConfirm={confirmCart}

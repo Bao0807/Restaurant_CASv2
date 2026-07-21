@@ -276,6 +276,14 @@
   padding: 0 32px 24px;
 }
 
+.invoice-footer-simple {
+  grid-template-columns: 1fr;
+}
+
+.invoice-footer-simple .footer-box {
+  min-height: 0;
+}
+
 .footer-box {
   padding: 16px;
   min-height: 118px;

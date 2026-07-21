@@ -1,5 +1,6 @@
 import mysql from 'mysql2/promise';
 import { defaultSettings } from './defaultSettings.js';
+import { businessDateFor } from './dailyInventory.js';
 
 const isProduction = process.env.NODE_ENV === 'production';
 const databaseName = process.env.DB_NAME || 'restaurant_casv2';
@@ -76,12 +77,21 @@ const schemaStatements = [
     table_number INT UNSIGNED NOT NULL UNIQUE,
     seats INT UNSIGNED NOT NULL,
     status VARCHAR(20) NOT NULL DEFAULT 'empty',
+    area VARCHAR(80) NOT NULL DEFAULT 'Khu vực chung',
+    position_x INT UNSIGNED NULL,
+    position_y INT UNSIGNED NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT chk_restaurant_table_number CHECK (table_number BETWEEN 1 AND 999),
     CONSTRAINT chk_restaurant_table_seats CHECK (seats BETWEEN 1 AND 100),
     CONSTRAINT chk_restaurant_table_status CHECK (status IN ('empty', 'waiting', 'cooking', 'done')),
-    INDEX idx_restaurant_table_status (status)
+    CONSTRAINT chk_restaurant_table_area CHECK (CHAR_LENGTH(TRIM(area)) BETWEEN 1 AND 80),
+    CONSTRAINT chk_restaurant_table_position CHECK (
+      (position_x IS NULL AND position_y IS NULL)
+      OR (position_x BETWEEN 1 AND 24 AND position_y BETWEEN 1 AND 24)
+    ),
+    INDEX idx_restaurant_table_status (status),
+    CONSTRAINT uq_restaurant_table_area_position UNIQUE (area, position_x, position_y)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS reservations (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -140,6 +150,7 @@ const schemaStatements = [
     image VARCHAR(1000) NOT NULL DEFAULT '',
     category_id VARCHAR(64) NOT NULL,
     cook_minutes INT UNSIGNED NOT NULL DEFAULT 10,
+    daily_limit INT UNSIGNED NULL,
     available BOOLEAN NOT NULL DEFAULT TRUE,
     is_bestseller BOOLEAN NOT NULL DEFAULT FALSE,
     is_new BOOLEAN NOT NULL DEFAULT FALSE,
@@ -149,8 +160,20 @@ const schemaStatements = [
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_menu_item_category FOREIGN KEY (category_id) REFERENCES menu_categories(id),
     CONSTRAINT chk_menu_item_cook_minutes CHECK (cook_minutes BETWEEN 1 AND 240),
+    CONSTRAINT chk_menu_item_daily_limit CHECK (daily_limit IS NULL OR daily_limit <= 1000000),
     INDEX idx_menu_item_category (category_id),
     INDEX idx_menu_item_available (available)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS menu_item_daily_usage (
+    menu_item_id VARCHAR(64) NOT NULL,
+    business_date DATE NOT NULL,
+    used_quantity INT UNSIGNED NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (menu_item_id, business_date),
+    CONSTRAINT fk_daily_usage_menu_item FOREIGN KEY (menu_item_id) REFERENCES menu_items(id) ON DELETE CASCADE,
+    CONSTRAINT chk_daily_usage_quantity CHECK (used_quantity <= 2000000000),
+    INDEX idx_daily_usage_date (business_date, menu_item_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS active_orders (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -183,6 +206,7 @@ const schemaStatements = [
     cooking_started_at DATETIME(3) NULL,
     completed_at DATETIME(3) NULL,
     estimated_cook_minutes INT UNSIGNED NOT NULL DEFAULT 10,
+    inventory_date DATE NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_order_batch_order_table FOREIGN KEY (order_id, table_id) REFERENCES active_orders(id, table_id) ON DELETE CASCADE,
@@ -241,6 +265,8 @@ const schemaStatements = [
     staff_name VARCHAR(120) NULL,
     cashier_name VARCHAR(120) NULL,
     status VARCHAR(32) NOT NULL DEFAULT 'PAID',
+    service_status VARCHAR(32) NOT NULL DEFAULT 'closed',
+    departure_confirmed_at DATETIME(3) NULL,
     paid_at DATETIME(3) NOT NULL,
     raw_payload JSON NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -251,10 +277,26 @@ const schemaStatements = [
       (reservation_code IS NULL AND customer_name IS NULL AND guest_count IS NULL)
       OR (reservation_code IS NOT NULL AND customer_name IS NOT NULL AND guest_count IS NOT NULL)
     ),
+    CONSTRAINT chk_payment_service_status CHECK (service_status IN ('awaiting_departure', 'closed')),
+    CONSTRAINT chk_payment_service_lifecycle CHECK (
+      service_status = 'closed' OR departure_confirmed_at IS NULL
+    ),
     INDEX idx_paid_at (paid_at),
     INDEX idx_table_id (table_id),
     INDEX idx_payment_staff (staff_id, paid_at),
-    INDEX idx_payment_reservation (reservation_id, paid_at)
+    INDEX idx_payment_reservation (reservation_id, paid_at),
+    INDEX idx_payment_service (service_status, table_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS active_order_payments (
+    order_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+    transaction_id BIGINT UNSIGNED NOT NULL UNIQUE,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_active_order_payment_order
+      FOREIGN KEY (order_id) REFERENCES active_orders(id)
+      ON DELETE CASCADE,
+    CONSTRAINT fk_active_order_payment_transaction
+      FOREIGN KEY (transaction_id) REFERENCES payment_transactions(id)
+      ON DELETE RESTRICT
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS payment_items (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -278,16 +320,25 @@ const schemaStatements = [
 ];
 
 const defaultTables = [
-  ['t1', 1, 4], ['t2', 2, 2], ['t3', 3, 6], ['t4', 4, 4],
-  ['t5', 5, 4], ['t6', 6, 8], ['t7', 7, 4], ['t8', 8, 2],
-  ['t9', 9, 6], ['t10', 10, 4], ['t11', 11, 8], ['t12', 12, 4],
+  ['t1', 1, 4, 'Khu vực trong nhà', 1, 1],
+  ['t2', 2, 2, 'Khu vực trong nhà', 2, 1],
+  ['t3', 3, 6, 'Khu vực trong nhà', 1, 2],
+  ['t4', 4, 4, 'Khu vực trong nhà', 2, 2],
+  ['t5', 5, 4, 'Khu vực cửa sổ', 1, 1],
+  ['t6', 6, 8, 'Khu vực cửa sổ', 2, 1],
+  ['t7', 7, 4, 'Khu vực cửa sổ', 1, 2],
+  ['t8', 8, 2, 'Khu vực cửa sổ', 2, 2],
+  ['t9', 9, 6, 'Sân ngoài trời', 1, 1],
+  ['t10', 10, 4, 'Sân ngoài trời', 2, 1],
+  ['t11', 11, 8, 'Sân ngoài trời', 1, 2],
+  ['t12', 12, 4, 'Sân ngoài trời', 2, 2],
 ];
 
 const defaultEmployees = [
-  ['employee-server-default', 'NV001', 'Nhân viên phục vụ', 'server', '0900 111 001', '08:00', '16:00'],
-  ['employee-cashier-default', 'NV002', 'Thu ngân CAS', 'cashier', '0900 111 002', '08:00', '16:00'],
-  ['employee-chef-default', 'NV003', 'Bếp trưởng CAS', 'chef', '0900 111 003', '09:00', '17:00'],
-  ['employee-manager-default', 'NV004', 'Quản lý CAS', 'manager', '0900 111 004', '09:00', '18:00'],
+  ['employee-server-default', 'NV001', 'Nhân viên phục vụ', 'server', '', '08:00', '16:00'],
+  ['employee-cashier-default', 'NV002', 'Thu ngân', 'cashier', '', '08:00', '16:00'],
+  ['employee-chef-default', 'NV003', 'Nhân viên bếp', 'chef', '', '09:00', '17:00'],
+  ['employee-manager-default', 'NV004', 'Quản lý', 'manager', '', '09:00', '18:00'],
 ];
 
 /** Bổ sung liên kết nhân viên cho database cũ mà không làm thay đổi các hóa đơn lịch sử. */
@@ -305,6 +356,90 @@ async function ensureEmployeePaymentColumn(connection) {
        ADD CONSTRAINT fk_payment_staff FOREIGN KEY (staff_id) REFERENCES employees(id) ON DELETE SET NULL`,
     );
   }
+}
+
+/**
+ * Bổ sung vòng đời phục vụ sau thanh toán sớm và liên kết 1-1 giữa order đang mở với hóa đơn.
+ * Các hóa đơn cũ mặc định `closed`, vì trước tính năng này thanh toán luôn giải phóng bàn ngay.
+ */
+async function ensureEarlyPaymentLifecycle(connection) {
+  const migrationId = '20260720_early_payment_lifecycle';
+  const [columns] = await connection.query(
+    `SELECT column_name AS columnName FROM information_schema.columns
+     WHERE table_schema = ? AND table_name = 'payment_transactions'`,
+    [databaseName],
+  );
+  const columnNames = new Set(columns.map(column => column.columnName));
+  if (!columnNames.has('service_status')) {
+    await connection.query(
+      "ALTER TABLE payment_transactions ADD COLUMN service_status VARCHAR(32) NOT NULL DEFAULT 'closed' AFTER status",
+    );
+  }
+  if (!columnNames.has('departure_confirmed_at')) {
+    await connection.query(
+      'ALTER TABLE payment_transactions ADD COLUMN departure_confirmed_at DATETIME(3) NULL AFTER service_status',
+    );
+  }
+
+  const [invalidPayments] = await connection.query(
+    `SELECT id FROM payment_transactions
+     WHERE service_status NOT IN ('awaiting_departure', 'closed')
+       OR (service_status = 'awaiting_departure' AND departure_confirmed_at IS NOT NULL)
+     ORDER BY id LIMIT 10`,
+  );
+  if (invalidPayments.length > 0) {
+    throw new Error(`Không thể migrate vòng đời thanh toán tại id ${invalidPayments.map(row => row.id).join(', ')}.`);
+  }
+
+  const [indexes] = await connection.query(
+    `SELECT index_name AS indexName,
+       GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ',') AS columns
+     FROM information_schema.statistics
+     WHERE table_schema = ? AND table_name = 'payment_transactions'
+       AND index_name = 'idx_payment_service'
+     GROUP BY index_name`,
+    [databaseName],
+  );
+  if (indexes.length === 0) {
+    await connection.query(
+      'ALTER TABLE payment_transactions ADD INDEX idx_payment_service (service_status, table_id)',
+    );
+  } else if (indexes[0].columns !== 'service_status,table_id') {
+    throw new Error('Index idx_payment_service có định nghĩa không đúng; cần kiểm tra thủ công.');
+  }
+
+  const [checks] = await connection.query(
+    `SELECT constraint_name AS constraintName FROM information_schema.table_constraints
+     WHERE constraint_schema = ? AND table_name = 'payment_transactions' AND constraint_type = 'CHECK'`,
+    [databaseName],
+  );
+  const checkNames = new Set(checks.map(constraint => constraint.constraintName));
+  if (!checkNames.has('chk_payment_service_status')) {
+    await connection.query(
+      `ALTER TABLE payment_transactions ADD CONSTRAINT chk_payment_service_status
+       CHECK (service_status IN ('awaiting_departure', 'closed'))`,
+    );
+  }
+  if (!checkNames.has('chk_payment_service_lifecycle')) {
+    await connection.query(
+      `ALTER TABLE payment_transactions ADD CONSTRAINT chk_payment_service_lifecycle
+       CHECK (service_status = 'closed' OR departure_confirmed_at IS NULL)`,
+    );
+  }
+
+  // Hai INSERT của phiên bản cũ có thể lệch nhau 1 ms dù cùng một lượt gọi đầu tiên.
+  await connection.query(
+    `UPDATE active_orders activeOrder
+     INNER JOIN (
+       SELECT order_id, MIN(queued_at) AS firstQueuedAt
+       FROM order_batches GROUP BY order_id
+     ) batches ON batches.order_id = activeOrder.id
+     SET activeOrder.queued_at = batches.firstQueuedAt
+     WHERE activeOrder.queued_at <> batches.firstQueuedAt`,
+  );
+
+  // CREATE TABLE trong schemaStatements đã tạo bảng và cả hai FK trước khi hàm này chạy.
+  await connection.query('INSERT IGNORE INTO schema_migrations (id) VALUES (?)', [migrationId]);
 }
 
 /** Lưu snapshot danh mục trên dòng hóa đơn để báo cáo lịch sử không đổi theo catalog hiện tại. */
@@ -700,6 +835,222 @@ async function replaceCheckConstraints(connection, tableName, definitions) {
   }
 }
 
+/**
+ * Bổ sung khu vực và tọa độ cho sơ đồ bàn trên database cũ.
+ * Tọa độ là chỉ số cột/hàng của lưới sơ đồ, trong khoảng 1..24;
+ * cả hai tọa độ phải cùng có giá trị hoặc cùng NULL để tránh một vị trí nửa vời.
+ */
+async function ensureRestaurantTableLayout(connection) {
+  const migrationId = '20260720_restaurant_table_layout_v2';
+  const [applied] = await connection.query(
+    'SELECT id FROM schema_migrations WHERE id = ? LIMIT 1',
+    [migrationId],
+  );
+  if (applied.length > 0) return;
+
+  const [columnRows] = await connection.query(
+    `SELECT column_name AS columnName
+     FROM information_schema.columns
+     WHERE table_schema = ? AND table_name = 'restaurant_tables'`,
+    [databaseName],
+  );
+  const columns = new Set(columnRows.map(column => column.columnName));
+  if (!columns.has('area')) {
+    await connection.query(
+      "ALTER TABLE restaurant_tables ADD COLUMN area VARCHAR(80) NOT NULL DEFAULT 'Khu vực chung' AFTER status",
+    );
+  }
+  if (!columns.has('position_x')) {
+    await connection.query('ALTER TABLE restaurant_tables ADD COLUMN position_x INT UNSIGNED NULL AFTER area');
+  }
+  if (!columns.has('position_y')) {
+    await connection.query('ALTER TABLE restaurant_tables ADD COLUMN position_y INT UNSIGNED NULL AFTER position_x');
+  }
+
+  await connection.query(
+    "UPDATE restaurant_tables SET area = 'Khu vực chung' WHERE area IS NULL OR TRIM(area) = ''",
+  );
+  await connection.query(
+    `UPDATE restaurant_tables SET position_x = NULL, position_y = NULL
+     WHERE (position_x IS NULL AND position_y IS NOT NULL)
+        OR (position_x IS NOT NULL AND position_y IS NULL)`,
+  );
+  const [legacyLayoutRows] = await connection.query(
+    "SELECT id FROM schema_migrations WHERE id = '20260720_restaurant_table_layout' LIMIT 1",
+  );
+  const legacyLayoutApplied = legacyLayoutRows.length > 0;
+  // Chỉ bố trí bàn mẫu chưa có vị trí; nhánh legacy sửa lại bản migration thử nghiệm dùng thang 0..10000.
+  for (const [id, , , area, positionX, positionY] of defaultTables) {
+    await connection.query(
+      `UPDATE restaurant_tables SET area = ?, position_x = ?, position_y = ?
+       WHERE id = ? AND (
+         (area = 'Khu vực chung' AND position_x IS NULL AND position_y IS NULL)
+         OR (? = TRUE AND area = ?)
+       )`,
+      [area, positionX, positionY, id, legacyLayoutApplied, area],
+    );
+  }
+  const [invalidRows] = await connection.query(
+    `SELECT id FROM restaurant_tables
+     WHERE CHAR_LENGTH(TRIM(area)) NOT BETWEEN 1 AND 80
+        OR (position_x IS NOT NULL AND position_x NOT BETWEEN 1 AND 24)
+        OR (position_y IS NOT NULL AND position_y NOT BETWEEN 1 AND 24)
+     ORDER BY id LIMIT 10`,
+  );
+  if (invalidRows.length > 0) {
+    throw new Error(`Không thể thêm sơ đồ bàn; dữ liệu vị trí sai tại id ${invalidRows.map(row => row.id).join(', ')}.`);
+  }
+  await connection.query(
+    `ALTER TABLE restaurant_tables
+     MODIFY area VARCHAR(80) NOT NULL DEFAULT 'Khu vực chung',
+     MODIFY position_x INT UNSIGNED NULL,
+     MODIFY position_y INT UNSIGNED NULL`,
+  );
+
+  const [indexRows] = await connection.query(
+    `SELECT index_name AS indexName,
+       non_unique AS nonUnique,
+       GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ',') AS columns
+     FROM information_schema.statistics
+     WHERE table_schema = ? AND table_name = 'restaurant_tables'
+       AND index_name IN ('idx_restaurant_table_area_position', 'uq_restaurant_table_area_position')
+     GROUP BY index_name, non_unique`,
+    [databaseName],
+  );
+  let validUniqueIndex = false;
+  for (const index of indexRows) {
+    const valid = index.indexName === 'uq_restaurant_table_area_position'
+      && Number(index.nonUnique) === 0
+      && index.columns === 'area,position_x,position_y';
+    if (valid) {
+      validUniqueIndex = true;
+    } else {
+      await connection.query(`ALTER TABLE restaurant_tables DROP INDEX \`${index.indexName}\``);
+    }
+  }
+  const [duplicatePositions] = await connection.query(
+    `SELECT area, position_x AS positionX, position_y AS positionY, COUNT(*) AS total
+     FROM restaurant_tables
+     WHERE position_x IS NOT NULL AND position_y IS NOT NULL
+     GROUP BY area, position_x, position_y
+     HAVING COUNT(*) > 1
+     LIMIT 10`,
+  );
+  if (duplicatePositions.length > 0) {
+    throw new Error('Không thể thêm sơ đồ bàn vì có nhiều bàn trùng vị trí trong cùng khu vực.');
+  }
+  if (!validUniqueIndex) {
+    await connection.query(
+      `ALTER TABLE restaurant_tables
+       ADD CONSTRAINT uq_restaurant_table_area_position UNIQUE (area, position_x, position_y)`,
+    );
+  }
+
+  await replaceCheckConstraints(connection, 'restaurant_tables', [
+    ['chk_restaurant_table_area', 'CHAR_LENGTH(TRIM(area)) BETWEEN 1 AND 80'],
+    ['chk_restaurant_table_position', `
+      (position_x IS NULL AND position_y IS NULL)
+      OR (position_x BETWEEN 1 AND 24 AND position_y BETWEEN 1 AND 24)
+    `],
+  ]);
+
+  await connection.query('INSERT INTO schema_migrations (id) VALUES (?)', [migrationId]);
+}
+
+/**
+ * Bổ sung hạn mức món theo ngày. Ledger giữ từng ngày nên sang ngày mới tự có tồn mới;
+ * `inventory_date` trên batch giúp sửa/hủy đúng bucket dù phiếu đã được requeue.
+ */
+async function ensureDailyMenuInventory(connection) {
+  const migrationId = '20260721_daily_menu_inventory';
+  const [menuColumns] = await connection.query(
+    `SELECT column_name AS columnName FROM information_schema.columns
+     WHERE table_schema = ? AND table_name = 'menu_items'`,
+    [databaseName],
+  );
+  if (!menuColumns.some(column => column.columnName === 'daily_limit')) {
+    await connection.query('ALTER TABLE menu_items ADD COLUMN daily_limit INT UNSIGNED NULL AFTER cook_minutes');
+  }
+
+  await connection.query(
+    `CREATE TABLE IF NOT EXISTS menu_item_daily_usage (
+      menu_item_id VARCHAR(64) NOT NULL,
+      business_date DATE NOT NULL,
+      used_quantity INT UNSIGNED NOT NULL DEFAULT 0,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (menu_item_id, business_date),
+      CONSTRAINT fk_daily_usage_menu_item FOREIGN KEY (menu_item_id) REFERENCES menu_items(id) ON DELETE CASCADE,
+      CONSTRAINT chk_daily_usage_quantity CHECK (used_quantity <= 2000000000),
+      INDEX idx_daily_usage_date (business_date, menu_item_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  );
+
+  const [batchColumns] = await connection.query(
+    `SELECT column_name AS columnName, is_nullable AS isNullable
+     FROM information_schema.columns
+     WHERE table_schema = ? AND table_name = 'order_batches'`,
+    [databaseName],
+  );
+  let inventoryColumn = batchColumns.find(column => column.columnName === 'inventory_date');
+  if (!inventoryColumn) {
+    await connection.query('ALTER TABLE order_batches ADD COLUMN inventory_date DATE NULL AFTER estimated_cook_minutes');
+    inventoryColumn = { isNullable: 'YES' };
+  }
+
+  const [missingInventoryDates] = await connection.query(
+    'SELECT id, queued_at AS queuedAt FROM order_batches WHERE inventory_date IS NULL ORDER BY id',
+  );
+  for (const batch of missingInventoryDates) {
+    await connection.query(
+      'UPDATE order_batches SET inventory_date = ? WHERE id = ? AND inventory_date IS NULL',
+      [businessDateFor(batch.queuedAt), batch.id],
+    );
+  }
+
+  const [applied] = await connection.query(
+    'SELECT id FROM schema_migrations WHERE id = ? LIMIT 1',
+    [migrationId],
+  );
+  if (applied.length === 0) {
+    // Active batch được tính một lần để hủy/sửa ngay sau nâng cấp không làm ledger thiếu số lượng.
+    await connection.query(
+      `INSERT INTO menu_item_daily_usage (menu_item_id, business_date, used_quantity)
+       SELECT extracted.menu_item_id, batch.inventory_date, SUM(extracted.quantity)
+       FROM order_batches batch
+       INNER JOIN JSON_TABLE(
+         batch.items,
+         '$[*]' COLUMNS (
+           menu_item_id VARCHAR(64) PATH '$.menuItem.id' NULL ON ERROR,
+           quantity INT PATH '$.quantity' NULL ON ERROR
+         )
+       ) extracted
+       INNER JOIN menu_items item ON item.id = extracted.menu_item_id COLLATE utf8mb4_unicode_ci
+       WHERE extracted.menu_item_id IS NOT NULL AND extracted.quantity > 0
+       GROUP BY extracted.menu_item_id, batch.inventory_date
+       ON DUPLICATE KEY UPDATE used_quantity = GREATEST(used_quantity, VALUES(used_quantity))`,
+    );
+  }
+
+  if (inventoryColumn.isNullable !== 'NO') {
+    await connection.query('ALTER TABLE order_batches MODIFY inventory_date DATE NOT NULL');
+  }
+
+  const [menuChecks] = await connection.query(
+    `SELECT constraint_name AS constraintName FROM information_schema.table_constraints
+     WHERE constraint_schema = ? AND table_name = 'menu_items' AND constraint_type = 'CHECK'`,
+    [databaseName],
+  );
+  if (!menuChecks.some(check => check.constraintName === 'chk_menu_item_daily_limit')) {
+    await connection.query(
+      `ALTER TABLE menu_items ADD CONSTRAINT chk_menu_item_daily_limit
+       CHECK (daily_limit IS NULL OR daily_limit <= 1000000)`,
+    );
+  }
+
+  await connection.query('INSERT IGNORE INTO schema_migrations (id) VALUES (?)', [migrationId]);
+}
+
 /** Gia cố invariant đơn giản ở tầng MySQL; invariant liên bảng/phạm vi thời gian vẫn do transaction API quản lý. */
 async function ensureDatabaseIntegrityConstraints(connection) {
   const migrationId = '20260715_database_integrity_constraints_v3';
@@ -925,16 +1276,27 @@ async function ensureKitchenQueueColumns(connection) {
   }
 
   // Mỗi active order cũ trở thành lượt gọi đầu tiên để nâng cấp không mất dữ liệu.
+  const [batchInventoryColumns] = await connection.query(
+    `SELECT column_name AS columnName FROM information_schema.columns
+     WHERE table_schema = ? AND table_name = 'order_batches' AND column_name = 'inventory_date'`,
+    [databaseName],
+  );
+  const hasInventoryDate = batchInventoryColumns.length > 0;
+  const legacyBusinessOffset = Number.isFinite(Number(process.env.LEGACY_TIMEZONE_OFFSET_MINUTES))
+    ? Math.trunc(Number(process.env.LEGACY_TIMEZONE_OFFSET_MINUTES))
+    : 420;
   await connection.query(
     `INSERT INTO order_batches (
       order_id, table_id, batch_number, items, status, is_addition,
       queued_at, cooking_started_at, completed_at, estimated_cook_minutes
+      ${hasInventoryDate ? ', inventory_date' : ''}
     )
     SELECT o.id, o.table_id, 1, o.items,
       CASE WHEN t.status IN ('waiting', 'cooking', 'done') THEN t.status ELSE 'waiting' END,
       FALSE, o.queued_at, o.cooking_started_at,
       CASE WHEN t.status = 'done' THEN o.updated_at ELSE NULL END,
       o.estimated_cook_minutes
+      ${hasInventoryDate ? `, DATE(DATE_ADD(o.queued_at, INTERVAL ${legacyBusinessOffset} MINUTE))` : ''}
     FROM active_orders o
     INNER JOIN restaurant_tables t ON t.id = o.table_id
     LEFT JOIN order_batches b ON b.order_id = o.id
@@ -946,14 +1308,17 @@ async function ensureKitchenQueueColumns(connection) {
 async function verifyDatabaseSchema(connection) {
   const probes = [
     'SELECT id, settings FROM restaurant_settings LIMIT 0',
-    'SELECT id, table_number, seats, status FROM restaurant_tables LIMIT 0',
+    'SELECT id, table_number, seats, status, area, position_x, position_y FROM restaurant_tables LIMIT 0',
     'SELECT id, reservation_code, table_id, table_number, customer_name, customer_phone, phone_normalized, party_size, reserved_at, ends_at, duration_minutes, status, seated_table_id, version FROM reservations LIMIT 0',
-    'SELECT id, category_id, cook_minutes, available FROM menu_items LIMIT 0',
+    'SELECT id, category_id, cook_minutes, daily_limit, available FROM menu_items LIMIT 0',
+    'SELECT menu_item_id, business_date, used_quantity FROM menu_item_daily_usage LIMIT 0',
     'SELECT id, table_id, reservation_id, items, estimated_cook_minutes FROM active_orders LIMIT 0',
-    'SELECT id, order_id, table_id, batch_number, items, status, estimated_cook_minutes FROM order_batches LIMIT 0',
+    'SELECT id, order_id, table_id, batch_number, items, status, estimated_cook_minutes, inventory_date FROM order_batches LIMIT 0',
     'SELECT id, concurrency, stale_after_minutes, automation_enabled, paused, version FROM kitchen_queue_state LIMIT 0',
     'SELECT id, employee_code, full_name, role, active FROM employees LIMIT 0',
-    'SELECT id, invoice_code, reservation_id, reservation_code, customer_name, guest_count, staff_id, paid_at FROM payment_transactions LIMIT 0',
+    `SELECT id, invoice_code, reservation_id, reservation_code, customer_name, guest_count,
+      staff_id, service_status, departure_confirmed_at, paid_at FROM payment_transactions LIMIT 0`,
+    'SELECT order_id, transaction_id FROM active_order_payments LIMIT 0',
     'SELECT id, transaction_id, category_id, category_name FROM payment_items LIMIT 0',
   ];
   for (const probe of probes) await connection.query(probe);
@@ -982,7 +1347,9 @@ async function verifyDatabaseSchema(connection) {
     `SELECT constraint_name AS constraintName FROM information_schema.referential_constraints
      WHERE constraint_schema = ? AND constraint_name IN (
        'fk_reservation_table', 'fk_active_order_reservation_table',
-       'fk_order_batch_order_table', 'fk_payment_reservation'
+        'fk_order_batch_order_table', 'fk_payment_reservation',
+        'fk_active_order_payment_order', 'fk_active_order_payment_transaction',
+        'fk_daily_usage_menu_item'
      )`,
     [databaseName],
   );
@@ -992,6 +1359,9 @@ async function verifyDatabaseSchema(connection) {
     'fk_active_order_reservation_table',
     'fk_order_batch_order_table',
     'fk_payment_reservation',
+    'fk_active_order_payment_order',
+    'fk_active_order_payment_transaction',
+    'fk_daily_usage_menu_item',
   ].filter(constraint => !existingConstraints.has(constraint));
   if (missingConstraints.length > 0) {
     throw new Error(`Database thiếu ràng buộc ${missingConstraints.join(', ')}; hãy chạy migration trước khi khởi động.`);
@@ -1001,19 +1371,25 @@ async function verifyDatabaseSchema(connection) {
      FROM information_schema.table_constraints
      WHERE constraint_schema = ? AND constraint_type = 'CHECK'
        AND constraint_name IN (
+         'chk_restaurant_table_area', 'chk_restaurant_table_position',
          'chk_reservation_phone', 'chk_reservation_window',
          'chk_reservation_version', 'chk_reservation_lifecycle',
          'chk_kitchen_flags', 'chk_kitchen_version',
-         'chk_payment_reservation_snapshot'
+          'chk_payment_reservation_snapshot', 'chk_payment_service_status',
+          'chk_payment_service_lifecycle', 'chk_menu_item_daily_limit',
+          'chk_daily_usage_quantity'
        )`,
     [databaseName],
   );
   const criticalCheckNames = new Set(criticalChecks.map(check => check.constraintName));
   const requiredCheckNames = [
+    'chk_restaurant_table_area', 'chk_restaurant_table_position',
     'chk_reservation_phone', 'chk_reservation_window',
     'chk_reservation_version', 'chk_reservation_lifecycle',
     'chk_kitchen_flags', 'chk_kitchen_version',
     'chk_payment_reservation_snapshot',
+    'chk_payment_service_status', 'chk_payment_service_lifecycle',
+    'chk_menu_item_daily_limit', 'chk_daily_usage_quantity',
   ];
   const missingChecks = requiredCheckNames.filter(name => !criticalCheckNames.has(name));
   const [seatedIndexes] = await connection.query(
@@ -1026,12 +1402,26 @@ async function verifyDatabaseSchema(connection) {
     [databaseName],
   );
   const seatedIndex = seatedIndexes[0];
+  const [layoutIndexes] = await connection.query(
+    `SELECT non_unique AS nonUnique,
+       GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ',') AS columns
+     FROM information_schema.statistics
+     WHERE table_schema = ? AND table_name = 'restaurant_tables'
+       AND index_name = 'uq_restaurant_table_area_position'
+     GROUP BY non_unique`,
+    [databaseName],
+  );
+  const layoutIndex = layoutIndexes[0];
   if (missingChecks.length > 0 || !seatedIndex
     || Number(seatedIndex.nonUnique) !== 0 || seatedIndex.columns !== 'seated_table_id') {
     throw new Error(
       `Database thiếu constraint phiên bản mới${missingChecks.length ? `: ${missingChecks.join(', ')}` : ''}; `
       + 'hãy chạy npm run db:migrate trước khi khởi động.',
     );
+  }
+  if (!layoutIndex || Number(layoutIndex.nonUnique) !== 0
+    || layoutIndex.columns !== 'area,position_x,position_y') {
+    throw new Error('Database thiếu ràng buộc vị trí bàn; hãy chạy npm run db:migrate trước khi khởi động.');
   }
 }
 
@@ -1077,10 +1467,13 @@ export async function initDatabase({ migrate = autoMigrate } = {}) {
 
       for (const statement of schemaStatements) await migrationConnection.query(statement);
       await ensureEmployeePaymentColumn(migrationConnection);
+      await ensureEarlyPaymentLifecycle(migrationConnection);
       await ensurePaymentItemCategoryColumns(migrationConnection);
       await ensureKitchenQueueColumns(migrationConnection);
       await ensureReservationLinks(migrationConnection);
       await ensureReservationAndOrderIntegrity(migrationConnection);
+      await ensureRestaurantTableLayout(migrationConnection);
+      await ensureDailyMenuInventory(migrationConnection);
 
       await migrationConnection.query(
         'INSERT IGNORE INTO restaurant_settings (id, settings) VALUES (1, ?)',
@@ -1092,6 +1485,23 @@ export async function initDatabase({ migrate = autoMigrate } = {}) {
          WHERE id = 1 AND JSON_UNQUOTE(JSON_EXTRACT(settings, '$.tagline')) = 'Restaurant Order Management'`,
         [defaultSettings.tagline],
       );
+      const legacyDemoSettings = [
+        ['legalName', 'Core Advanced Solutions'],
+        ['tagline', 'Giải pháp vận hành nhà hàng'],
+        ['address', '127 Nguyễn Văn Linh, Quận 7, TP. Hồ Chí Minh'],
+        ['phone', '0900 123 456'],
+        ['email', 'hello@cas.vn'],
+        ['website', 'cas.vn'],
+        ['cashierName', 'Thu ngân CAS'],
+      ];
+      for (const [field, legacyValue] of legacyDemoSettings) {
+        await migrationConnection.query(
+          `UPDATE restaurant_settings
+           SET settings = JSON_SET(settings, '$.${field}', ?)
+           WHERE id = 1 AND JSON_UNQUOTE(JSON_EXTRACT(settings, '$.${field}')) = ?`,
+          [defaultSettings[field], legacyValue],
+        );
+      }
 
       // Bàn mẫu chỉ được tạo một lần; bàn quản trị đã xóa không xuất hiện lại sau khi restart API.
       const tableSeedMigration = '20260714_seed_default_tables_once';
@@ -1102,9 +1512,11 @@ export async function initDatabase({ migrate = autoMigrate } = {}) {
       if (tableSeedRows.length === 0) {
         const [tableCounts] = await migrationConnection.query('SELECT COUNT(*) AS total FROM restaurant_tables');
         if (Number(tableCounts[0]?.total) === 0) {
-          const placeholders = defaultTables.map(() => '(?, ?, ?)').join(', ');
+          const placeholders = defaultTables.map(() => '(?, ?, ?, ?, ?, ?)').join(', ');
           await migrationConnection.query(
-            `INSERT INTO restaurant_tables (id, table_number, seats) VALUES ${placeholders}`,
+            `INSERT INTO restaurant_tables (
+              id, table_number, seats, area, position_x, position_y
+             ) VALUES ${placeholders}`,
             defaultTables.flat(),
           );
         }
@@ -1122,6 +1534,19 @@ export async function initDatabase({ migrate = autoMigrate } = {}) {
             id, employee_code, full_name, role, phone, shift_start, shift_end, active
            ) VALUES ${employeePlaceholders}`,
           defaultEmployees.flat(),
+        );
+      }
+      const legacyDemoEmployees = [
+        ['employee-server-default', 'Nhân viên phục vụ', '0900 111 001', 'Nhân viên phục vụ'],
+        ['employee-cashier-default', 'Thu ngân CAS', '0900 111 002', 'Thu ngân'],
+        ['employee-chef-default', 'Bếp trưởng CAS', '0900 111 003', 'Nhân viên bếp'],
+        ['employee-manager-default', 'Quản lý CAS', '0900 111 004', 'Quản lý'],
+      ];
+      for (const [id, legacyName, legacyPhone, nextName] of legacyDemoEmployees) {
+        await migrationConnection.query(
+          `UPDATE employees SET full_name = ?, phone = ''
+           WHERE id = ? AND full_name = ? AND phone = ?`,
+          [nextName, id, legacyName, legacyPhone],
         );
       }
       await ensureDatabaseIntegrityConstraints(migrationConnection);

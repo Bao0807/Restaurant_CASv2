@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { parseJsonColumn } from './domain.js';
+import { businessDateFor } from './dailyInventory.js';
 
 function validationError(message, field) {
   const error = new Error(message);
@@ -57,6 +58,9 @@ export function normalizeCategory(input, fallbackId) {
 
 /** Chuẩn hóa và giới hạn dữ liệu món trước khi ghi xuống catalog. */
 export function normalizeMenuItem(input, fallbackId) {
+  const dailyLimit = input?.dailyLimit == null || input.dailyLimit === ''
+    ? null
+    : integer(input.dailyLimit, 'dailyLimit', 0, 1_000_000);
   return {
     id: text(input?.id || fallbackId || `dish-${crypto.randomUUID().slice(0, 8)}`, 'id', 64),
     name: text(input?.name, 'name', 255),
@@ -65,6 +69,7 @@ export function normalizeMenuItem(input, fallbackId) {
     image: text(input?.image, 'image', 1000, { optional: true }),
     categoryId: text(input?.categoryId, 'categoryId', 64),
     cookMinutes: integer(input?.cookMinutes ?? 10, 'cookMinutes', 1, 240),
+    dailyLimit,
     available: input?.available !== false,
     isBestseller: input?.isBestseller === true,
     isNew: input?.isNew === true,
@@ -82,6 +87,10 @@ export function mapMenuRow(row) {
     image: row.image || '',
     categoryId: row.categoryId,
     cookMinutes: Number(row.cookMinutes),
+    dailyLimit: row.dailyLimit == null ? null : Number(row.dailyLimit),
+    dailyUsed: Number(row.dailyUsed ?? 0),
+    dailyRemaining: row.dailyRemaining == null ? null : Number(row.dailyRemaining),
+    inventoryDate: row.inventoryDate ?? businessDateFor(),
     available: Boolean(row.available),
     ...(row.isBestseller ? { isBestseller: true } : {}),
     ...(row.isNew ? { isNew: true } : {}),
@@ -91,16 +100,25 @@ export function mapMenuRow(row) {
 }
 
 /** Đọc catalog đầy đủ và chuyển JSON/BOOLEAN MySQL về kiểu dữ liệu API. */
-export async function getCatalog(connection) {
+export async function getCatalog(connection, inventoryDate = businessDateFor()) {
   const [categoryRows] = await connection.query(
     `SELECT id, name, emoji, sort_order AS sortOrder, active
      FROM menu_categories ORDER BY sort_order, name`,
   );
   const [itemRows] = await connection.query(
-    `SELECT id, name, description, price, image, category_id AS categoryId,
-      cook_minutes AS cookMinutes, available, is_bestseller AS isBestseller,
-      is_new AS isNew, sizes_json AS sizes, toppings_json AS toppings
-     FROM menu_items ORDER BY name`,
+    `SELECT item.id, item.name, item.description, item.price, item.image,
+      item.category_id AS categoryId, item.cook_minutes AS cookMinutes,
+      item.daily_limit AS dailyLimit, COALESCE(daily_usage.used_quantity, 0) AS dailyUsed,
+      CASE WHEN item.daily_limit IS NULL THEN NULL
+        ELSE GREATEST(item.daily_limit - COALESCE(daily_usage.used_quantity, 0), 0)
+      END AS dailyRemaining,
+      ? AS inventoryDate, item.available, item.is_bestseller AS isBestseller,
+      item.is_new AS isNew, item.sizes_json AS sizes, item.toppings_json AS toppings
+     FROM menu_items item
+     LEFT JOIN menu_item_daily_usage daily_usage
+       ON daily_usage.menu_item_id = item.id AND daily_usage.business_date = ?
+     ORDER BY item.name`,
+    [inventoryDate, inventoryDate],
   );
   return {
     categories: categoryRows.map(row => ({ ...row, sortOrder: Number(row.sortOrder), active: Boolean(row.active) })),
@@ -128,17 +146,17 @@ export async function saveMenuItem(connection, input, fallbackId) {
   if (!categories[0]) throw validationError('Danh mục món không tồn tại', 'categoryId');
   await connection.query(
     `INSERT INTO menu_items (
-      id, name, description, price, image, category_id, cook_minutes,
+      id, name, description, price, image, category_id, cook_minutes, daily_limit,
       available, is_bestseller, is_new, sizes_json, toppings_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE name = VALUES(name), description = VALUES(description),
       price = VALUES(price), image = VALUES(image), category_id = VALUES(category_id),
-      cook_minutes = VALUES(cook_minutes), available = VALUES(available),
+      cook_minutes = VALUES(cook_minutes), daily_limit = VALUES(daily_limit), available = VALUES(available),
       is_bestseller = VALUES(is_bestseller), is_new = VALUES(is_new),
       sizes_json = VALUES(sizes_json), toppings_json = VALUES(toppings_json)`,
     [
       item.id, item.name, item.description, item.price, item.image, item.categoryId,
-      item.cookMinutes, item.available, item.isBestseller, item.isNew,
+      item.cookMinutes, item.dailyLimit, item.available, item.isBestseller, item.isNew,
       JSON.stringify(item.sizes), JSON.stringify(item.toppings),
     ],
   );
@@ -165,15 +183,28 @@ export async function bootstrapCatalog(connection, categoryInputs, itemInputs) {
  * Thay dữ liệu giá/tùy chọn do client gửi bằng bản catalog đang có trong MySQL.
  * Đây là ranh giới tin cậy giúp order không thể giả giá, size hoặc topping.
  */
-export async function canonicalizeOrderItems(connection, items) {
-  const ids = [...new Set(items.map(item => item.menuItem.id))];
+export async function canonicalizeOrderItems(
+  connection,
+  items,
+  { inventoryDate = businessDateFor(), lock = false } = {},
+) {
+  const ids = [...new Set(items.map(item => item.menuItem.id))].sort();
   const placeholders = ids.map(() => '?').join(', ');
   const [rows] = await connection.query(
-    `SELECT id, name, description, price, image, category_id AS categoryId,
-      cook_minutes AS cookMinutes, available, is_bestseller AS isBestseller,
-      is_new AS isNew, sizes_json AS sizes, toppings_json AS toppings
-     FROM menu_items WHERE id IN (${placeholders})`,
-    ids,
+    `SELECT item.id, item.name, item.description, item.price, item.image,
+      item.category_id AS categoryId, item.cook_minutes AS cookMinutes,
+      item.daily_limit AS dailyLimit, COALESCE(daily_usage.used_quantity, 0) AS dailyUsed,
+      CASE WHEN item.daily_limit IS NULL THEN NULL
+        ELSE GREATEST(item.daily_limit - COALESCE(daily_usage.used_quantity, 0), 0)
+      END AS dailyRemaining,
+      ? AS inventoryDate, item.available, item.is_bestseller AS isBestseller,
+      item.is_new AS isNew, item.sizes_json AS sizes, item.toppings_json AS toppings
+     FROM menu_items item
+     LEFT JOIN menu_item_daily_usage daily_usage
+       ON daily_usage.menu_item_id = item.id AND daily_usage.business_date = ?
+     WHERE item.id IN (${placeholders})
+     ORDER BY item.id${lock ? ' FOR UPDATE' : ''}`,
+    [inventoryDate, inventoryDate, ...ids],
   );
   const catalog = new Map(rows.map(row => [row.id, mapMenuRow(row)]));
   return items.map((item, index) => {

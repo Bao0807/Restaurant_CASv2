@@ -22,12 +22,21 @@ CREATE TABLE IF NOT EXISTS restaurant_tables (
   table_number INT UNSIGNED NOT NULL UNIQUE,
   seats INT UNSIGNED NOT NULL,
   status VARCHAR(20) NOT NULL DEFAULT 'empty',
+  area VARCHAR(80) NOT NULL DEFAULT 'Khu vực chung',
+  position_x INT UNSIGNED NULL,
+  position_y INT UNSIGNED NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT chk_restaurant_table_number CHECK (table_number BETWEEN 1 AND 999),
   CONSTRAINT chk_restaurant_table_seats CHECK (seats BETWEEN 1 AND 100),
   CONSTRAINT chk_restaurant_table_status CHECK (status IN ('empty', 'waiting', 'cooking', 'done')),
-  INDEX idx_restaurant_table_status (status)
+  CONSTRAINT chk_restaurant_table_area CHECK (CHAR_LENGTH(TRIM(area)) BETWEEN 1 AND 80),
+  CONSTRAINT chk_restaurant_table_position CHECK (
+    (position_x IS NULL AND position_y IS NULL)
+    OR (position_x BETWEEN 1 AND 24 AND position_y BETWEEN 1 AND 24)
+  ),
+  INDEX idx_restaurant_table_status (status),
+  CONSTRAINT uq_restaurant_table_area_position UNIQUE (area, position_x, position_y)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS reservations (
@@ -89,6 +98,7 @@ CREATE TABLE IF NOT EXISTS menu_items (
   image VARCHAR(1000) NOT NULL DEFAULT '',
   category_id VARCHAR(64) NOT NULL,
   cook_minutes INT UNSIGNED NOT NULL DEFAULT 10,
+  daily_limit INT UNSIGNED NULL,
   available BOOLEAN NOT NULL DEFAULT TRUE,
   is_bestseller BOOLEAN NOT NULL DEFAULT FALSE,
   is_new BOOLEAN NOT NULL DEFAULT FALSE,
@@ -98,8 +108,21 @@ CREATE TABLE IF NOT EXISTS menu_items (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT fk_menu_item_category FOREIGN KEY (category_id) REFERENCES menu_categories(id),
   CONSTRAINT chk_menu_item_cook_minutes CHECK (cook_minutes BETWEEN 1 AND 240),
+  CONSTRAINT chk_menu_item_daily_limit CHECK (daily_limit IS NULL OR daily_limit <= 1000000),
   INDEX idx_menu_item_category (category_id),
   INDEX idx_menu_item_available (available)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS menu_item_daily_usage (
+  menu_item_id VARCHAR(64) NOT NULL,
+  business_date DATE NOT NULL,
+  used_quantity INT UNSIGNED NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (menu_item_id, business_date),
+  CONSTRAINT fk_daily_usage_menu_item FOREIGN KEY (menu_item_id) REFERENCES menu_items(id) ON DELETE CASCADE,
+  CONSTRAINT chk_daily_usage_quantity CHECK (used_quantity <= 2000000000),
+  INDEX idx_daily_usage_date (business_date, menu_item_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS active_orders (
@@ -134,6 +157,7 @@ CREATE TABLE IF NOT EXISTS order_batches (
   cooking_started_at DATETIME(3) NULL,
   completed_at DATETIME(3) NULL,
   estimated_cook_minutes INT UNSIGNED NOT NULL DEFAULT 10,
+  inventory_date DATE NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT fk_order_batch_order_table FOREIGN KEY (order_id, table_id) REFERENCES active_orders(id, table_id) ON DELETE CASCADE,
@@ -195,6 +219,8 @@ CREATE TABLE IF NOT EXISTS payment_transactions (
   staff_name VARCHAR(120) NULL,
   cashier_name VARCHAR(120) NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'PAID',
+  service_status VARCHAR(32) NOT NULL DEFAULT 'closed',
+  departure_confirmed_at DATETIME(3) NULL,
   paid_at DATETIME(3) NOT NULL,
   raw_payload JSON NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -205,10 +231,27 @@ CREATE TABLE IF NOT EXISTS payment_transactions (
     (reservation_code IS NULL AND customer_name IS NULL AND guest_count IS NULL)
     OR (reservation_code IS NOT NULL AND customer_name IS NOT NULL AND guest_count IS NOT NULL)
   ),
+  CONSTRAINT chk_payment_service_status CHECK (service_status IN ('awaiting_departure', 'closed')),
+  CONSTRAINT chk_payment_service_lifecycle CHECK (
+    service_status = 'closed' OR departure_confirmed_at IS NULL
+  ),
   INDEX idx_paid_at (paid_at),
   INDEX idx_table_id (table_id),
   INDEX idx_payment_staff (staff_id, paid_at),
-  INDEX idx_payment_reservation (reservation_id, paid_at)
+  INDEX idx_payment_reservation (reservation_id, paid_at),
+  INDEX idx_payment_service (service_status, table_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS active_order_payments (
+  order_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+  transaction_id BIGINT UNSIGNED NOT NULL UNIQUE,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_active_order_payment_order
+    FOREIGN KEY (order_id) REFERENCES active_orders(id)
+    ON DELETE CASCADE,
+  CONSTRAINT fk_active_order_payment_transaction
+    FOREIGN KEY (transaction_id) REFERENCES payment_transactions(id)
+    ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS payment_items (
@@ -236,15 +279,15 @@ VALUES (
   1,
   JSON_OBJECT(
     'restaurantName', 'Nhà hàng CAS',
-    'legalName', 'Core Advanced Solutions',
-    'tagline', 'Giải pháp vận hành nhà hàng',
-    'address', '127 Nguyễn Văn Linh, Quận 7, TP. Hồ Chí Minh',
-    'phone', '0900 123 456',
-    'email', 'hello@cas.vn',
-    'website', 'cas.vn',
+    'legalName', 'CAS Restaurant',
+    'tagline', 'Phục vụ tận tâm',
+    'address', 'Chưa cập nhật địa chỉ',
+    'phone', 'Chưa cập nhật',
+    'email', 'Chưa cập nhật',
+    'website', 'Chưa cập nhật',
     'defaultArea', 'Sảnh chính',
     'staffName', 'Nhân viên phục vụ',
-    'cashierName', 'Thu ngân CAS',
+    'cashierName', 'Thu ngân',
     'customerName', 'Khách lẻ',
     'guestCount', 2,
     'vatRate', 0.1,
@@ -256,17 +299,28 @@ VALUES (
   )
 );
 
-INSERT IGNORE INTO restaurant_tables (id, table_number, seats) VALUES
-  ('t1', 1, 4), ('t2', 2, 2), ('t3', 3, 6), ('t4', 4, 4),
-  ('t5', 5, 4), ('t6', 6, 8), ('t7', 7, 4), ('t8', 8, 2),
-  ('t9', 9, 6), ('t10', 10, 4), ('t11', 11, 8), ('t12', 12, 4);
+INSERT IGNORE INTO restaurant_tables (
+  id, table_number, seats, area, position_x, position_y
+) VALUES
+  ('t1', 1, 4, 'Khu vực trong nhà', 1, 1),
+  ('t2', 2, 2, 'Khu vực trong nhà', 2, 1),
+  ('t3', 3, 6, 'Khu vực trong nhà', 1, 2),
+  ('t4', 4, 4, 'Khu vực trong nhà', 2, 2),
+  ('t5', 5, 4, 'Khu vực cửa sổ', 1, 1),
+  ('t6', 6, 8, 'Khu vực cửa sổ', 2, 1),
+  ('t7', 7, 4, 'Khu vực cửa sổ', 1, 2),
+  ('t8', 8, 2, 'Khu vực cửa sổ', 2, 2),
+  ('t9', 9, 6, 'Sân ngoài trời', 1, 1),
+  ('t10', 10, 4, 'Sân ngoài trời', 2, 1),
+  ('t11', 11, 8, 'Sân ngoài trời', 1, 2),
+  ('t12', 12, 4, 'Sân ngoài trời', 2, 2);
 
 INSERT IGNORE INTO kitchen_queue_state (id) VALUES (1);
 
 INSERT IGNORE INTO employees (
   id, employee_code, full_name, role, phone, shift_start, shift_end, active
 ) VALUES
-  ('employee-server-default', 'NV001', 'Nhân viên phục vụ', 'server', '0900 111 001', '08:00', '16:00', TRUE),
-  ('employee-cashier-default', 'NV002', 'Thu ngân CAS', 'cashier', '0900 111 002', '08:00', '16:00', TRUE),
-  ('employee-chef-default', 'NV003', 'Bếp trưởng CAS', 'chef', '0900 111 003', '09:00', '17:00', TRUE),
-  ('employee-manager-default', 'NV004', 'Quản lý CAS', 'manager', '0900 111 004', '09:00', '18:00', TRUE);
+  ('employee-server-default', 'NV001', 'Nhân viên phục vụ', 'server', '', '08:00', '16:00', TRUE),
+  ('employee-cashier-default', 'NV002', 'Thu ngân', 'cashier', '', '08:00', '16:00', TRUE),
+  ('employee-chef-default', 'NV003', 'Nhân viên bếp', 'chef', '', '09:00', '17:00', TRUE),
+  ('employee-manager-default', 'NV004', 'Quản lý', 'manager', '', '09:00', '18:00', TRUE);

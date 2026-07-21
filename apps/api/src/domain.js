@@ -119,7 +119,7 @@ export function sanitizeSettings(input, fallback) {
 /** Kiểm tra cấu trúc order và đặt giới hạn an toàn trước khi truy vấn catalog. */
 export function validateOrderItems(input, { maxItems = 100 } = {}) {
   if (!Array.isArray(input) || input.length === 0 || input.length > maxItems) {
-    throw invalid(`Order phải có từ 1 đến ${maxItems} dòng món`, 'items');
+    throw invalid(`Phiếu gọi món phải có từ 1 đến ${maxItems} dòng`, 'items');
   }
 
   return input.map((item, index) => {
@@ -174,7 +174,7 @@ export function calculateTotals(items, settings) {
       + item.selectedToppings.reduce((toppingSum, topping) => toppingSum + topping.price, 0);
     const lineTotal = unitPrice * item.quantity;
     if (!Number.isSafeInteger(lineTotal) || sum + lineTotal > MAX_MONEY) {
-      throw invalid('Tổng tiền order vượt giới hạn', 'items');
+      throw invalid('Tổng tiền phiếu gọi món vượt giới hạn', 'items');
     }
     return sum + lineTotal;
   }, 0);

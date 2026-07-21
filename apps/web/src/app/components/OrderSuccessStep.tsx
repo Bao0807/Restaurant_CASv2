@@ -39,7 +39,7 @@ export function OrderSuccessStep({ orderNumber, table, cart, batch, isEditing, o
           <CheckCircle size={40} color="#10B981" fill="#10B981" />
         </div>
         <h2 style={{ margin: '0 0 6px', color: '#111827' }}>
-          {isEditing ? 'Phiếu chờ đã được cập nhật!' : isAddition ? 'Lượt gọi thêm đã vào hàng đợi!' : 'Phiếu đã gửi bếp!'}
+          {isEditing ? 'Phiếu chờ đã được cập nhật!' : isAddition ? 'Lượt gọi thêm đã gửi bếp!' : 'Phiếu đã gửi bếp!'}
         </h2>
         <p style={{ margin: 0, color: '#6B7280', fontSize: '14px' }}>
           Phiếu #{orderNumber} · Lượt {batch?.batchNumber ?? 1} · Bàn {table.number}
@@ -120,23 +120,9 @@ export function OrderSuccessStep({ orderNumber, table, cart, batch, isEditing, o
               <span style={{ fontWeight: 800, fontSize: '18px', color: '#111827' }}>{formatVND(total)}</span>
             </div>
             <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6, color: '#1D4ED8', fontSize: 12, fontWeight: 700 }}>
-              <Clock3 size={14} /> ETA lượt này: khoảng {batch?.estimatedCookMinutes ?? estimatedCookMinutes} phút
+              <Clock3 size={14} /> Dự kiến hoàn tất sau khoảng {batch?.estimatedCookMinutes ?? estimatedCookMinutes} phút
             </div>
           </div>
-        </div>
-
-        <div style={{
-          marginTop: 14, background: '#FFFBEB', borderRadius: 14, padding: '12px 16px',
-          display: 'flex', gap: 10, alignItems: 'flex-start',
-          border: '1px solid #FDE68A',
-        }}>
-          <span style={{ fontSize: 18 }}>🍳</span>
-          <p style={{ margin: 0, fontSize: '13px', color: '#92400E', lineHeight: 1.5 }}>
-            {isEditing
-              ? 'Phiếu giữ nguyên vị trí FIFO và thời điểm vào hàng chờ. '
-              : isAddition ? 'Phiếu gọi thêm được xếp FIFO như một lượt độc lập. ' : 'Phiếu gọi món đã được gửi đến bếp. '}
-            Khi thanh toán, toàn bộ các lượt của bàn sẽ được gộp vào một hóa đơn cuối.
-          </p>
         </div>
       </div>
 

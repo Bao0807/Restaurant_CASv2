@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import mysql from 'mysql2/promise';
+import { businessDateFor } from '../src/dailyInventory.js';
 
 const databaseName = process.env.DB_NAME || 'restaurant_casv2';
 if (!/^[a-zA-Z0-9_]+$/.test(databaseName)) {
@@ -80,8 +81,9 @@ function normalizeCheckClause(value) {
 async function auditStructure() {
   const requiredTables = [
     'schema_migrations', 'restaurant_settings', 'restaurant_tables', 'reservations',
-    'menu_categories', 'menu_items', 'active_orders', 'order_batches',
-    'kitchen_queue_state', 'employees', 'payment_transactions', 'payment_items',
+    'menu_categories', 'menu_items', 'menu_item_daily_usage', 'active_orders', 'order_batches',
+    'kitchen_queue_state', 'employees', 'payment_transactions', 'active_order_payments',
+    'payment_items',
   ];
   const [tableRows] = await connection.query(
     `SELECT table_name AS tableName
@@ -105,11 +107,20 @@ async function auditStructure() {
   );
   const columns = new Map(columnRows.map(row => [`${row.tableName}.${row.columnName}`, row]));
   const requiredColumnDefinitions = [
+    { table: 'restaurant_tables', column: 'area', type: 'varchar(80)', nullable: 'NO' },
+    { table: 'restaurant_tables', column: 'position_x', type: 'int unsigned', nullable: 'YES' },
+    { table: 'restaurant_tables', column: 'position_y', type: 'int unsigned', nullable: 'YES' },
     { table: 'reservations', column: 'phone_normalized', type: 'varchar(15)', nullable: 'NO' },
     { table: 'reservations', column: 'ends_at', type: 'datetime(3)', nullable: 'NO' },
     { table: 'reservations', column: 'version', type: 'int unsigned', nullable: 'NO', defaultValue: 1 },
     { table: 'reservations', column: 'seated_table_id', type: 'varchar(32)', nullable: 'YES' },
     { table: 'kitchen_queue_state', column: 'version', type: 'bigint unsigned', nullable: 'NO', defaultValue: 1 },
+    { table: 'menu_items', column: 'daily_limit', type: 'int unsigned', nullable: 'YES' },
+    { table: 'menu_item_daily_usage', column: 'business_date', type: 'date', nullable: 'NO' },
+    { table: 'menu_item_daily_usage', column: 'used_quantity', type: 'int unsigned', nullable: 'NO', defaultValue: 0 },
+    { table: 'order_batches', column: 'inventory_date', type: 'date', nullable: 'NO' },
+    { table: 'payment_transactions', column: 'service_status', type: 'varchar(32)', nullable: 'NO' },
+    { table: 'payment_transactions', column: 'departure_confirmed_at', type: 'datetime(3)', nullable: 'YES' },
   ];
   const invalidColumns = [];
   for (const expected of requiredColumnDefinitions) {
@@ -159,6 +170,12 @@ async function auditStructure() {
     { table: 'restaurant_tables', columns: ['id'], unique: true, name: 'PRIMARY' },
     { table: 'restaurant_tables', columns: ['table_number'], unique: true },
     { table: 'restaurant_tables', columns: ['status'], name: 'idx_restaurant_table_status' },
+    {
+      table: 'restaurant_tables',
+      columns: ['area', 'position_x', 'position_y'],
+      unique: true,
+      name: 'uq_restaurant_table_area_position',
+    },
     { table: 'reservations', columns: ['reservation_code'], unique: true },
     { table: 'reservations', columns: ['id', 'table_id'], unique: true, name: 'uq_reservation_id_table' },
     { table: 'reservations', columns: ['seated_table_id'], unique: true, name: 'uq_reservation_seated_table' },
@@ -171,6 +188,8 @@ async function auditStructure() {
     { table: 'active_orders', columns: ['queued_at', 'id'], name: 'idx_active_order_queue' },
     { table: 'menu_items', columns: ['category_id'], name: 'idx_menu_item_category' },
     { table: 'menu_items', columns: ['available'], name: 'idx_menu_item_available' },
+    { table: 'menu_item_daily_usage', columns: ['menu_item_id', 'business_date'], unique: true, name: 'PRIMARY' },
+    { table: 'menu_item_daily_usage', columns: ['business_date', 'menu_item_id'], name: 'idx_daily_usage_date' },
     { table: 'order_batches', columns: ['order_id', 'batch_number'], unique: true, name: 'uq_order_batch_number' },
     { table: 'order_batches', columns: ['status', 'queued_at', 'id'], name: 'idx_order_batch_queue' },
     { table: 'order_batches', columns: ['table_id', 'status'], name: 'idx_order_batch_table' },
@@ -181,6 +200,9 @@ async function auditStructure() {
     { table: 'payment_transactions', columns: ['table_id'], name: 'idx_table_id' },
     { table: 'payment_transactions', columns: ['staff_id', 'paid_at'], name: 'idx_payment_staff' },
     { table: 'payment_transactions', columns: ['reservation_id', 'paid_at'], name: 'idx_payment_reservation' },
+    { table: 'payment_transactions', columns: ['service_status', 'table_id'], name: 'idx_payment_service' },
+    { table: 'active_order_payments', columns: ['order_id'], unique: true, name: 'PRIMARY' },
+    { table: 'active_order_payments', columns: ['transaction_id'], unique: true },
     // MySQL có thể dùng luôn index tự tạo cho foreign key, tên index không ảnh hưởng hiệu lực.
     { table: 'payment_items', columns: ['transaction_id'] },
     { table: 'payment_items', columns: ['category_id'], name: 'idx_payment_item_category' },
@@ -236,11 +258,14 @@ async function auditStructure() {
   const requiredForeignKeys = [
     { table: 'reservations', name: 'fk_reservation_table', columns: ['table_id'], ref: 'restaurant_tables', refColumns: ['id'], onDelete: 'SET NULL' },
     { table: 'menu_items', name: 'fk_menu_item_category', columns: ['category_id'], ref: 'menu_categories', refColumns: ['id'], onDelete: 'NO ACTION' },
+    { table: 'menu_item_daily_usage', name: 'fk_daily_usage_menu_item', columns: ['menu_item_id'], ref: 'menu_items', refColumns: ['id'], onDelete: 'CASCADE' },
     { table: 'active_orders', name: 'fk_active_order_table', columns: ['table_id'], ref: 'restaurant_tables', refColumns: ['id'], onDelete: 'CASCADE' },
     { table: 'active_orders', name: 'fk_active_order_reservation_table', columns: ['reservation_id', 'table_id'], ref: 'reservations', refColumns: ['id', 'table_id'], onDelete: 'NO ACTION' },
     { table: 'order_batches', name: 'fk_order_batch_order_table', columns: ['order_id', 'table_id'], ref: 'active_orders', refColumns: ['id', 'table_id'], onDelete: 'CASCADE' },
     { table: 'payment_transactions', name: 'fk_payment_staff', columns: ['staff_id'], ref: 'employees', refColumns: ['id'], onDelete: 'SET NULL' },
     { table: 'payment_transactions', name: 'fk_payment_reservation', columns: ['reservation_id'], ref: 'reservations', refColumns: ['id'], onDelete: 'SET NULL' },
+    { table: 'active_order_payments', name: 'fk_active_order_payment_order', columns: ['order_id'], ref: 'active_orders', refColumns: ['id'], onDelete: 'CASCADE' },
+    { table: 'active_order_payments', name: 'fk_active_order_payment_transaction', columns: ['transaction_id'], ref: 'payment_transactions', refColumns: ['id'], onDelete: 'RESTRICT' },
     { table: 'payment_items', name: 'fk_payment_items_transaction', columns: ['transaction_id'], ref: 'payment_transactions', refColumns: ['id'], onDelete: 'CASCADE' },
   ];
   const missingForeignKeys = [];
@@ -269,6 +294,14 @@ async function auditStructure() {
       table: 'restaurant_tables', name: 'chk_restaurant_table_status',
       tokens: ['status', "'empty'", "'waiting'", "'cooking'", "'done'"], forbidden: ["'reserved'"],
     },
+    {
+      table: 'restaurant_tables', name: 'chk_restaurant_table_area',
+      tokens: ['char_length', 'trim(area)', 'between1and80'],
+    },
+    {
+      table: 'restaurant_tables', name: 'chk_restaurant_table_position',
+      tokens: ['position_x', 'position_y', 'isnull', 'between1and24'],
+    },
     { table: 'reservations', name: 'chk_reservation_phone', tokens: ['regexp_like', 'phone_normalized', '^[0-9]{8,15}$'] },
     { table: 'reservations', name: 'chk_reservation_table_number', tokens: ['table_number', 'between1and999'] },
     { table: 'reservations', name: 'chk_reservation_party_size', tokens: ['party_size', 'between1and100'] },
@@ -284,6 +317,8 @@ async function auditStructure() {
       tokens: ['status', 'seated_at', 'closed_at', "'booked'", "'seated'", "'cancelled'", "'no_show'", "'completed'"],
     },
     { table: 'menu_items', name: 'chk_menu_item_cook_minutes', tokens: ['cook_minutes', 'between1and240'] },
+    { table: 'menu_items', name: 'chk_menu_item_daily_limit', tokens: ['daily_limit', 'isnull', '1000000'] },
+    { table: 'menu_item_daily_usage', name: 'chk_daily_usage_quantity', tokens: ['used_quantity', '2000000000'] },
     { table: 'order_batches', name: 'chk_order_batch_status', tokens: ['status', "'waiting'", "'cooking'", "'done'"] },
     { table: 'order_batches', name: 'chk_order_batch_eta', tokens: ['estimated_cook_minutes', 'between1and23760'] },
     { table: 'kitchen_queue_state', name: 'chk_kitchen_singleton', tokens: ['id=1'] },
@@ -296,6 +331,14 @@ async function auditStructure() {
     {
       table: 'payment_transactions', name: 'chk_payment_reservation_snapshot',
       tokens: ['reservation_code', 'customer_name', 'guest_count'],
+    },
+    {
+      table: 'payment_transactions', name: 'chk_payment_service_status',
+      tokens: ['service_status', "'awaiting_departure'", "'closed'"],
+    },
+    {
+      table: 'payment_transactions', name: 'chk_payment_service_lifecycle',
+      tokens: ['service_status', "'closed'", 'departure_confirmed_at', 'isnull'],
     },
   ];
   const [checkRows] = await connection.query(
@@ -333,6 +376,27 @@ async function auditStructure() {
 
 async function auditOrdersAndTables(existingTables) {
   if (!['restaurant_tables', 'active_orders', 'order_batches'].every(table => existingTables.has(table))) return;
+
+  await checkViolationRows(
+    'Khu vực và tọa độ sơ đồ bàn hợp lệ',
+    `SELECT id AS tableId, table_number AS tableNumber, area,
+       position_x AS positionX, position_y AS positionY
+     FROM restaurant_tables
+     WHERE area IS NULL OR CHAR_LENGTH(TRIM(area)) NOT BETWEEN 1 AND 80
+        OR (position_x IS NULL AND position_y IS NOT NULL)
+        OR (position_x IS NOT NULL AND position_y IS NULL)
+        OR (position_x IS NOT NULL AND position_x NOT BETWEEN 1 AND 24)
+        OR (position_y IS NOT NULL AND position_y NOT BETWEEN 1 AND 24)`,
+  );
+
+  await checkViolationRows(
+    'Không có hai bàn trùng vị trí trong cùng khu vực',
+    `SELECT area, position_x AS positionX, position_y AS positionY, COUNT(*) AS tableCount
+     FROM restaurant_tables
+     WHERE position_x IS NOT NULL AND position_y IS NOT NULL
+     GROUP BY area, position_x, position_y
+     HAVING COUNT(*) > 1`,
+  );
 
   await checkViolationRows(
     'Batch không mồ côi và luôn cùng bàn với active order',
@@ -416,6 +480,52 @@ async function auditOrdersAndTables(existingTables) {
      FROM order_batches w
      INNER JOIN order_batches c ON c.status = 'cooking' AND w.queued_at < c.queued_at
      WHERE w.status = 'waiting'`,
+  );
+}
+
+async function auditDailyMenuInventory(existingTables) {
+  if (!['menu_items', 'menu_item_daily_usage', 'order_batches'].every(table => existingTables.has(table))) return;
+  const currentBusinessDate = businessDateFor();
+
+  await checkViolationRows(
+    'Hạn mức và ledger số lượng món hợp lệ',
+    `SELECT item.id AS menuItemId, item.daily_limit AS dailyLimit,
+       daily_usage.business_date AS businessDate, daily_usage.used_quantity AS usedQuantity
+     FROM menu_items item
+     LEFT JOIN menu_item_daily_usage daily_usage ON daily_usage.menu_item_id = item.id
+     WHERE (item.daily_limit IS NOT NULL AND item.daily_limit > 1000000)
+        OR daily_usage.used_quantity > 2000000000
+        OR daily_usage.business_date > ?`,
+    { params: [currentBusinessDate] },
+  );
+
+  await checkViolationRows(
+    'Phiếu bếp lưu ngày tồn kho hợp lệ',
+    `SELECT id AS batchId, table_id AS tableId, inventory_date AS inventoryDate
+     FROM order_batches
+     WHERE inventory_date IS NULL OR inventory_date > ?`,
+    { params: [currentBusinessDate] },
+  );
+
+  await checkViolationRows(
+    'Ledger bao phủ số phần của mọi active batch',
+    `SELECT extracted.menu_item_id AS menuItemId, batch.inventory_date AS inventoryDate,
+       SUM(extracted.quantity) AS activeQuantity,
+       COALESCE(daily_usage.used_quantity, 0) AS ledgerQuantity
+     FROM order_batches batch
+     INNER JOIN JSON_TABLE(
+       batch.items,
+       '$[*]' COLUMNS (
+         menu_item_id VARCHAR(64) PATH '$.menuItem.id' NULL ON ERROR,
+         quantity INT PATH '$.quantity' NULL ON ERROR
+       )
+     ) extracted
+     LEFT JOIN menu_item_daily_usage daily_usage
+       ON daily_usage.menu_item_id = extracted.menu_item_id COLLATE utf8mb4_unicode_ci
+      AND daily_usage.business_date = batch.inventory_date
+     WHERE extracted.menu_item_id IS NOT NULL AND extracted.quantity > 0
+     GROUP BY extracted.menu_item_id, batch.inventory_date, daily_usage.used_quantity
+     HAVING COALESCE(daily_usage.used_quantity, 0) < SUM(extracted.quantity)`,
   );
 }
 
@@ -527,7 +637,7 @@ async function auditKitchen(existingTables) {
 
   if (existingTables.has('order_batches')) {
     await checkViolationRows(
-      'Số phiếu đang nấu vượt cấu hình song song',
+      'Số phiếu đang nấu không vượt cấu hình song song',
       `SELECT state.concurrency, COUNT(batch.id) AS cookingCount
        FROM kitchen_queue_state state
        LEFT JOIN order_batches batch ON batch.status = 'cooking'
@@ -570,6 +680,39 @@ async function auditPayments(existingTables) {
      FROM payment_items
      WHERE quantity < 1 OR price < 0 OR name = ''`,
   );
+
+  await checkViolationRows(
+    'Vòng đời phục vụ của hóa đơn hợp lệ',
+    `SELECT id AS paymentId, invoice_code AS invoiceCode, table_id AS tableId,
+       service_status AS serviceStatus, departure_confirmed_at AS departureConfirmedAt
+     FROM payment_transactions
+     WHERE service_status NOT IN ('awaiting_departure', 'closed')
+        OR (service_status = 'awaiting_departure' AND departure_confirmed_at IS NOT NULL)`,
+  );
+
+  if (existingTables.has('active_order_payments') && existingTables.has('active_orders')) {
+    await checkViolationRows(
+      'Thanh toán sớm liên kết đúng một active order cùng bàn',
+      `SELECT link.order_id AS orderId, link.transaction_id AS paymentId,
+         activeOrder.table_id AS orderTableId, payment.table_id AS paymentTableId,
+         payment.service_status AS serviceStatus
+       FROM active_order_payments link
+       LEFT JOIN active_orders activeOrder ON activeOrder.id = link.order_id
+       LEFT JOIN payment_transactions payment ON payment.id = link.transaction_id
+       WHERE activeOrder.id IS NULL OR payment.id IS NULL
+          OR activeOrder.table_id <> payment.table_id
+          OR payment.service_status <> 'awaiting_departure'`,
+    );
+
+    await checkViolationRows(
+      'Mọi hóa đơn chờ khách rời còn liên kết active order',
+      `SELECT payment.id AS paymentId, payment.invoice_code AS invoiceCode,
+         payment.table_id AS tableId
+       FROM payment_transactions payment
+       LEFT JOIN active_order_payments link ON link.transaction_id = payment.id
+       WHERE payment.service_status = 'awaiting_departure' AND link.order_id IS NULL`,
+    );
+  }
 
   if (existingTables.has('reservations')) {
     await checkViolationRows(
@@ -637,6 +780,7 @@ async function run() {
   const existingTables = await auditStructure();
   await auditSingletonSettings(existingTables);
   await auditOrdersAndTables(existingTables);
+  await auditDailyMenuInventory(existingTables);
   await auditReservations(existingTables);
   await auditKitchen(existingTables);
   await auditPayments(existingTables);

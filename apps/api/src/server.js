@@ -19,8 +19,20 @@ import {
   saveCategory,
   saveMenuItem,
 } from './catalog.js';
+import {
+  businessDateFor,
+  getDailyMenuAvailability,
+  releaseDailyInventory,
+  replaceDailyInventory,
+  reserveDailyInventory,
+} from './dailyInventory.js';
 import { isKitchenOrderStale, lockKitchenQueue, processKitchenQueue, promoteKitchenQueue, syncTableStatuses } from './kitchenQueue.js';
-import { canCancelOrder, canSettleOrder } from './orderPolicy.js';
+import {
+  canCancelOrder,
+  canPayOrder,
+  isOrderComplete,
+  paymentRequiresDepartureConfirmation,
+} from './orderPolicy.js';
 import { canTransitionReservation, normalizeReservation, RESERVATION_STATUSES } from './reservation.js';
 
 const app = express();
@@ -88,6 +100,70 @@ function boundedInteger(value, field, min, max) {
     throw error;
   }
   return normalized;
+}
+
+const DEFAULT_TABLE_AREA = 'Khu vực chung';
+
+function normalizeTableArea(value, fallback = DEFAULT_TABLE_AREA) {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'string') {
+    const error = httpError(400, 'VALIDATION_ERROR', 'Khu vực bàn không hợp lệ.');
+    error.field = 'area';
+    throw error;
+  }
+  const normalized = value.trim().replace(/\s+/g, ' ');
+  if (!normalized || normalized.length > 80) {
+    const error = httpError(400, 'VALIDATION_ERROR', 'Tên khu vực cần có từ 1 đến 80 ký tự.');
+    error.field = 'area';
+    throw error;
+  }
+  return normalized;
+}
+
+function normalizeTablePosition(value, field) {
+  if (value === null) return null;
+  if (value === '' || typeof value === 'boolean') {
+    const error = httpError(400, 'VALIDATION_ERROR', `${field} không hợp lệ.`);
+    error.field = field;
+    throw error;
+  }
+  return boundedInteger(value, field, 1, 24);
+}
+
+/** Chuẩn hóa vị trí bàn và buộc X/Y cùng có giá trị hoặc cùng để trống. */
+function normalizeTableLayout(table, current = {}) {
+  const hasPositionX = Object.prototype.hasOwnProperty.call(table ?? {}, 'positionX');
+  const hasPositionY = Object.prototype.hasOwnProperty.call(table ?? {}, 'positionY');
+  const positionX = hasPositionX
+    ? normalizeTablePosition(table.positionX, 'positionX')
+    : (current.positionX ?? null);
+  const positionY = hasPositionY
+    ? normalizeTablePosition(table.positionY, 'positionY')
+    : (current.positionY ?? null);
+  if ((positionX === null) !== (positionY === null)) {
+    const error = httpError(400, 'VALIDATION_ERROR', 'Vị trí bàn cần có đủ cả tọa độ ngang và dọc.');
+    error.field = hasPositionX ? 'positionY' : 'positionX';
+    throw error;
+  }
+  return {
+    area: normalizeTableArea(table?.area, current.area ?? DEFAULT_TABLE_AREA),
+    positionX,
+    positionY,
+  };
+}
+
+function normalizeTableWriteError(error) {
+  if (
+    error?.code === 'ER_DUP_ENTRY'
+    && /uq_restaurant_table_area_position/i.test(`${error.message ?? ''} ${error.sqlMessage ?? ''}`)
+  ) {
+    return httpError(
+      409,
+      'TABLE_POSITION_OCCUPIED',
+      'Vị trí này đã có bàn khác trong cùng khu vực. Hãy chọn một ô trống.',
+    );
+  }
+  return error;
 }
 
 function booleanValue(value, field) {
@@ -178,7 +254,7 @@ function requireDatabase(_req, res, next) {
   if (!dbReady) {
     res.status(503).json({
       error: 'DATABASE_UNAVAILABLE',
-      message: 'MySQL chưa sẵn sàng. Vui lòng thử lại sau.',
+      message: 'Dữ liệu tạm thời chưa sẵn sàng. Vui lòng thử lại sau.',
     });
     return;
   }
@@ -187,6 +263,7 @@ function requireDatabase(_req, res, next) {
 
 function paymentSelect(whereClause) {
   return `SELECT
+    id AS databaseId,
     invoice_code AS id,
     invoice_code AS invoiceCode,
     transaction_code AS transactionCode,
@@ -206,8 +283,16 @@ function paymentSelect(whereClause) {
     staff_id AS employeeId,
     staff_name AS staffName,
     cashier_name AS cashierName,
+    service_status AS serviceStatus,
+    departure_confirmed_at AS departureConfirmedAt,
     paid_at AS paidAt
   FROM payment_transactions ${whereClause}`;
+}
+
+/** Giữ response thanh toán nhất quán cả khi client retry sau timeout. */
+function paymentLifecycle(payment) {
+  const requiresDepartureConfirmation = payment?.serviceStatus === 'awaiting_departure';
+  return { requiresDepartureConfirmation, orderClosed: !requiresDepartureConfirmation };
 }
 
 function employeeSelect(whereClause = '') {
@@ -317,7 +402,7 @@ app.use((_req, res, next) => {
 app.use(cors({
   origin(origin, callback) {
     if (isAllowedOrigin(origin)) return callback(null, true);
-    return callback(httpError(403, 'ORIGIN_NOT_ALLOWED', 'Origin không được phép.'));
+    return callback(httpError(403, 'ORIGIN_NOT_ALLOWED', 'Địa chỉ truy cập này chưa được cho phép.'));
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
@@ -673,7 +758,7 @@ app.patch('/api/reservations/:reservationId/status', requireDatabase, asyncRoute
         'SELECT id FROM active_orders WHERE table_id = ? FOR UPDATE',
         [current.tableId],
       );
-      if (orders[0]) throw httpError(409, 'TABLE_HAS_ORDER', 'Bàn đang có order nên chưa thể check-in lịch này.');
+      if (orders[0]) throw httpError(409, 'TABLE_HAS_ORDER', 'Bàn đang phục vụ khách khác nên chưa thể nhận lịch này.');
     }
     if (nextStatus === 'no_show' && serverNow.getTime() < new Date(current.reservedAt).getTime() + 15 * 60_000) {
       throw httpError(409, 'RESERVATION_NO_SHOW_TOO_EARLY', 'Chỉ đánh dấu vắng sau giờ hẹn 15 phút.');
@@ -684,7 +769,7 @@ app.patch('/api/reservations/:reservationId/status', requireDatabase, asyncRoute
         [current.tableId],
       );
       if (orders[0]) {
-        throw httpError(409, 'RESERVATION_HAS_ORDER', 'Hãy thanh toán order trước khi kết thúc lịch đặt bàn.');
+        throw httpError(409, 'RESERVATION_HAS_ORDER', 'Hãy hoàn tất lượt phục vụ của bàn trước khi kết thúc lịch đặt bàn.');
       }
     }
 
@@ -722,17 +807,27 @@ app.get('/api/operations', requireDatabase, asyncRoute(async (_req, res) => {
         t.table_number AS number,
         t.seats,
         t.status,
+        t.area,
+        t.position_x AS positionX,
+        t.position_y AS positionY,
         o.id AS orderNumber,
-        o.items
+        o.items,
+        aop.transaction_id AS paidTransactionId,
+        pt.invoice_code AS paymentId,
+        pt.paid_at AS paidAt,
+        pt.total AS paidTotal
       FROM restaurant_tables t
       LEFT JOIN active_orders o ON o.table_id = t.id
+      LEFT JOIN active_order_payments aop ON aop.order_id = o.id
+      LEFT JOIN payment_transactions pt ON pt.id = aop.transaction_id
       ORDER BY t.table_number`,
     );
     const [batchRows] = await connection.query(
       `SELECT id AS batchId, order_id AS orderId, table_id AS tableId,
         batch_number AS batchNumber, items, status, is_addition AS isAddition,
         queued_at AS queuedAt, cooking_started_at AS cookingStartedAt,
-        completed_at AS completedAt, estimated_cook_minutes AS estimatedCookMinutes
+        completed_at AS completedAt, estimated_cook_minutes AS estimatedCookMinutes,
+        DATE_FORMAT(inventory_date, '%Y-%m-%d') AS inventoryDate
        FROM order_batches
        ORDER BY queued_at, id`,
     );
@@ -760,8 +855,9 @@ app.get('/api/operations', requireDatabase, asyncRoute(async (_req, res) => {
                AND reserved_at < DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 90 DAY))
            )
        ) ranked
-       WHERE rowNumber = 1`,
+      WHERE rowNumber = 1`,
     );
+    const menuAvailability = await getDailyMenuAvailability(connection);
     await connection.commit();
 
     const staleAfterMinutes = Number(kitchenRows[0]?.staleAfterMinutes) || kitchenStaleMinutes;
@@ -825,6 +921,7 @@ app.get('/api/operations', requireDatabase, asyncRoute(async (_req, res) => {
             items: parseJsonColumn(batch.items, []),
             queuedAt: new Date(batch.queuedAt).toISOString(),
             estimatedCookMinutes: Number(batch.estimatedCookMinutes),
+            inventoryDate: batch.inventoryDate,
           }));
       }
       const timerBatch = cookingBatches[0] ?? waitingBatches[0];
@@ -843,6 +940,9 @@ app.get('/api/operations', requireDatabase, asyncRoute(async (_req, res) => {
         id: row.id,
         number: Number(row.number),
         seats: Number(row.seats),
+        area: row.area,
+        positionX: row.positionX == null ? null : Number(row.positionX),
+        positionY: row.positionY == null ? null : Number(row.positionY),
         status: reservationHoldsTable ? 'reserved' : row.status === 'reserved' ? 'empty' : row.status,
         ...(nextReservationRow ? {
           nextReservation: {
@@ -856,6 +956,10 @@ app.get('/api/operations', requireDatabase, asyncRoute(async (_req, res) => {
           },
         } : {}),
         ...(row.orderNumber ? { orderNumber: Number(row.orderNumber) } : {}),
+        isPaid: Boolean(row.paidTransactionId),
+        ...(row.paymentId ? { paymentId: row.paymentId } : {}),
+        ...(row.paidAt ? { paidAt: new Date(row.paidAt).toISOString() } : {}),
+        ...(row.paidTotal != null ? { paidTotal: Number(row.paidTotal) } : {}),
         ...(timerBatch?.queuedAt ? { queuedAt: new Date(timerBatch.queuedAt).toISOString() } : {}),
         ...(timerBatch?.cookingStartedAt ? { cookingStartedAt: new Date(timerBatch.cookingStartedAt).toISOString() } : {}),
         ...(timerBatch?.estimatedCookMinutes ? { estimatedCookMinutes: Number(timerBatch.estimatedCookMinutes) } : {}),
@@ -875,6 +979,7 @@ app.get('/api/operations', requireDatabase, asyncRoute(async (_req, res) => {
       tables,
       tableOrders,
       waitingBatchesByTable,
+      menuAvailability,
       kitchen: {
         concurrency: Number(kitchenRows[0]?.concurrency) || 2,
         cookingCount: batchRows.filter(row => row.status === 'cooking').length,
@@ -905,17 +1010,22 @@ app.put('/api/orders/:tableId', requireDatabase, asyncRoute(async (req, res) => 
     await lockKitchenQueue(connection);
     const [tables] = await connection.query(
       `SELECT t.id, t.status, o.id AS orderId, o.items AS orderItems,
-        o.estimated_cook_minutes AS orderEstimatedCookMinutes
+        o.estimated_cook_minutes AS orderEstimatedCookMinutes,
+        aop.transaction_id AS paidTransactionId
        FROM restaurant_tables t
        LEFT JOIN active_orders o ON o.table_id = t.id
+       LEFT JOIN active_order_payments aop ON aop.order_id = o.id
        WHERE t.id = ? FOR UPDATE`,
       [req.params.tableId],
     );
     const table = tables[0];
     if (!table) throw httpError(404, 'TABLE_NOT_FOUND', 'Không tìm thấy bàn.');
 
+    if (table.paidTransactionId) {
+      throw httpError(409, 'ORDER_ALREADY_PAID', 'Bàn đã thanh toán nên không thể gọi thêm món.');
+    }
     if (table.orderId && !append) {
-      throw httpError(409, 'ORDER_ALREADY_EXISTS', 'Bàn đã có order. Hãy dùng chế độ gọi thêm món.');
+      throw httpError(409, 'ORDER_ALREADY_EXISTS', 'Bàn đã có món. Hãy dùng thao tác gọi thêm món.');
     }
 
     let reservationId = null;
@@ -961,19 +1071,23 @@ app.put('/api/orders/:tableId', requireDatabase, asyncRoute(async (req, res) => 
       reservationId = seatedReservation ? Number(seatedReservation.id) : null;
     }
 
-    const items = await canonicalizeOrderItems(connection, validatedItems);
+    const inventoryDate = businessDateFor();
+    const items = await canonicalizeOrderItems(connection, validatedItems, { inventoryDate, lock: true });
     const estimatedCookMinutes = estimateCookMinutes(items);
+    const [queueClockRows] = await connection.query('SELECT CURRENT_TIMESTAMP(3) AS queuedAt');
+    const batchQueuedAt = queueClockRows[0].queuedAt;
     let orderId;
     let batchNumber = 1;
+    let existingItems = [];
     const isAddition = Boolean(table.orderId);
     if (table.orderId) {
-      const existingItems = parseJsonColumn(table.orderItems, []);
+      existingItems = parseJsonColumn(table.orderItems, []);
       if (existingItems.length + items.length > 500) {
-        throw httpError(400, 'ORDER_TOO_LARGE', 'Order của bàn vượt quá 500 dòng món.');
+        throw httpError(400, 'ORDER_TOO_LARGE', 'Lượt phục vụ của bàn vượt quá 500 dòng món.');
       }
       const existingCartIds = new Set(existingItems.map(item => item.cartId));
       if (items.some(item => existingCartIds.has(item.cartId))) {
-        throw httpError(409, 'DUPLICATE_CART_ITEM', 'Lượt gọi thêm chứa món đã có trong order trước.');
+        throw httpError(409, 'DUPLICATE_CART_ITEM', 'Lượt gọi thêm chứa món bị trùng với lượt trước.');
       }
       orderId = Number(table.orderId);
       const [batchNumbers] = await connection.query(
@@ -981,6 +1095,12 @@ app.put('/api/orders/:tableId', requireDatabase, asyncRoute(async (req, res) => 
         [orderId],
       );
       batchNumber = Number(batchNumbers[0].nextBatchNumber);
+    }
+
+    // Giữ hạn mức trước khi ghi order; mọi thay đổi cùng rollback nếu một món không đủ số phần.
+    await reserveDailyInventory(connection, items, inventoryDate);
+
+    if (table.orderId) {
       await connection.query(
         `UPDATE active_orders SET items = ?, estimated_cook_minutes = GREATEST(estimated_cook_minutes, ?),
           updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
@@ -988,17 +1108,20 @@ app.put('/api/orders/:tableId', requireDatabase, asyncRoute(async (req, res) => 
       );
     } else {
       const [orderResult] = await connection.query(
-        'INSERT INTO active_orders (table_id, reservation_id, items, estimated_cook_minutes) VALUES (?, ?, ?, ?)',
-        [table.id, reservationId, JSON.stringify(items), estimatedCookMinutes],
+        `INSERT INTO active_orders (
+          table_id, reservation_id, items, queued_at, estimated_cook_minutes
+        ) VALUES (?, ?, ?, ?, ?)`,
+        [table.id, reservationId, JSON.stringify(items), batchQueuedAt, estimatedCookMinutes],
       );
       orderId = Number(orderResult.insertId);
     }
 
     const [batchResult] = await connection.query(
       `INSERT INTO order_batches (
-        order_id, table_id, batch_number, items, status, is_addition, estimated_cook_minutes
-      ) VALUES (?, ?, ?, ?, 'waiting', ?, ?)`,
-      [orderId, table.id, batchNumber, JSON.stringify(items), isAddition, estimatedCookMinutes],
+        order_id, table_id, batch_number, items, status, is_addition, queued_at,
+        estimated_cook_minutes, inventory_date
+      ) VALUES (?, ?, ?, ?, 'waiting', ?, ?, ?, ?)`,
+      [orderId, table.id, batchNumber, JSON.stringify(items), isAddition, batchQueuedAt, estimatedCookMinutes, inventoryDate],
     );
     await promoteKitchenQueue(connection);
     await syncTableStatuses(connection, [table.id]);
@@ -1018,6 +1141,7 @@ app.put('/api/orders/:tableId', requireDatabase, asyncRoute(async (req, res) => 
       queuedAt: new Date(batches[0].queuedAt).toISOString(),
       ...(batches[0].cookingStartedAt ? { cookingStartedAt: new Date(batches[0].cookingStartedAt).toISOString() } : {}),
       estimatedCookMinutes,
+      inventoryDate,
       items,
     });
   } catch (error) {
@@ -1037,20 +1161,25 @@ app.put('/api/orders/:tableId/batches/:batchId', requireDatabase, asyncRoute(asy
     await connection.beginTransaction();
     await lockKitchenQueue(connection);
     const [tables] = await connection.query(
-      `SELECT t.id, o.id AS orderId
+      `SELECT t.id, o.id AS orderId, aop.transaction_id AS paidTransactionId
        FROM restaurant_tables t
        LEFT JOIN active_orders o ON o.table_id = t.id
+       LEFT JOIN active_order_payments aop ON aop.order_id = o.id
        WHERE t.id = ? FOR UPDATE`,
       [req.params.tableId],
     );
     const table = tables[0];
     if (!table) throw httpError(404, 'TABLE_NOT_FOUND', 'Không tìm thấy bàn.');
-    if (!table.orderId) throw httpError(409, 'ORDER_NOT_FOUND', 'Bàn chưa có order.');
+    if (!table.orderId) throw httpError(409, 'ORDER_NOT_FOUND', 'Bàn chưa có món đang phục vụ.');
+    if (table.paidTransactionId) {
+      throw httpError(409, 'ORDER_ALREADY_PAID', 'Bàn đã thanh toán nên không thể sửa món.');
+    }
 
     const [batches] = await connection.query(
       `SELECT id AS batchId, batch_number AS batchNumber, items, status,
         is_addition AS isAddition, queued_at AS queuedAt,
-        estimated_cook_minutes AS estimatedCookMinutes
+        estimated_cook_minutes AS estimatedCookMinutes,
+        DATE_FORMAT(inventory_date, '%Y-%m-%d') AS inventoryDate
        FROM order_batches
        WHERE order_id = ? AND table_id = ?
        ORDER BY batch_number, id FOR UPDATE`,
@@ -1062,7 +1191,8 @@ app.put('/api/orders/:tableId/batches/:batchId', requireDatabase, asyncRoute(asy
       throw httpError(409, 'ORDER_BATCH_NOT_WAITING', 'Phiếu bếp đã bắt đầu nấu hoặc đã xong nên không thể sửa.');
     }
 
-    const items = await canonicalizeOrderItems(connection, validatedItems);
+    const inventoryDate = businessDateFor();
+    const items = await canonicalizeOrderItems(connection, validatedItems, { inventoryDate, lock: true });
     const incomingCartIds = new Set();
     for (const item of items) {
       if (incomingCartIds.has(item.cartId)) {
@@ -1078,14 +1208,21 @@ app.put('/api/orders/:tableId/batches/:batchId', requireDatabase, asyncRoute(asy
       throw httpError(409, 'DUPLICATE_CART_ITEM', 'Phiếu sửa chứa món đã thuộc một lượt gọi khác.');
     }
     if (otherItems.length + items.length > 500) {
-      throw httpError(400, 'ORDER_TOO_LARGE', 'Order của bàn vượt quá 500 dòng món.');
+      throw httpError(400, 'ORDER_TOO_LARGE', 'Lượt phục vụ của bàn vượt quá 500 dòng món.');
     }
 
     const estimatedCookMinutes = estimateCookMinutes(items);
+    await replaceDailyInventory(
+      connection,
+      parseJsonColumn(targetBatch.items, []),
+      targetBatch.inventoryDate,
+      items,
+      inventoryDate,
+    );
     await connection.query(
-      `UPDATE order_batches SET items = ?, estimated_cook_minutes = ?
+      `UPDATE order_batches SET items = ?, estimated_cook_minutes = ?, inventory_date = ?
        WHERE id = ? AND table_id = ? AND status = 'waiting'`,
-      [JSON.stringify(items), estimatedCookMinutes, batchId, table.id],
+      [JSON.stringify(items), estimatedCookMinutes, inventoryDate, batchId, table.id],
     );
     const aggregateItems = batches.flatMap(batch => (
       Number(batch.batchId) === batchId ? items : parseJsonColumn(batch.items, [])
@@ -1112,6 +1249,7 @@ app.put('/api/orders/:tableId/batches/:batchId', requireDatabase, asyncRoute(asy
       status: 'waiting',
       queuedAt: new Date(targetBatch.queuedAt).toISOString(),
       estimatedCookMinutes,
+      inventoryDate,
       items,
     });
   } catch (error) {
@@ -1200,12 +1338,19 @@ app.post('/api/kitchen/dispatch-next', requireDatabase, asyncRoute(async (_req, 
 app.post('/api/tables', requireDatabase, asyncRoute(async (req, res) => {
   const number = boundedInteger(req.body?.table?.number, 'number', 1, 999);
   const seats = boundedInteger(req.body?.table?.seats, 'seats', 1, 100);
+  const layout = normalizeTableLayout(req.body?.table);
   const id = `table-${crypto.randomUUID().slice(0, 8)}`;
-  await getPool().query(
-    `INSERT INTO restaurant_tables (id, table_number, seats, status) VALUES (?, ?, ?, 'empty')`,
-    [id, number, seats],
-  );
-  res.status(201).json({ table: { id, number, seats, status: 'empty' } });
+  try {
+    await getPool().query(
+      `INSERT INTO restaurant_tables (
+        id, table_number, seats, status, area, position_x, position_y
+       ) VALUES (?, ?, ?, 'empty', ?, ?, ?)`,
+      [id, number, seats, layout.area, layout.positionX, layout.positionY],
+    );
+  } catch (error) {
+    throw normalizeTableWriteError(error);
+  }
+  res.status(201).json({ table: { id, number, seats, status: 'empty', ...layout } });
 }));
 
 app.put('/api/tables/:tableId', requireDatabase, asyncRoute(async (req, res) => {
@@ -1222,12 +1367,18 @@ app.put('/api/tables/:tableId', requireDatabase, asyncRoute(async (req, res) => 
     await connection.beginTransaction();
     await lockKitchenQueue(connection);
     const [rows] = await connection.query(
-      `SELECT t.id, t.status, o.id AS orderId FROM restaurant_tables t
+      `SELECT t.id, t.table_number AS number, t.seats, t.status, t.area,
+         t.position_x AS positionX, t.position_y AS positionY, o.id AS orderId
+       FROM restaurant_tables t
        LEFT JOIN active_orders o ON o.table_id = t.id WHERE t.id = ? FOR UPDATE`,
       [req.params.tableId],
     );
     if (!rows[0]) throw httpError(404, 'TABLE_NOT_FOUND', 'Không tìm thấy bàn.');
+    const layout = normalizeTableLayout(req.body?.table, rows[0]);
     const hasOrder = Boolean(rows[0].orderId);
+    if (hasOrder && (number !== Number(rows[0].number) || seats !== Number(rows[0].seats))) {
+      throw httpError(409, 'TABLE_IN_SERVICE_IMMUTABLE', 'Không thể đổi số bàn hoặc số ghế khi bàn đang phục vụ.');
+    }
     const [openReservations] = await connection.query(
       `SELECT id, party_size AS partySize FROM reservations
        WHERE table_id = ? AND status IN ('booked', 'seated') FOR UPDATE`,
@@ -1238,27 +1389,31 @@ app.put('/api/tables/:tableId', requireDatabase, asyncRoute(async (req, res) => 
       throw httpError(409, 'TABLE_CAPACITY_RESERVED', `Bàn đang có lịch ${largestParty} khách nên không thể giảm còn ${seats} chỗ.`);
     }
     if (hasOrder && !['waiting', 'cooking', 'done'].includes(status)) {
-      throw httpError(409, 'TABLE_HAS_ORDER', 'Bàn đang có order nên không thể chuyển sang trạng thái này.');
+      throw httpError(409, 'TABLE_HAS_ORDER', 'Bàn đang phục vụ nên không thể chuyển sang trạng thái này.');
     }
     if (!hasOrder && ['waiting', 'cooking', 'done'].includes(status)) {
-      throw httpError(409, 'ORDER_NOT_FOUND', 'Cần có order trước khi chọn trạng thái phục vụ.');
+      throw httpError(409, 'ORDER_NOT_FOUND', 'Bàn cần có món trước khi chọn trạng thái phục vụ.');
     }
     if (hasOrder && status !== rows[0].status) {
       throw httpError(
         409,
         'ORDER_STATUS_ACTION_REQUIRED',
-        'Trạng thái order do hàng đợi bếp quản lý. Hãy dùng thao tác hoàn tất hoặc đưa lại vào hàng chờ.',
+        'Trạng thái bàn đang phục vụ được cập nhật tự động từ tiến độ món.',
       );
     }
     if (hasOrder) {
       await connection.query(
-        'UPDATE restaurant_tables SET table_number = ?, seats = ? WHERE id = ?',
-        [number, seats, req.params.tableId],
+        `UPDATE restaurant_tables
+         SET table_number = ?, seats = ?, area = ?, position_x = ?, position_y = ?
+         WHERE id = ?`,
+        [number, seats, layout.area, layout.positionX, layout.positionY, req.params.tableId],
       );
     } else {
       await connection.query(
-        "UPDATE restaurant_tables SET table_number = ?, seats = ?, status = 'empty' WHERE id = ?",
-        [number, seats, req.params.tableId],
+        `UPDATE restaurant_tables
+         SET table_number = ?, seats = ?, status = 'empty', area = ?, position_x = ?, position_y = ?
+         WHERE id = ?`,
+        [number, seats, layout.area, layout.positionX, layout.positionY, req.params.tableId],
       );
     }
     await connection.query(
@@ -1268,10 +1423,18 @@ app.put('/api/tables/:tableId', requireDatabase, asyncRoute(async (req, res) => 
     );
     const [updatedTables] = await connection.query('SELECT status FROM restaurant_tables WHERE id = ?', [req.params.tableId]);
     await connection.commit();
-    res.json({ table: { id: req.params.tableId, number, seats, status: updatedTables[0].status } });
+    res.json({
+      table: {
+        id: req.params.tableId,
+        number,
+        seats,
+        status: updatedTables[0].status,
+        ...layout,
+      },
+    });
   } catch (error) {
     await connection.rollback().catch(() => {});
-    throw error;
+    throw normalizeTableWriteError(error);
   } finally {
     connection.release();
   }
@@ -1290,7 +1453,7 @@ app.delete('/api/tables/:tableId', requireDatabase, asyncRoute(async (req, res) 
       [req.params.tableId],
     );
     if (!rows[0]) throw httpError(404, 'TABLE_NOT_FOUND', 'Không tìm thấy bàn.');
-    if (rows[0].orderId) throw httpError(409, 'TABLE_HAS_ORDER', 'Không thể xóa bàn đang có order.');
+    if (rows[0].orderId) throw httpError(409, 'TABLE_HAS_ORDER', 'Không thể xóa bàn đang phục vụ.');
     const [reservations] = await connection.query(
       `SELECT id FROM reservations
        WHERE table_id = ? AND status IN ('booked', 'seated') LIMIT 1 FOR UPDATE`,
@@ -1323,7 +1486,7 @@ app.post('/api/orders/:tableId/requeue', requireDatabase, asyncRoute(async (req,
     );
     const table = rows[0];
     if (!table) throw httpError(404, 'TABLE_NOT_FOUND', 'Không tìm thấy bàn.');
-    if (!table.orderId) throw httpError(409, 'ORDER_NOT_FOUND', 'Bàn chưa có order.');
+    if (!table.orderId) throw httpError(409, 'ORDER_NOT_FOUND', 'Bàn chưa có món đang phục vụ.');
     const [cookingBatches] = await connection.query(
       `SELECT id FROM order_batches
        WHERE table_id = ? AND id = ? AND status = 'cooking' FOR UPDATE`,
@@ -1361,17 +1524,28 @@ app.delete('/api/orders/:tableId', requireDatabase, asyncRoute(async (req, res) 
     const table = tables[0];
     if (!table) throw httpError(404, 'TABLE_NOT_FOUND', 'Không tìm thấy bàn.');
     const [orders] = await connection.query(
-      'SELECT id FROM active_orders WHERE table_id = ? FOR UPDATE',
+      `SELECT o.id, aop.transaction_id AS paidTransactionId
+       FROM active_orders o
+       LEFT JOIN active_order_payments aop ON aop.order_id = o.id
+       WHERE o.table_id = ? FOR UPDATE`,
       [table.id],
     );
-    if (!orders[0]) throw httpError(409, 'ORDER_NOT_FOUND', 'Bàn chưa có order.');
+    if (!orders[0]) throw httpError(409, 'ORDER_NOT_FOUND', 'Bàn chưa có món đang phục vụ.');
+    if (orders[0].paidTransactionId) {
+      throw httpError(409, 'ORDER_ALREADY_PAID', 'Bàn đã thanh toán nên không thể hủy món.');
+    }
     const [batches] = await connection.query(
-      'SELECT id, status FROM order_batches WHERE table_id = ? ORDER BY id FOR UPDATE',
+      `SELECT id, status, items, DATE_FORMAT(inventory_date, '%Y-%m-%d') AS inventoryDate
+       FROM order_batches WHERE table_id = ? ORDER BY id FOR UPDATE`,
       [table.id],
     );
     if (!canCancelOrder(batches)) {
-      throw httpError(409, 'ORDER_NOT_WAITING', 'Chỉ có thể hủy khi toàn bộ lượt gọi của order còn đang chờ.');
+      throw httpError(409, 'ORDER_NOT_WAITING', 'Chỉ có thể hủy khi toàn bộ lượt gọi còn đang chờ.');
     }
+    await releaseDailyInventory(connection, batches.map(batch => ({
+      inventoryDate: batch.inventoryDate,
+      items: parseJsonColumn(batch.items, []),
+    })));
     await connection.query('DELETE FROM active_orders WHERE table_id = ?', [table.id]);
     await connection.query("UPDATE restaurant_tables SET status = 'empty' WHERE id = ?", [table.id]);
     await promoteKitchenQueue(connection);
@@ -1400,7 +1574,7 @@ app.patch('/api/tables/:tableId/status', requireDatabase, asyncRoute(async (req,
     const table = tables[0];
     if (!table) throw httpError(404, 'TABLE_NOT_FOUND', 'Không tìm thấy bàn.');
     const [orders] = await connection.query('SELECT id FROM active_orders WHERE table_id = ?', [table.id]);
-    if (orders.length === 0) throw httpError(409, 'ORDER_NOT_FOUND', 'Bàn chưa có order.');
+    if (orders.length === 0) throw httpError(409, 'ORDER_NOT_FOUND', 'Bàn chưa có món đang phục vụ.');
     const [batches] = await connection.query(
       `SELECT id FROM order_batches
        WHERE table_id = ? AND id = ? AND status = 'cooking' FOR UPDATE`,
@@ -1418,6 +1592,111 @@ app.patch('/api/tables/:tableId/status', requireDatabase, asyncRoute(async (req,
     const [updatedTables] = await connection.query('SELECT status FROM restaurant_tables WHERE id = ?', [table.id]);
     await connection.commit();
     res.json({ ok: true, status: updatedTables[0].status, completedBatchId: Number(batches[0].id) });
+  } catch (error) {
+    await connection.rollback().catch(() => {});
+    throw error;
+  } finally {
+    connection.release();
+  }
+}));
+
+/**
+ * Đóng một order đã thanh toán sớm sau khi bếp hoàn tất và nhân viên xác nhận khách đã rời bàn.
+ * Xóa order, hoàn tất lịch đặt bàn và trả bàn về trống trong cùng một transaction.
+ */
+app.post('/api/orders/:tableId/confirm-departure', requireDatabase, asyncRoute(async (req, res) => {
+  const connection = await getPool().getConnection();
+  try {
+    await connection.beginTransaction();
+    await lockKitchenQueue(connection);
+    const [rows] = await connection.query(
+      `SELECT t.id, t.status, o.id AS orderId, o.reservation_id AS reservationId,
+        aop.transaction_id AS paidTransactionId, pt.invoice_code AS paymentId,
+        pt.service_status AS serviceStatus
+       FROM restaurant_tables t
+       LEFT JOIN active_orders o ON o.table_id = t.id
+       LEFT JOIN active_order_payments aop ON aop.order_id = o.id
+       LEFT JOIN payment_transactions pt ON pt.id = aop.transaction_id
+       WHERE t.id = ? FOR UPDATE`,
+      [req.params.tableId],
+    );
+    const table = rows[0];
+    if (!table) throw httpError(404, 'TABLE_NOT_FOUND', 'Không tìm thấy bàn.');
+
+    // Retry sau khi transaction trước đã commit không được biến thành lỗi giả trên thiết bị POS.
+    if (!table.orderId) {
+      const [completedPayments] = await connection.query(
+        `SELECT invoice_code AS paymentId FROM payment_transactions
+         WHERE table_id = ? AND service_status = 'closed' AND departure_confirmed_at IS NOT NULL
+         ORDER BY departure_confirmed_at DESC, id DESC LIMIT 1`,
+        [table.id],
+      );
+      if (completedPayments[0]) {
+        await connection.commit();
+        res.json({
+          ok: true,
+          idempotent: true,
+          paymentId: completedPayments[0].paymentId,
+          status: table.status,
+          orderClosed: true,
+        });
+        return;
+      }
+      throw httpError(409, 'ORDER_NOT_FOUND', 'Bàn không có lượt phục vụ đang chờ xác nhận khách rời.');
+    }
+    if (!table.paidTransactionId) {
+      throw httpError(409, 'ORDER_NOT_PAID', 'Bàn chưa thanh toán nên không thể xác nhận khách rời.');
+    }
+    if (table.serviceStatus !== 'awaiting_departure') {
+      throw httpError(409, 'PAYMENT_LIFECYCLE_INVALID', 'Trạng thái phục vụ của hóa đơn không hợp lệ.');
+    }
+
+    const [batches] = await connection.query(
+      'SELECT id, status FROM order_batches WHERE order_id = ? ORDER BY id FOR UPDATE',
+      [table.orderId],
+    );
+    if (!isOrderComplete(batches)) {
+      throw httpError(
+        409,
+        'ORDER_NOT_READY_FOR_DEPARTURE',
+        'Bếp chưa hoàn tất tất cả lượt gọi nên chưa thể đóng bàn.',
+      );
+    }
+
+    if (table.reservationId) {
+      const [reservations] = await connection.query(
+        'SELECT id, status FROM reservations WHERE id = ? FOR UPDATE',
+        [table.reservationId],
+      );
+      if (!reservations[0] || reservations[0].status !== 'seated') {
+        throw httpError(409, 'RESERVATION_NOT_SEATED', 'Lịch liên kết không còn ở trạng thái đã nhận bàn.');
+      }
+      await connection.query(
+        `UPDATE reservations SET status = 'completed', closed_at = CURRENT_TIMESTAMP(3),
+          seated_table_id = NULL, version = version + 1 WHERE id = ? AND status = 'seated'`,
+        [table.reservationId],
+      );
+    }
+
+    const [closedPayment] = await connection.query(
+      `UPDATE payment_transactions
+       SET service_status = 'closed', departure_confirmed_at = CURRENT_TIMESTAMP(3)
+       WHERE id = ? AND service_status = 'awaiting_departure'`,
+      [table.paidTransactionId],
+    );
+    if (closedPayment.affectedRows !== 1) {
+      throw httpError(409, 'PAYMENT_LIFECYCLE_CHANGED', 'Hóa đơn đã được xử lý trên thiết bị khác.');
+    }
+    await connection.query('DELETE FROM active_orders WHERE id = ?', [table.orderId]);
+    await connection.query("UPDATE restaurant_tables SET status = 'empty' WHERE id = ?", [table.id]);
+    await promoteKitchenQueue(connection);
+    await connection.commit();
+    res.json({
+      ok: true,
+      paymentId: table.paymentId,
+      status: 'empty',
+      orderClosed: true,
+    });
   } catch (error) {
     await connection.rollback().catch(() => {});
     throw error;
@@ -1564,7 +1843,7 @@ app.get('/api/payments', requireDatabase, asyncRoute(async (req, res) => {
   res.json({ payments: rows });
 }));
 
-// Thanh toán, lưu chi tiết món, xóa order và giải phóng bàn là một transaction.
+// Thanh toán luôn chốt hóa đơn; chỉ đóng order ngay khi toàn bộ phiếu bếp đã xong.
 app.post('/api/payments', requireDatabase, asyncRoute(async (req, res) => {
   const draft = req.body?.payment;
   const tableId = typeof draft?.tableId === 'string' ? draft.tableId : '';
@@ -1593,7 +1872,13 @@ app.post('/api/payments', requireDatabase, asyncRoute(async (req, res) => {
           && (existing.employeeId ?? null) === requestedEmployeeId;
         if (!sameRequest) throw httpError(409, 'DUPLICATE_INVOICE', 'Mã hóa đơn đã được dùng cho một giao dịch khác.');
         await connection.commit();
-        res.json({ ok: true, id: existing.id, payment: existing, idempotent: true });
+        res.json({
+          ok: true,
+          id: Number(existing.databaseId),
+          payment: existing,
+          idempotent: true,
+          ...paymentLifecycle(existing),
+        });
         return;
       }
     }
@@ -1606,16 +1891,36 @@ app.post('/api/payments', requireDatabase, asyncRoute(async (req, res) => {
     if (!table) throw httpError(404, 'TABLE_NOT_FOUND', 'Không tìm thấy bàn.');
 
     const [orders] = await connection.query(
-      'SELECT items, reservation_id AS reservationId FROM active_orders WHERE table_id = ? FOR UPDATE',
+      `SELECT id AS orderId, items, reservation_id AS reservationId
+       FROM active_orders WHERE table_id = ? FOR UPDATE`,
       [tableId],
     );
-    if (!orders[0]) throw httpError(409, 'ORDER_NOT_FOUND', 'Order đã được thanh toán hoặc không còn tồn tại.');
+    if (!orders[0]) throw httpError(409, 'ORDER_NOT_FOUND', 'Lượt phục vụ đã được thanh toán hoặc không còn tồn tại.');
     const [batches] = await connection.query(
       'SELECT id, status FROM order_batches WHERE table_id = ? ORDER BY id FOR UPDATE',
       [tableId],
     );
-    if (!canSettleOrder(batches)) {
-      throw httpError(409, 'ORDER_NOT_READY_FOR_PAYMENT', 'Chỉ thanh toán sau khi bếp hoàn tất tất cả lượt gọi của bàn.');
+    if (!canPayOrder(batches)) {
+      throw httpError(409, 'ORDER_NOT_READY_FOR_PAYMENT', 'Bàn chưa có phiếu món hợp lệ để thanh toán.');
+    }
+    // Giữ nguyên ý định "trả trước" của thu ngân dù bếp vừa hoàn tất trong lúc modal đang mở.
+    const requiresDepartureConfirmation = paymentRequiresDepartureConfirmation(
+      batches,
+      req.body?.payment?.keepTableOpen,
+    );
+    const [orderPayments] = await connection.query(
+      `SELECT aop.transaction_id AS transactionId, pt.invoice_code AS paymentId
+       FROM active_order_payments aop
+       INNER JOIN payment_transactions pt ON pt.id = aop.transaction_id
+       WHERE aop.order_id = ? FOR UPDATE`,
+      [orders[0].orderId],
+    );
+    if (orderPayments[0]) {
+      throw httpError(
+        409,
+        'ORDER_ALREADY_PAID',
+        `Bàn đã được thanh toán bằng hóa đơn ${orderPayments[0].paymentId}.`,
+      );
     }
     const items = validateOrderItems(parseJsonColumn(orders[0].items, []), { maxItems: 500 });
 
@@ -1629,7 +1934,7 @@ app.post('/api/payments', requireDatabase, asyncRoute(async (req, res) => {
       );
       reservation = reservationRows[0] ?? null;
       if (reservation && reservation.status !== 'seated') {
-        throw httpError(409, 'RESERVATION_NOT_SEATED', 'Lịch liên kết với order không còn ở trạng thái đã nhận bàn.');
+        throw httpError(409, 'RESERVATION_NOT_SEATED', 'Lịch liên kết không còn ở trạng thái đã nhận bàn.');
       }
     }
 
@@ -1662,21 +1967,23 @@ app.post('/api/payments', requireDatabase, asyncRoute(async (req, res) => {
       payment.customerName = reservation.customerName;
       payment.guestCount = Number(reservation.partySize);
     }
+    payment.serviceStatus = requiresDepartureConfirmation ? 'awaiting_departure' : 'closed';
+    payment.departureConfirmedAt = null;
 
     const [result] = await connection.query(
       `INSERT INTO payment_transactions (
         invoice_code, transaction_code, table_id, table_number, reservation_id,
         reservation_code, customer_name, guest_count, payment_method,
         subtotal, discount, service_fee, vat, total, item_count, staff_id,
-        staff_name, cashier_name, paid_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        staff_name, cashier_name, service_status, paid_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         payment.invoiceCode, payment.transactionCode, payment.tableId, payment.tableNumber,
         payment.reservationId ?? null, payment.reservationCode ?? null,
         payment.customerName ?? null, payment.guestCount ?? null, payment.method,
         payment.subtotal, payment.discount, payment.serviceFee, payment.vat, payment.total, payment.itemCount,
         payment.employeeId ?? null,
-        payment.staffName, payment.cashierName, new Date(payment.paidAt),
+        payment.staffName, payment.cashierName, payment.serviceStatus, new Date(payment.paidAt),
       ],
     );
 
@@ -1712,24 +2019,51 @@ app.post('/api/payments', requireDatabase, asyncRoute(async (req, res) => {
       itemValues,
     );
 
-    if (reservation) {
+    if (requiresDepartureConfirmation) {
       await connection.query(
-        `UPDATE reservations SET status = 'completed', closed_at = CURRENT_TIMESTAMP(3),
-          seated_table_id = NULL, version = version + 1 WHERE id = ? AND status = 'seated'`,
-        [reservation.id],
+        'INSERT INTO active_order_payments (order_id, transaction_id) VALUES (?, ?)',
+        [orders[0].orderId, result.insertId],
       );
+    } else {
+      if (reservation) {
+        await connection.query(
+          `UPDATE reservations SET status = 'completed', closed_at = CURRENT_TIMESTAMP(3),
+            seated_table_id = NULL, version = version + 1 WHERE id = ? AND status = 'seated'`,
+          [reservation.id],
+        );
+      }
+      await connection.query('DELETE FROM active_orders WHERE table_id = ?', [tableId]);
+      await connection.query("UPDATE restaurant_tables SET status = 'empty' WHERE id = ?", [tableId]);
     }
-    await connection.query('DELETE FROM active_orders WHERE table_id = ?', [tableId]);
-    await connection.query("UPDATE restaurant_tables SET status = 'empty' WHERE id = ?", [tableId]);
     await promoteKitchenQueue(connection);
     await connection.commit();
-    res.status(201).json({ ok: true, id: result.insertId, payment });
+    res.status(201).json({
+      ok: true,
+      id: result.insertId,
+      payment,
+      requiresDepartureConfirmation,
+      orderClosed: !requiresDepartureConfirmation,
+    });
   } catch (error) {
     await connection?.rollback().catch(() => {});
     if (error.code === 'ER_DUP_ENTRY' && draft?.invoiceCode) {
       const [rows] = await getPool().query(`${paymentSelect('WHERE invoice_code = ?')} LIMIT 1`, [draft.invoiceCode]);
-      if (rows[0] && rows[0].tableId === tableId && rows[0].method === draft.method) {
-        res.json({ ok: true, payment: rows[0], idempotent: true });
+      const existing = rows[0];
+      const requestedEmployeeId = typeof draft.employeeId === 'string' && draft.employeeId
+        ? draft.employeeId
+        : null;
+      if (existing
+        && existing.tableId === tableId
+        && existing.method === draft.method
+        && existing.transactionCode === draft.transactionCode
+        && (existing.employeeId ?? null) === requestedEmployeeId) {
+        res.json({
+          ok: true,
+          id: Number(existing.databaseId),
+          payment: existing,
+          idempotent: true,
+          ...paymentLifecycle(existing),
+        });
         return;
       }
       throw httpError(409, 'DUPLICATE_INVOICE', 'Mã hóa đơn đã được sử dụng.');

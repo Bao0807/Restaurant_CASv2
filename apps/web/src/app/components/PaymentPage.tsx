@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   X, CreditCard, Banknote, QrCode, CheckCircle, Users,
-  Printer, ReceiptText, Building2,
+  Printer, ReceiptText, BadgeCheck,
 } from 'lucide-react';
 import {
-  Table, CartItem, Employee, PaymentMethodId, PaymentRecord,
+  Table, CartItem, Employee, PaymentMethodId, PaymentRecord, PaymentResult,
   STATUS_CONFIG, cartTotal, cartItemTotal, formatVND,
 } from '../data';
 import {
@@ -13,19 +13,27 @@ import {
 } from '../config/restaurant';
 import { RestaurantInvoice, type PrintableInvoiceData } from './invoice/RestaurantInvoice';
 import { OrderTimer } from './OrderTimer';
-import { fetchEmployees } from '../services/api';
+import { fetchEmployees, getServerNowMs } from '../services/api';
 
 interface PaymentPageProps {
   tables: Table[];
   tableOrders: Record<string, CartItem[]>;
   settings: RestaurantSettings;
-  onProcessPayment: (payment: PaymentRecord, items: CartItem[]) => Promise<PaymentRecord>;
+  onProcessPayment: (payment: PaymentRecord, items: CartItem[]) => Promise<PaymentResult>;
+}
+
+const PAYMENT_HISTORY_KEY = 'casPaymentTableId';
+
+function paymentHistoryTableId(state: unknown = window.history.state): string | null {
+  if (!state || typeof state !== 'object') return null;
+  const value = (state as Record<string, unknown>)[PAYMENT_HISTORY_KEY];
+  return typeof value === 'string' ? value : null;
 }
 
 const METHODS: { id: PaymentMethodId; label: string; icon: ReactNode; desc: string }[] = [
   { id: 'cash', label: 'Tiền mặt', icon: <Banknote size={22} />, desc: 'Khách trả tiền mặt' },
-  { id: 'card', label: 'Thẻ', icon: <CreditCard size={22} />, desc: 'Visa / Mastercard / ATM' },
-  { id: 'qr', label: 'QR Code', icon: <QrCode size={22} />, desc: 'MoMo / VNPay / ZaloPay' },
+  { id: 'card', label: 'Thẻ', icon: <CreditCard size={22} />, desc: 'Ghi nhận thanh toán bằng thẻ' },
+  { id: 'qr', label: 'QR Code', icon: <QrCode size={22} />, desc: 'Ghi nhận thanh toán QR' },
 ];
 
 function unitPrice(item: CartItem): number {
@@ -71,7 +79,7 @@ function BillPanel({
   order: CartItem[];
   settings: RestaurantSettings;
   onClose: () => void;
-  onConfirm: (payment: PaymentRecord, items: CartItem[]) => Promise<PaymentRecord>;
+  onConfirm: (payment: PaymentRecord, items: CartItem[]) => Promise<PaymentResult>;
 }) {
   const enabledMethods = METHODS.filter(method => settings.activePaymentMethods.includes(method.id));
   const firstMethod = enabledMethods[0]?.id ?? 'cash';
@@ -80,8 +88,11 @@ function BillPanel({
   const [processing, setProcessing] = useState(false);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [employees, setEmployees] = useState<Employee[]>([]);
+  const [employeeError, setEmployeeError] = useState<string | null>(null);
   const [employeeId, setEmployeeId] = useState('');
+  const [departureRequired, setDepartureRequired] = useState(false);
   const paymentCodes = useRef(makePaymentCodes());
+  const keepTableOpenRef = useRef(table.status !== 'done');
   const dialogRef = useRef<HTMLDivElement>(null);
   const processingRef = useRef(processing);
   const onCloseRef = useRef(onClose);
@@ -124,6 +135,7 @@ function BillPanel({
     let active = true;
     fetchEmployees(true).then(rows => {
       if (!active) return;
+      setEmployeeError(null);
       const serviceEmployees = rows.filter(employee => employee.role === 'server');
       setEmployees(serviceEmployees);
       setEmployeeId(current => (
@@ -131,22 +143,33 @@ function BillPanel({
           ? current
           : serviceEmployees.find(employee => employee.name === settings.staffName)?.id || serviceEmployees[0]?.id || ''
       ));
-    }).catch(() => {});
+    }).catch(() => {
+      if (active) setEmployeeError('Không tải được danh sách nhân viên. Hóa đơn sẽ dùng tên mặc định.');
+    });
     return () => { active = false; };
   }, [settings.staffName]);
 
   useEffect(() => {
     paymentCodes.current = makePaymentCodes();
+    keepTableOpenRef.current = table.status !== 'done';
     setInvoiceData(null);
     setPaymentError(null);
+    setDepartureRequired(false);
   }, [table.id]);
 
   const subtotal = cartTotal(order);
   const totals = calculateInvoiceTotals(subtotal, settings);
+  const paymentUnavailable = !invoiceData && !processing && (table.isPaid || order.length === 0);
+
+  useEffect(() => {
+    if (paymentUnavailable) {
+      setPaymentError('Bàn này vừa được thanh toán trên thiết bị khác.');
+    }
+  }, [paymentUnavailable]);
 
   /** Dựng cùng lúc dữ liệu gửi API và bản in tạm; tổng cuối vẫn do server quyết định. */
   const buildInvoice = (paymentMethod: PaymentMethodId): { invoice: PrintableInvoiceData; payment: PaymentRecord } => {
-    const now = new Date();
+    const now = new Date(getServerNowMs());
     const invoiceCode = paymentCodes.current.invoiceCode;
     const transactionCode = paymentCodes.current.transactions[paymentMethod];
     const itemCount = order.reduce((sum, item) => sum + item.quantity, 0);
@@ -209,6 +232,7 @@ function BillPanel({
       total: totals.total,
       itemCount,
       paidAt: now.toISOString(),
+      keepTableOpen: keepTableOpenRef.current,
       ...(selectedEmployee ? { employeeId: selectedEmployee.id } : {}),
       staffName,
       cashierName: settings.cashierName,
@@ -219,7 +243,7 @@ function BillPanel({
 
   /** Chỉ mở hóa đơn in sau khi transaction thanh toán ở server thành công. */
   const handleConfirm = async () => {
-    if (invoiceData || processing) return;
+    if (invoiceData || processing || paymentUnavailable) return;
     const { invoice, payment } = buildInvoice(selectedMethod);
     setProcessing(true);
     setPaymentError(null);
@@ -243,6 +267,7 @@ function BillPanel({
         staffName: saved.staffName,
         cashierName: saved.cashierName,
       });
+      setDepartureRequired(saved.requiresDepartureConfirmation);
       paymentCodes.current = makePaymentCodes();
     } catch (error) {
       setPaymentError(error instanceof Error ? error.message : 'Không thể xử lý thanh toán.');
@@ -275,6 +300,11 @@ function BillPanel({
                 <div style={{ color: '#6B7280', fontSize: '12px', marginTop: 2 }}>
                   {invoiceData.invoiceCode} · {formatVND(invoiceData.total)}
                 </div>
+                {departureRequired && (
+                  <div style={{ color: '#166534', fontSize: '12px', marginTop: 3, fontWeight: 700 }}>
+                    Bàn vẫn đang phục vụ · xác nhận khách rời sau khi món hoàn tất
+                  </div>
+                )}
               </div>
               <button
                 onClick={() => window.print()}
@@ -314,6 +344,11 @@ function BillPanel({
             </div>
 
             <div style={{ flex: 1, overflowY: 'auto' }}>
+              {keepTableOpenRef.current && (
+                <div style={{ margin: '14px 16px 0', padding: '11px 13px', borderRadius: 11, background: '#FFF7ED', border: '1px solid #FDBA74', color: '#9A3412', fontSize: 12, lineHeight: 1.5 }}>
+                  <strong>Thanh toán trước khi món hoàn tất.</strong> Bếp vẫn tiếp tục chuẩn bị món và bàn vẫn được giữ cho khách.
+                </div>
+              )}
               <div style={{ margin: '14px 16px', background: '#F9FAFB', borderRadius: 12, overflow: 'hidden', border: '1px solid #F3F4F6' }}>
                 <div style={{ background: '#111827', padding: '14px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -325,7 +360,7 @@ function BillPanel({
                   </div>
                   <div style={{ textAlign: 'right' }}>
                     <div style={{ color: '#2DD4BF', fontWeight: 700, fontSize: '18px' }}>Bàn {table.number}</div>
-                    <div style={{ color: '#9CA3AF', fontSize: '11px' }}>{new Date().toLocaleDateString('vi-VN')}</div>
+                    <div style={{ color: '#6B7280', fontSize: '11px' }}>{new Date(getServerNowMs()).toLocaleDateString('vi-VN')}</div>
                   </div>
                 </div>
 
@@ -398,6 +433,7 @@ function BillPanel({
                     {employees.length === 0 && <option value="">{settings.staffName}</option>}
                     {employees.map(employee => <option key={employee.id} value={employee.id}>{employee.code} · {employee.name}</option>)}
                   </select>
+                  {employeeError && <span style={{ display: 'block', marginTop: 5, color: '#B45309', fontSize: 11, fontWeight: 500 }}>{employeeError}</span>}
                 </label>
                 <div style={{ fontSize: '13px', fontWeight: 600, color: '#374151', marginBottom: 10 }}>
                   Phương thức thanh toán
@@ -434,21 +470,21 @@ function BillPanel({
             <div style={{ padding: '12px 16px 28px', borderTop: '1px solid #F3F4F6', background: '#fff', flexShrink: 0 }}>
               {paymentError && (
                 <div role="alert" style={{ marginBottom: 10, color: '#B91C1C', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 10, padding: 10, fontSize: 13 }}>
-                  {paymentError} Phiếu gọi món vẫn được giữ nguyên để bạn thử lại.
+                  {paymentError} {!paymentUnavailable && 'Phiếu gọi món vẫn được giữ nguyên để bạn thử lại.'}
                 </div>
               )}
               <button
                 onClick={() => void handleConfirm()}
-                disabled={processing}
+                disabled={processing || paymentUnavailable}
                 style={{
                   width: '100%', background: '#15803D', color: '#fff', border: 'none',
                   borderRadius: 12, padding: '15px', cursor: processing ? 'wait' : 'pointer', fontWeight: 700,
                   fontSize: '15px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
-                  opacity: processing ? 0.7 : 1,
+                  opacity: processing || paymentUnavailable ? 0.7 : 1,
                 }}
               >
                 <CheckCircle size={20} />
-                {processing ? 'Đang ghi nhận…' : `Xác nhận thanh toán · ${formatVND(totals.total)}`}
+                {paymentUnavailable ? 'Bàn đã được thanh toán' : processing ? 'Đang ghi nhận…' : `Xác nhận thanh toán · ${formatVND(totals.total)}`}
               </button>
             </div>
           </>
@@ -460,12 +496,41 @@ function BillPanel({
 
 export function PaymentPage({ tables, tableOrders, settings, onProcessPayment }: PaymentPageProps) {
   const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
+  const tablesRef = useRef(tables);
+  const ordersRef = useRef(tableOrders);
+  tablesRef.current = tables;
+  ordersRef.current = tableOrders;
   const selectedTable = tables.find(table => table.id === selectedTableId) ?? null;
 
+  useEffect(() => {
+    const restoreFromHistory = () => {
+      const tableId = paymentHistoryTableId();
+      const table = tablesRef.current.find(row => row.id === tableId);
+      const hasOrder = Boolean(tableId && ordersRef.current[tableId]?.length);
+      setSelectedTableId(tableId && table && !table.isPaid && hasOrder ? tableId : null);
+    };
+    restoreFromHistory();
+    window.addEventListener('popstate', restoreFromHistory);
+    return () => window.removeEventListener('popstate', restoreFromHistory);
+  }, []);
+
+  const openPayment = (tableId: string) => {
+    const current = window.history.state && typeof window.history.state === 'object'
+      ? window.history.state as Record<string, unknown>
+      : {};
+    window.history.pushState({ ...current, [PAYMENT_HISTORY_KEY]: tableId }, '');
+    setSelectedTableId(tableId);
+  };
+
+  const closePayment = () => {
+    if (paymentHistoryTableId() === selectedTableId) window.history.back();
+    else setSelectedTableId(null);
+  };
+
   const orderedTables = tables.filter(table => tableOrders[table.id] && tableOrders[table.id].length > 0);
-  const payableTables = orderedTables.filter(table => table.status === 'done');
-  const emptyOrReserved = tables.filter(table => !tableOrders[table.id] || tableOrders[table.id].length === 0);
-  const pendingRevenue = orderedTables.reduce((sum, table) => {
+  const unpaidTables = orderedTables.filter(table => !table.isPaid);
+  const paidServingTables = orderedTables.filter(table => table.isPaid);
+  const pendingRevenue = unpaidTables.reduce((sum, table) => {
     const order = tableOrders[table.id] || [];
     return sum + calculateInvoiceTotals(cartTotal(order), settings).total;
   }, 0);
@@ -480,47 +545,48 @@ export function PaymentPage({ tables, tableOrders, settings, onProcessPayment }:
           <div>
             <h1 style={{ margin: '0 0 4px', color: '#111827', fontSize: '24px' }}>Thanh toán</h1>
             <p style={{ margin: 0, color: '#6B7280', fontSize: '13px' }}>
-              {settings.restaurantName} · {payableTables.length} bàn sẵn sàng thanh toán
+              {unpaidTables.length} bàn chưa thanh toán
             </p>
           </div>
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: 1, background: '#F3F4F6' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 1, background: '#F3F4F6' }}>
         <div style={{ flex: 1, background: '#fff', padding: '12px 10px', textAlign: 'center' }}>
-          <div style={{ fontSize: '22px', fontWeight: 800, color: '#0D9488' }}>{payableTables.length}</div>
-          <div style={{ fontSize: '10px', color: '#9CA3AF', marginTop: 2 }}>Đã hoàn tất bếp</div>
+          <div style={{ fontSize: '22px', fontWeight: 800, color: '#0D9488' }}>{unpaidTables.length}</div>
+          <div style={{ fontSize: '11px', color: '#6B7280', marginTop: 2 }}>Chưa thanh toán</div>
+        </div>
+        <div style={{ flex: 1, background: '#fff', padding: '12px 10px', textAlign: 'center' }}>
+          <div style={{ fontSize: '22px', fontWeight: 800, color: '#16A34A' }}>{paidServingTables.length}</div>
+          <div style={{ fontSize: '11px', color: '#6B7280', marginTop: 2 }}>Đã trả trước</div>
         </div>
         <div style={{ flex: 1, background: '#fff', padding: '12px 10px', textAlign: 'center' }}>
           <div style={{ fontSize: '22px', fontWeight: 800, color: '#111827' }}>{formatVND(pendingRevenue)}</div>
-          <div style={{ fontSize: '10px', color: '#9CA3AF', marginTop: 2 }}>Dự thu</div>
+          <div style={{ fontSize: '11px', color: '#6B7280', marginTop: 2 }}>Còn phải thu</div>
         </div>
       </div>
 
       <div style={{ padding: 16 }}>
-        {orderedTables.length > 0 && (
+        {unpaidTables.length > 0 && (
           <>
             <div style={{ fontSize: '12px', fontWeight: 700, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>
-              Bàn đang phục vụ · Chỉ bàn đã hoàn tất mới được thanh toán
+              Chưa thanh toán
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
-              {orderedTables.map(table => {
+              {unpaidTables.map(table => {
                 const order = tableOrders[table.id] || [];
                 const cfg = STATUS_CONFIG[table.status];
                 const total = calculateInvoiceTotals(cartTotal(order), settings).total;
-                const canPay = table.status === 'done';
                 return (
                   <button
                     key={table.id}
-                    onClick={() => { if (canPay) setSelectedTableId(table.id); }}
-                    disabled={!canPay}
-                    aria-label={canPay ? `Thanh toán bàn ${table.number}` : `Bàn ${table.number} chưa thể thanh toán vì bếp chưa hoàn tất`}
+                    onClick={() => openPayment(table.id)}
+                    aria-label={`Thanh toán bàn ${table.number}${table.status === 'done' ? '' : ' trước khi món hoàn tất'}`}
                     style={{
                       background: '#fff', border: `2px solid ${cfg.border}`,
-                      borderRadius: 12, padding: '14px 16px', cursor: canPay ? 'pointer' : 'not-allowed',
+                      borderRadius: 12, padding: '14px 16px', cursor: 'pointer',
                       textAlign: 'left', display: 'flex', alignItems: 'center', gap: 14,
                       boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
-                      opacity: canPay ? 1 : 0.72,
                     }}
                   >
                     <div style={{
@@ -556,7 +622,9 @@ export function PaymentPage({ tables, tableOrders, settings, onProcessPayment }:
                         )}
                         <OrderTimer table={table} compact />
                       </div>
-                      {!canPay && <div style={{ color: '#B45309', fontSize: 11, fontWeight: 700, marginTop: 5 }}>Chỉ thanh toán sau khi bếp hoàn tất tất cả lượt gọi</div>}
+                      <div style={{ color: table.status === 'done' ? '#15803D' : '#B45309', fontSize: 12, fontWeight: 700, marginTop: 5 }}>
+                        {table.status === 'done' ? 'Thanh toán và đóng bàn' : 'Có thể thanh toán trước · bàn vẫn được giữ'}
+                      </div>
                     </div>
 
                     <div style={{ textAlign: 'right', flexShrink: 0 }}>
@@ -570,29 +638,50 @@ export function PaymentPage({ tables, tableOrders, settings, onProcessPayment }:
           </>
         )}
 
-        {emptyOrReserved.length > 0 && (
+        {paidServingTables.length > 0 && (
           <>
             <div style={{ fontSize: '12px', fontWeight: 700, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>
-              Bàn chưa có món cần thanh toán
+              Đã thanh toán · đang phục vụ
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 8 }}>
-              {emptyOrReserved.map(table => {
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {paidServingTables.map(table => {
                 const cfg = STATUS_CONFIG[table.status];
+                const order = tableOrders[table.id] || [];
+                const paidTotal = table.paidTotal ?? calculateInvoiceTotals(cartTotal(order), settings).total;
                 return (
                   <div
                     key={table.id}
                     style={{
-                      background: '#F9FAFB', border: '1.5px solid #E5E7EB',
-                      borderRadius: 10, padding: '12px', opacity: 0.6,
-                      display: 'flex', flexDirection: 'column', gap: 4,
+                      background: '#F0FDF4', border: '1.5px solid #86EFAC',
+                      borderRadius: 12, padding: '13px 14px',
+                      display: 'flex', alignItems: 'center', gap: 12,
                     }}
                   >
-                    <span style={{ fontWeight: 700, fontSize: '20px', color: '#9CA3AF' }}>Bàn {table.number}</span>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 3, color: '#C4C9D0' }}>
-                      <Users size={11} />
-                      <span style={{ fontSize: '11px' }}>{table.seats} chỗ</span>
+                    <div style={{ width: 46, height: 46, borderRadius: 12, background: '#fff', border: '1px solid #86EFAC', display: 'grid', placeItems: 'center', fontWeight: 900, fontSize: 18, color: '#111827', flexShrink: 0 }}>
+                      {table.number}
                     </div>
-                    <span style={{ fontSize: '11px', color: '#C4C9D0', fontWeight: 500 }}>{cfg.label}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+                        <strong style={{ color: '#111827' }}>Bàn {table.number}</strong>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, borderRadius: 999, padding: '3px 8px', background: '#16A34A', color: '#fff', fontSize: 11, fontWeight: 900 }}>
+                          <BadgeCheck size={13} /> Đã thanh toán
+                        </span>
+                        <span style={{ borderRadius: 999, padding: '3px 8px', background: cfg.bg, border: `1px solid ${cfg.border}`, color: cfg.text, fontSize: 11, fontWeight: 800 }}>{cfg.label}</span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', marginTop: 5, color: '#4B5563', fontSize: 12 }}>
+                        <span><Users size={12} style={{ verticalAlign: -2 }} /> {table.seats} chỗ</span>
+                        <span>· {order.reduce((sum, item) => sum + item.quantity, 0)} phần</span>
+                        <OrderTimer table={table} compact />
+                      </div>
+                      <div style={{ color: '#166534', fontSize: 12, fontWeight: 700, marginTop: 5 }}>
+                        {table.status === 'done' ? 'Món đã xong · chờ nhân viên xác nhận khách rời tại bàn' : 'Bếp vẫn đang chuẩn bị món'}
+                      </div>
+                      <div style={{ color: '#4B5563', fontSize: 12, marginTop: 4 }}>
+                        Đã thu {formatVND(paidTotal)}
+                        {table.paidAt ? ` lúc ${new Date(table.paidAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}` : ''}
+                        {table.paymentId ? ` · ${table.paymentId}` : ''}
+                      </div>
+                    </div>
                   </div>
                 );
               })}
@@ -603,10 +692,10 @@ export function PaymentPage({ tables, tableOrders, settings, onProcessPayment }:
         {orderedTables.length === 0 && (
           <div style={{ textAlign: 'center', padding: '48px 24px', color: '#9CA3AF' }}>
             <div style={{ width: 64, height: 64, borderRadius: 16, background: '#ECFEFF', margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <Building2 size={30} color="#0D9488" />
+              <ReceiptText size={30} color="#0D9488" />
             </div>
-            <div style={{ fontWeight: 600, color: '#374151', marginBottom: 6 }}>Tất cả bàn đã thanh toán</div>
-            <div style={{ fontSize: '13px' }}>Không có bàn nào cần thanh toán</div>
+            <div style={{ fontWeight: 600, color: '#374151', marginBottom: 6 }}>Chưa có bàn cần thanh toán</div>
+            <div style={{ fontSize: '13px' }}>Các bàn đã gọi món sẽ xuất hiện tại đây</div>
           </div>
         )}
       </div>
@@ -616,7 +705,7 @@ export function PaymentPage({ tables, tableOrders, settings, onProcessPayment }:
           table={selectedTable}
           order={tableOrders[selectedTable.id] || []}
           settings={settings}
-          onClose={() => setSelectedTableId(null)}
+          onClose={closePayment}
           onConfirm={(payment, items) => onProcessPayment(payment, items)}
         />
       )}
