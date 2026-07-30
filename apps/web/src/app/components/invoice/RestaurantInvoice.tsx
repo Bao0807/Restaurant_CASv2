@@ -108,7 +108,10 @@ export function RestaurantInvoice({ data }: { data: PrintableInvoiceData }) {
               {(data.additionalBatchCount ?? 0) > 0 && ` (+${data.additionalBatchCount} gọi thêm)`}
             </strong>
           </div>
-          <div className="invoice-info-box"><span>Thu ngân / Phục vụ</span><strong>{data.cashierName} / {data.staffName}</strong></div>
+          <div className="invoice-info-box invoice-info-staff">
+            <span>Thu ngân / Phục vụ</span>
+            <strong>{data.cashierName} / {data.staffName}</strong>
+          </div>
         </div>
 
         <div className="invoice-table-wrapper">

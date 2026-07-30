@@ -353,7 +353,7 @@ function BillPanel({
                 <X size={18} color="#374151" />
               </button>
             </div>
-            <div style={{ flex: 1, overflow: 'auto', background: '#E5E7EB' }}>
+            <div className="invoice-preview">
               <RestaurantInvoice data={invoiceData} />
             </div>
           </>

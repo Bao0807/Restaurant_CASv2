@@ -312,7 +312,7 @@ export const STATUS_CONFIG: Record<TableStatus, TableStatusConfig> = {
   empty:    { label: 'Trống',      bg: '#F8FAFC', text: '#64748B', border: '#CBD5E1', dot: '#94A3B8', icon: 'circle' },
   waiting:  { label: 'Đang chờ',   bg: '#EFF6FF', text: '#1D4ED8', border: '#93C5FD', dot: '#2563EB', icon: 'clock' },
   cooking:  { label: 'Đang nấu',   bg: '#FFF7ED', text: '#C2410C', border: '#FDBA74', dot: '#EA580C', icon: 'flame' },
-  done:     { label: 'Đã xong',    bg: '#FFFBEB', text: '#92400E', border: '#FCD34D', dot: '#D97706', icon: 'bell-ring' },
+  done:     { label: 'Đã xong',    bg: '#FEF2F2', text: '#B91C1C', border: '#FCA5A5', dot: '#DC2626', icon: 'bell-ring' },
   reserved: { label: 'Đặt trước',  bg: '#FAF5FF', text: '#7E22CE', border: '#D8B4FE', dot: '#9333EA', icon: 'calendar-clock' },
 };
 

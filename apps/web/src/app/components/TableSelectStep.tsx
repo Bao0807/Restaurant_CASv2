@@ -20,6 +20,7 @@ interface TableSelectStepProps {
   onDeleteOrder: (tableId: string) => Promise<void>;
   onMarkDone: (tableId: string) => Promise<void>;
   onConfirmDeparture: (tableId: string) => Promise<void>;
+  onPay: (tableId: string) => void;
 }
 
 type TableFilter = 'all' | 'serving' | TableStatus | 'paid';
@@ -299,7 +300,7 @@ function TableAction({
   return (
     <button
       type="button"
-      className={`operations-table-action${isEmpty ? ' is-primary' : ''}`}
+      className={`operations-table-action${isEmpty ? ' is-primary' : hasOrder ? ' is-view-order' : ''}`}
       aria-label={`${label} cho bàn ${table.number}`}
       onClick={isEmpty ? onQuickOrder : onOpen}
     >
@@ -401,13 +402,23 @@ function TableCard({
       <p className="operations-table-area" title={areaName}>{areaName}</p>
 
       <div className="operations-table-card-body">
-        <TableMeta order={order} seats={table.seats} />
-        {table.nextReservation && (
-          <span className="operations-reservation-note">
-            <Clock size={12} aria-hidden="true" />
-            <span>{formatReservationSlot(table.nextReservation.reservedAt)} · {table.nextReservation.customerName}</span>
-          </span>
-        )}
+        <div className="operations-table-context">
+          <TableMeta order={order} seats={table.seats} />
+          {table.nextReservation && (
+            <span
+              className="operations-reservation-note"
+              aria-label={`Đặt trước ${formatReservationSlot(table.nextReservation.reservedAt)}, khách ${table.nextReservation.customerName}`}
+              title={`${formatReservationSlot(table.nextReservation.reservedAt)} · ${table.nextReservation.customerName}`}
+            >
+              <Clock size={12} aria-hidden="true" />
+              <time dateTime={table.nextReservation.reservedAt}>
+                {formatReservationSlot(table.nextReservation.reservedAt)}
+              </time>
+              <span className="operations-reservation-separator" aria-hidden="true">·</span>
+              <span className="operations-reservation-customer">{table.nextReservation.customerName}</span>
+            </span>
+          )}
+        </div>
         <ProgressInfo compact={compact} hasOrder={hasOrder} table={table} />
       </div>
 
@@ -442,6 +453,7 @@ export function TableSelectStep({
   onDeleteOrder,
   onMarkDone,
   onConfirmDeparture,
+  onPay,
 }: TableSelectStepProps) {
   const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -642,6 +654,7 @@ export function TableSelectStep({
           onDeleteOrder={() => onDeleteOrder(selectedTable.id)}
           onMarkDone={() => onMarkDone(selectedTable.id)}
           onConfirmDeparture={() => onConfirmDeparture(selectedTable.id)}
+          onPay={() => onPay(selectedTable.id)}
         />
       )}
     </div>

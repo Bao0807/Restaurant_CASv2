@@ -427,6 +427,31 @@ export default function App() {
     }
   };
 
+  /** Mở thẳng màn thu ngân với đúng hóa đơn từ popup thao tác bàn. */
+  const handleOpenTablePayment = (tableId: string) => {
+    const table = tables.find(row => row.id === tableId);
+    const hasOrder = Boolean(tableOrders[tableId]?.length);
+
+    if (!table || !hasOrder) {
+      showToast('Bàn chưa có hóa đơn để thanh toán.', 'info');
+      return;
+    }
+    if (table.isPaid) {
+      showToast('Bàn này đã được thanh toán.', 'info');
+      return;
+    }
+
+    setCart([]);
+    navigate({
+      view: 'payment',
+      orderStep: 'tables',
+      selectedTableId: null,
+      orderMode: 'new',
+      editingBatchId: null,
+      casPaymentTableId: tableId,
+    });
+  };
+
   const handleConfirmDeparture = async (tableId: string) => {
     try {
       await confirmTableDeparture(tableId);
@@ -494,11 +519,12 @@ export default function App() {
         selectedTableId: null,
         orderMode: 'new',
         editingBatchId: null,
+        casPaymentTableId: null,
       });
       return;
     }
 
-    navigate({ view: nextView });
+    navigate({ view: nextView, casPaymentTableId: null });
   };
 
   const servingTableCount = tables.filter(table => (
@@ -548,6 +574,7 @@ export default function App() {
                   onDeleteOrder={handleDeleteOrder}
                   onMarkDone={handleMarkDone}
                   onConfirmDeparture={handleConfirmDeparture}
+                  onPay={handleOpenTablePayment}
                 />
               </div>
             )}

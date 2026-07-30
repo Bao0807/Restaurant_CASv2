@@ -10,6 +10,8 @@ export interface AppNavigationState {
   selectedTableId: string | null;
   orderMode: OrderMode;
   editingBatchId: number | null;
+  /** Bàn cần mở sẵn trong màn Thanh toán; null khi chỉ mở danh sách thu ngân. */
+  casPaymentTableId: string | null;
 }
 
 export const INITIAL_APP_NAVIGATION: AppNavigationState = {
@@ -19,6 +21,7 @@ export const INITIAL_APP_NAVIGATION: AppNavigationState = {
   selectedTableId: null,
   orderMode: 'new',
   editingBatchId: null,
+  casPaymentTableId: null,
 };
 
 export function isAppNavigationState(value: unknown): value is AppNavigationState {

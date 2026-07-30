@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronRight,
   ClipboardList,
+  CreditCard,
   DoorOpen,
   Pencil,
   Trash2,
@@ -26,6 +27,7 @@ interface TableOptionsModalProps {
   onDeleteOrder: () => Promise<void>;
   onMarkDone: () => Promise<void>;
   onConfirmDeparture: () => Promise<void>;
+  onPay: () => void;
 }
 
 const TABLE_OPTIONS_HISTORY_KEY = 'casTableOptionsId';
@@ -98,6 +100,7 @@ export function TableOptionsModal({
   onDeleteOrder,
   onMarkDone,
   onConfirmDeparture,
+  onPay,
 }: TableOptionsModalProps) {
   const titleId = useId();
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -282,6 +285,23 @@ export function TableOptionsModal({
                 <span className="table-option-action-copy">
                   <strong>{hasOrder ? 'Gọi thêm món' : 'Gọi món cho bàn này'}</strong>
                   <small>{hasOrder ? 'Tạo một lượt gọi thêm' : 'Mở menu và chọn món'}</small>
+                </span>
+                <ChevronRight size={18} />
+              </button>
+            )}
+
+            {hasOrder && !table.isPaid && (
+              <button
+                type="button"
+                onClick={onPay}
+                className="table-option-action table-option-action-payment"
+              >
+                <span className="table-option-action-icon table-option-action-icon-payment">
+                  <CreditCard size={19} />
+                </span>
+                <span className="table-option-action-copy">
+                  <strong>Thanh toán bàn này</strong>
+                  <small>Chuyển tới thu ngân và mở đúng hóa đơn của bàn</small>
                 </span>
                 <ChevronRight size={18} />
               </button>
