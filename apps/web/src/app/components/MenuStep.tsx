@@ -7,6 +7,7 @@ import {
   cartItemTotal, cartQuantityForMenuItem, cartTotal, formatVND, genId,
   getCartStockIssues, menuItemDailyAllowance,
 } from '../data';
+import { MenuItemImage } from './MenuItemImage';
 
 interface MenuStepProps {
   table: Table;
@@ -155,7 +156,7 @@ function ItemCustomizerModal({
       >
         {/* Image */}
         <div style={{ position: 'relative', height: 200, flexShrink: 0 }}>
-          <img
+          <MenuItemImage
             src={item.image}
             alt={item.name}
             decoding="async"
@@ -448,7 +449,7 @@ function CartSheet({
             const cannotIncrease = item.quantity >= 99 || (allowance != null && totalForDish >= allowance);
             return (
             <div key={item.cartId} style={{ display: 'flex', gap: 10, paddingBottom: 12, marginBottom: 12, borderBottom: '1px solid #F9FAFB' }}>
-              <img src={item.menuItem.image} alt={item.menuItem.name} style={{ width: 52, height: 52, borderRadius: 10, objectFit: 'cover', flexShrink: 0 }} />
+              <MenuItemImage src={item.menuItem.image} alt={item.menuItem.name} style={{ width: 52, height: 52, borderRadius: 10, objectFit: 'cover', flexShrink: 0 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 600, color: '#111827', fontSize: '13px', marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.menuItem.name}</div>
                 {item.selectedSize && <div style={{ fontSize: '11px', color: '#9CA3AF' }}>Size: {item.selectedSize.label}</div>}
@@ -744,7 +745,7 @@ export function MenuStep({ table, cart, categories, menuItems, isAddition, isEdi
                 }}
               >
                 <div style={{ position: 'relative', paddingTop: '68%' }}>
-                  <img
+                  <MenuItemImage
                     src={item.image}
                     alt={item.name}
                     loading="lazy"

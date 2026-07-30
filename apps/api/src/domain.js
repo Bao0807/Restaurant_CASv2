@@ -206,6 +206,9 @@ export function createPayment({ draft, items, settings, table, paidAt = new Date
   }
 
   const totals = calculateTotals(items, settings);
+  const cashReceived = draft.method === 'cash'
+    ? integer(draft.cashReceived ?? totals.total, 'payment.cashReceived', totals.total, MAX_MONEY)
+    : null;
   return {
     id: invoiceCode,
     invoiceCode,
@@ -214,6 +217,10 @@ export function createPayment({ draft, items, settings, table, paidAt = new Date
     tableNumber: table.number,
     method: draft.method,
     ...totals,
+    ...(cashReceived != null ? {
+      cashReceived,
+      cashChange: cashReceived - totals.total,
+    } : {}),
     itemCount: items.reduce((sum, item) => sum + item.quantity, 0),
     paidAt: paidAt.toISOString(),
     staffName: settings.staffName,

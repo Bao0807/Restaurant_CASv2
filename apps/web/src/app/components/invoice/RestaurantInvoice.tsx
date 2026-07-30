@@ -41,8 +41,12 @@ export interface PrintableInvoiceData {
   total: number;
   paymentMethod: string;
   paymentStatus: string;
+  cashReceived?: number;
+  cashChange?: number;
   note: string;
 }
+
+export type InvoicePrintFormat = 'a4' | 'thermal';
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat('vi-VN').format(value) + 'đ';
@@ -53,7 +57,13 @@ function isConfigured(value: string): boolean {
   return Boolean(normalized) && !normalized.startsWith('chưa cập nhật');
 }
 
-export function RestaurantInvoice({ data }: { data: PrintableInvoiceData }) {
+export function RestaurantInvoice({
+  data,
+  format = 'a4',
+}: {
+  data: PrintableInvoiceData;
+  format?: InvoicePrintFormat;
+}) {
   const contacts: Array<[string, string]> = ([
     ['Địa chỉ', data.restaurant.address],
     ['Hotline', data.restaurant.phone],
@@ -62,7 +72,7 @@ export function RestaurantInvoice({ data }: { data: PrintableInvoiceData }) {
   ] as Array<[string, string]>).filter((entry) => isConfigured(entry[1]));
 
   return (
-    <div className="invoice-page invoice-print-area">
+    <div className={`invoice-page invoice-print-area invoice-format-${format}`}>
       <div className="invoice-card">
         <div className="invoice-header">
           <div className="invoice-brand">
@@ -144,6 +154,12 @@ export function RestaurantInvoice({ data }: { data: PrintableInvoiceData }) {
             <h4>Phương thức thanh toán</h4>
             <div className="payment-row"><span>Phương thức:</span><strong>{data.paymentMethod}</strong></div>
             <div className="payment-row"><span>Trạng thái:</span><strong>{data.paymentStatus}</strong></div>
+            {data.cashReceived != null && (
+              <div className="payment-row"><span>Khách đưa:</span><strong>{formatCurrency(data.cashReceived)}</strong></div>
+            )}
+            {data.cashChange != null && (
+              <div className="payment-row payment-change"><span>Tiền thừa:</span><strong>{formatCurrency(data.cashChange)}</strong></div>
+            )}
             <div className="payment-row"><span>Mã ghi nhận:</span><strong>{data.transactionCode}</strong></div>
           </div>
 

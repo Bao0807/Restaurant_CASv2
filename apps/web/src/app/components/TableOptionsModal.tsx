@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   AlertCircle,
@@ -8,12 +8,22 @@ import {
   ClipboardList,
   CreditCard,
   DoorOpen,
+  LogIn,
   Pencil,
   Trash2,
   X,
 } from 'lucide-react';
-import { cartTotal, formatVND, STATUS_CONFIG, type CartItem, type Table, type TableStatus } from '../data';
+import {
+  cartTotal,
+  formatReservationTimeRange,
+  formatVND,
+  STATUS_CONFIG,
+  type CartItem,
+  type Table,
+  type TableStatus,
+} from '../data';
 import type { EditableOrderBatch } from '../services/api';
+import { getServerNowMs } from '../services/api';
 import { OrderTimer } from './OrderTimer';
 import { ConfirmationDialog } from './ConfirmationDialog';
 
@@ -27,6 +37,7 @@ interface TableOptionsModalProps {
   onDeleteOrder: () => Promise<void>;
   onMarkDone: () => Promise<void>;
   onConfirmDeparture: () => Promise<void>;
+  onCheckInReservation: () => Promise<void>;
   onPay: () => void;
 }
 
@@ -83,12 +94,6 @@ function deleteBlockedReason(table: Table): string {
   return 'Chỉ có thể hủy khi toàn bộ phiếu còn đang chờ';
 }
 
-function formatReservationTime(value: string): string {
-  return new Date(value).toLocaleString('vi-VN', {
-    hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit',
-  });
-}
-
 /** Modal thao tác trực tiếp từ màn Vận hành bàn. */
 export function TableOptionsModal({
   table,
@@ -100,6 +105,7 @@ export function TableOptionsModal({
   onDeleteOrder,
   onMarkDone,
   onConfirmDeparture,
+  onCheckInReservation,
   onPay,
 }: TableOptionsModalProps) {
   const titleId = useId();
@@ -111,23 +117,32 @@ export function TableOptionsModal({
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [markDoneBusy, setMarkDoneBusy] = useState(false);
   const [departureBusy, setDepartureBusy] = useState(false);
+  const [checkInBusy, setCheckInBusy] = useState(false);
   const [showDepartureConfirmation, setShowDepartureConfirmation] = useState(false);
   const cfg = STATUS_CONFIG[table.status];
   const hasOrder = Boolean(order?.length);
   const checkedInReservation = table.nextReservation?.status === 'seated';
+  const bookedReservation = table.nextReservation?.status === 'booked' ? table.nextReservation : null;
   const isCooking = table.status === 'cooking';
   const total = hasOrder ? cartTotal(order!) : 0;
   const canDelete = canDeleteWaitingOrder(table, hasOrder);
+  const now = getServerNowMs();
+  const canCheckInReservation = Boolean(
+    bookedReservation
+    && now >= new Date(bookedReservation.reservedAt).getTime() - 60 * 60_000
+    && now < new Date(bookedReservation.endsAt).getTime()
+    && !hasOrder,
+  );
   confirmationOpenRef.current = showDeleteConfirmation || showDepartureConfirmation;
   onCloseRef.current = onClose;
 
-  const requestClose = () => {
+  const requestClose = useCallback(() => {
     if (getTableOptionsHistoryTableId() === table.id) {
       window.history.back();
     } else {
       onCloseRef.current();
     }
-  };
+  }, [table.id]);
 
   const closeAfterAction = () => {
     // Điều hướng sang menu đã tạo một history entry mới; thao tác tại chỗ thì lùi entry modal.
@@ -179,7 +194,7 @@ export function TableOptionsModal({
       window.removeEventListener('popstate', handlePopState);
       previouslyFocused?.focus();
     };
-  }, [table.id]);
+  }, [requestClose, table.id]);
 
   return createPortal(
     <div
@@ -221,7 +236,7 @@ export function TableOptionsModal({
               )}
               {table.nextReservation && (
                 <span style={{ fontSize: 12, color: '#2563EB' }}>
-                  · {formatReservationTime(table.nextReservation.reservedAt)} · {table.nextReservation.customerName}
+                  · {formatReservationTimeRange(table.nextReservation.reservedAt, table.nextReservation.endsAt)} · {table.nextReservation.customerName}
                 </span>
               )}
             </div>
@@ -272,6 +287,41 @@ export function TableOptionsModal({
           )}
 
           <div className="table-options-actions">
+            {bookedReservation && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (!canCheckInReservation || checkInBusy) return;
+                  setCheckInBusy(true);
+                  void onCheckInReservation().then(
+                    () => {
+                      setCheckInBusy(false);
+                      closeAfterAction();
+                    },
+                    () => setCheckInBusy(false),
+                  );
+                }}
+                disabled={!canCheckInReservation || checkInBusy}
+                aria-busy={checkInBusy}
+                className={`table-option-action table-option-action-check-in${canCheckInReservation ? '' : ' is-disabled'}`}
+              >
+                <span className="table-option-action-icon table-option-action-icon-check-in"><LogIn size={19} /></span>
+                <span className="table-option-action-copy">
+                  <strong>{checkInBusy ? 'Đang nhận bàn…' : 'Nhận bàn'}</strong>
+                  <small>
+                    {hasOrder
+                      ? 'Bàn đang phục vụ lượt khách hiện tại'
+                      : now < new Date(bookedReservation.reservedAt).getTime() - 60 * 60_000
+                        ? `Có thể nhận sớm từ ${new Date(new Date(bookedReservation.reservedAt).getTime() - 60 * 60_000).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}`
+                        : now >= new Date(bookedReservation.endsAt).getTime()
+                          ? 'Khung giờ đã kết thúc'
+                          : 'Nhận khách và mở ngay phần gọi món'}
+                  </small>
+                </span>
+                <ChevronRight size={18} />
+              </button>
+            )}
+
             {!table.isPaid && (table.status === 'empty' || hasOrder || checkedInReservation)
               && (table.status !== 'reserved' || checkedInReservation) && (
               <button

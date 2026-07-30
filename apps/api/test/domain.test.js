@@ -59,7 +59,36 @@ test('payment bỏ qua tổng tiền giả từ client và dùng thời gian ser
 
   assert.equal(payment.subtotal, 196_000);
   assert.equal(payment.total, 226_380);
+  assert.equal(payment.cashReceived, 226_380);
+  assert.equal(payment.cashChange, 0);
   assert.equal(payment.paidAt, paidAt.toISOString());
+});
+
+test('payment tiền mặt tính tiền thừa từ tổng phía server và từ chối tiền khách đưa thiếu', () => {
+  const items = validateOrderItems(rawItems);
+  const draft = {
+    invoiceCode: 'CAS-260711-CASHCHANGE',
+    transactionCode: 'CASH-260711-CASHCHANGE',
+    method: 'cash',
+    cashReceived: 250_000,
+  };
+  const payment = createPayment({
+    draft,
+    items,
+    settings: defaultSettings,
+    table: { id: 't1', number: 1 },
+  });
+  assert.equal(payment.cashReceived, 250_000);
+  assert.equal(payment.cashChange, 23_620);
+  assert.throws(
+    () => createPayment({
+      draft: { ...draft, cashReceived: 200_000 },
+      items,
+      settings: defaultSettings,
+      table: { id: 't1', number: 1 },
+    }),
+    error => error.code === 'VALIDATION_ERROR' && error.field === 'payment.cashReceived',
+  );
 });
 
 test('từ chối quantity và VAT ngoài giới hạn', () => {

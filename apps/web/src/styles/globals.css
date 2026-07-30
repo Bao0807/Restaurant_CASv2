@@ -853,6 +853,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .table-option-action-payment { border-color: #93c5fd; background: #eff6ff; }
 .table-option-action-payment .table-option-action-copy strong { color: #1d4ed8; }
 .table-option-action-icon-payment { background: #2563eb; }
+.table-option-action-check-in { border-color: #d8b4fe; background: #faf5ff; }
+.table-option-action-check-in .table-option-action-copy strong { color: #7e22ce; }
+.table-option-action-icon-check-in { background: #9333ea; }
 .table-option-action-done { border-color: #86efac; background: #f0fdf4; }
 .table-option-action-icon-done { background: #22c55e; }
 .table-option-action-delete { border-color: #fecaca; background: #fef2f2; }

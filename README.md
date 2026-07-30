@@ -2,7 +2,7 @@
 
 Hệ thống POS và điều phối vận hành nhà hàng: đặt bàn, gọi món theo bàn, hàng đợi bếp FIFO, thanh toán, in phiếu/hóa đơn, báo cáo và quản trị. MySQL là nguồn dữ liệu nghiệp vụ; backend xác thực lại giá, tùy chọn món, ETA, tổng tiền và quan hệ đặt bàn trước khi ghi dữ liệu.
 
-> **Mức độ hoàn thiện:** phù hợp chạy nội bộ hoặc MVP. Dự án chưa nên mở trực tiếp ra Internet trước khi hoàn thành các mục trong [Giới hạn và việc cần làm trước production](#giới-hạn-và-việc-cần-làm-trước-production).
+> **Mức độ hoàn thiện:** phù hợp pilot và vận hành production nội bộ sau khi hoàn thành checklist triển khai. Session cookie, RBAC, CI, audit log và quality gate đã có; trước khi mở trực tiếp ra Internet vẫn cần hoàn thành các mục phụ thuộc hạ tầng/nhà cung cấp trong [Giới hạn và việc cần làm trước production](#giới-hạn-và-việc-cần-làm-trước-production).
 
 ## Mục lục
 
@@ -61,17 +61,21 @@ npm run dev:web
 | API | Node.js, Express | Xác thực, validation, transaction, đặt bàn và nghiệp vụ queue |
 | Database | MySQL 8, InnoDB | Catalog, bàn, lịch đặt, order đang mở, cấu hình và giao dịch |
 | Biểu đồ | Recharts, lazy-loaded | Báo cáo doanh thu và hóa đơn theo giờ/ngày/tuần |
-| Giao diện | CSS responsive, Lucide | Desktop, tablet, mobile, phiếu bếp 80 mm và hóa đơn A4 |
+| Giao diện | CSS responsive, Lucide | Desktop, tablet, mobile, phiếu bếp 80 mm và hóa đơn A4/80 mm |
 
-| Quality gate gần nhất | Kết quả ngày 21/07/2026 |
+| Quality gate gần nhất | Kết quả ngày 30/07/2026 |
 |---|---:|
-| Unit test backend | `31/31` đạt |
+| Unit test backend | `38/38` đạt |
+| Unit/a11y test frontend | `4/4` đạt |
+| Browser E2E Chromium | `1/1` đạt |
 | Database audit read-only | `33/33` nhóm đạt |
+| ESLint | Đạt, không warning |
 | TypeScript | Đạt |
 | Production build | Đạt |
+| Dependency audit | `0` cảnh báo |
 | Smoke test API/MySQL | Đạt trên database test |
 
-Các kết quả trên có thể tái lập bằng lệnh trong [Scripts và kiểm thử](#scripts-và-kiểm-thử); đây không phải badge CI vì repository hiện chưa có pipeline CI.
+Các kết quả trên có thể tái lập bằng lệnh trong [Scripts và kiểm thử](#scripts-và-kiểm-thử). Workflow `.github/workflows/ci.yml` chạy lại quality gate, migration, database audit, API smoke và Chromium E2E trên database MySQL cô lập.
 
 ## Ảnh giao diện
 
@@ -108,6 +112,10 @@ Các kết quả trên có thể tái lập bằng lệnh trong [Scripts và ki�
 
 ![Báo cáo tháng CAS với trục theo tuần](docs/screenshots/05-reports-desktop.png)
 
+### Thanh toán
+
+![Danh sách bàn chờ thanh toán và bàn đã trả trước](docs/screenshots/10-payment-desktop.png)
+
 ### Đặt bàn
 
 ![Quản lý đặt bàn CAS trên desktop](docs/screenshots/07-reservations-desktop.png)
@@ -121,13 +129,14 @@ Các kết quả trên có thể tái lập bằng lệnh trong [Scripts và ki�
 ## Tính năng chính
 
 - **Vận hành bàn:** một màn hình thống nhất để tìm/lọc bàn, xem lưới hoặc sơ đồ khu vực, gọi món, gọi thêm và theo dõi trạng thái bếp/đã thanh toán.
-- **Đặt bàn:** kiểm tra sức chứa và chồng lịch trong transaction; hỗ trợ `booked`, `seated`, `completed`, `cancelled` và `no_show`.
+- **Đặt bàn:** chọn giờ theo mốc 15 phút, kiểm tra sức chứa và chồng/sát lịch trong transaction; hỗ trợ `booked`, `seated`, `completed`, `cancelled` và `no_show`.
 - **Order theo lượt:** `active_orders` giữ bill tổng hợp, còn mỗi lần gọi tạo một `order_batch` FIFO riêng để sửa, in và điều phối bếp.
 - **Hạn mức món theo ngày:** giữ số phần khi gửi bếp, cập nhật chênh lệch khi sửa phiếu chờ, hoàn khi hủy order toàn `waiting` và tự dùng bucket mới theo `BUSINESS_TIME_ZONE`.
 - **Bếp:** FIFO, giới hạn số batch nấu song song, tự động/thủ công/tạm dừng, tự hoàn tất theo ETA, phát hiện lỗi đồng bộ và chống thao tác từ snapshot cũ bằng `batchId/version`.
 - **ETA tin cậy:** backend tính từ catalog MySQL theo `cookMinutes × quantity`; timer giao diện hiệu chỉnh bằng `serverNow`.
 - **Thanh toán:** tiền mặt, thẻ hoặc QR; trả sau đóng bàn ngay, trả trước giữ queue và bàn đến khi nhân viên xác nhận khách rời.
-- **In ấn:** phiếu bếp 80 mm riêng cho từng lượt gọi và hóa đơn A4 tổng hợp cố định.
+- **In ấn:** phiếu bếp 80 mm riêng cho từng lượt gọi; hóa đơn thanh toán hỗ trợ A4 và cuộn nhiệt 80 mm, có thể mở/in lại từ lịch sử.
+- **Bảo mật vận hành:** session cookie `HttpOnly/Secure/SameSite`, thời hạn phiên, giới hạn đăng nhập sai theo IP và RBAC `manager/cashier/server/chef`.
 - **Quản trị:** bàn/khu vực, thực đơn, hạn mức ngày, thời gian nấu, nhân viên/ca, cấu hình bếp và thương hiệu.
 - **Báo cáo:** Ngày–Tuần–Tháng theo kỳ lịch sử, KPI, phương thức, món, danh mục và nhân viên từ hóa đơn đã thanh toán.
 - **Đa thiết bị và responsive:** polling có timeout, dừng khi tab ẩn, Browser Back/Forward cho các bước chính, touch target 44 px và hỗ trợ `prefers-reduced-motion`.
@@ -155,12 +164,13 @@ Công thức giả định các loại món khác nhau có thể được chế 
 
 ```mermaid
 flowchart LR
-  U[Trình duyệt POS] -->|HTTP + Basic Auth| A[Express API]
+  U[Trình duyệt POS] -->|HTTPS + session cookie| A[Express API]
   A -->|Pool / transaction| D[(MySQL 8)]
   A --> C[Catalog validation]
   A --> Q[Kitchen FIFO theo order batch]
   A --> R[Reservation + availability]
   A --> P[Payment + report service]
+  A --> L[Structured log + audit_events]
   Q --> D
   R --> D
   P --> D
@@ -180,6 +190,7 @@ Các nguyên tắc chính:
 8. `/api/operations` đọc bàn/order/batch/config/đặt bàn gần nhất trong một repeatable-read snapshot duy nhất.
 9. Thanh toán trước được liên kết 1–1 với active order qua `active_order_payments`; hóa đơn đã chốt không thay đổi trong khi queue bếp tiếp tục hoàn tất các batch còn lại.
 10. Hạn mức món được khóa theo cặp `(menu_item_id, business_date)` trong cùng transaction tạo/sửa/hủy order. Cách khóa theo thứ tự ngày và id ngăn hai máy POS cùng bán phần cuối; `/api/operations` đồng bộ phần còn lại giữa các thiết bị mà không phải tải lại toàn bộ catalog.
+11. Mỗi request có `X-Request-Id` và log JSON; mutation thành công được ghi vào `audit_events` với tài khoản, vai trò, action và entity nhưng không sao chép body nhạy cảm.
 
 ## Cấu trúc thư mục
 
@@ -188,7 +199,9 @@ Restaurant_CASv2/
 ├─ apps/
 │  ├─ api/
 │  │  ├─ src/
-│  │  │  ├─ server.js            # HTTP, auth, endpoint và transaction orchestration
+│  │  │  ├─ server.js            # HTTP, endpoint và transaction orchestration
+│  │  │  ├─ auth.js              # Session cookie, tài khoản môi trường, RBAC và rate limit
+│  │  │  ├─ logger.js            # Request ID và structured JSON logging
 │  │  │  ├─ db.js                # Pool, bootstrap schema và migration tương thích
 │  │  │  ├─ domain.js            # Validation order/settings và công thức payment
 │  │  │  ├─ catalog.js           # Catalog, canonicalization và ETA
@@ -211,8 +224,13 @@ Restaurant_CASv2/
 │        ├─ app/services/api.ts   # HTTP client có auth, timeout và chuẩn hóa lỗi
 │        ├─ app/config/           # Brand/settings dùng chung
 │        ├─ app/components/       # Màn hình nghiệp vụ
-│        │  └─ ReservationsPage.tsx # Quản lý lịch đặt bàn và check-in
+│        │  ├─ ReservationsPage.tsx # Quản lý lịch đặt bàn và check-in
+│        │  └─ payment/           # Khối lịch sử/chi tiết tách khỏi PaymentPage
 │        └─ styles/                # Theme, responsive và hiệu ứng
+├─ e2e/                            # Chromium E2E và script chụp ảnh README
+├─ .github/workflows/ci.yml        # Quality gate trên MySQL cô lập
+├─ eslint.config.mjs               # Lint JavaScript/TypeScript/React
+├─ playwright.config.ts            # Cấu hình browser E2E
 ├─ database/schema.sql            # Schema bootstrap thủ công
 ├─ docs/screenshots/              # Ảnh thật dùng trong README
 ├─ assets/brand/                   # Asset thương hiệu gốc/chất lượng nguồn
@@ -258,8 +276,12 @@ Chỉnh `apps/api/.env` trước khi chạy. Không commit `.env`; các file nà
 | `HOST` | `0.0.0.0` | Cho phép máy khác trong LAN kết nối |
 | `CORS_ORIGIN` | `http://localhost:5173` | Allowlist origin production, phân cách bằng dấu phẩy |
 | `CORS_ALLOW_PRIVATE_NETWORK` | `true` | Chỉ development: cho localhost/IPv6/IP LAN riêng |
-| `AUTH_USERNAME` | `admin` | Tài khoản POS |
-| `AUTH_PASSWORD` | bắt buộc đổi | Mật khẩu dài và ngẫu nhiên |
+| `AUTH_USERNAME` | `admin` | Tài khoản tương thích cũ; được ánh xạ thành vai trò `manager` |
+| `AUTH_PASSWORD` | bắt buộc đổi | Mật khẩu dài và ngẫu nhiên của tài khoản tương thích |
+| `AUTH_USERS_JSON` | để trống | Danh sách `{ username, password, role }`; khi có sẽ thay cặp tài khoản tương thích |
+| `AUTH_SESSION_SECRET` | bắt buộc production | Chuỗi ngẫu nhiên tối thiểu 32 ký tự dùng ký session cookie |
+| `AUTH_SESSION_HOURS` | `8` | Thời hạn phiên, từ 1 giờ đến 30 ngày |
+| `TRUST_PROXY` | để trống | Đặt `loopback` khi API chạy sau reverse proxy cùng máy; quyết định IP dùng cho rate limit/log |
 | `KITCHEN_CONCURRENCY` | `2` | Công suất bếp khởi tạo |
 | `KITCHEN_STALE_MINUTES` | `120` | Ngưỡng chẩn đoán batch không tự đồng bộ sau ETA |
 | `BUSINESS_TIME_ZONE` | `Asia/Ho_Chi_Minh` | Múi giờ xác định ngày kinh doanh và thời điểm đặt lại số phần món |
@@ -275,6 +297,17 @@ Chỉnh `apps/api/.env` trước khi chạy. Không commit `.env`; các file nà
 | `LEGACY_TIMEZONE_OFFSET_MINUTES` | `420` | Chỉ dùng một lần khi đổi timestamp legacy sang UTC |
 
 Đặt cùng một `BUSINESS_TIME_ZONE` cho mọi API instance của nhà hàng. Ngày kinh doanh được tính ở backend theo biến này, không theo múi giờ của máy POS hoặc MySQL session; mỗi ngày có một dòng usage riêng nên không cần tiến trình reset chạy lúc nửa đêm.
+
+`AUTH_USERS_JSON` hỗ trợ các vai trò `manager`, `cashier`, `server`, `chef`. Ví dụ:
+
+```json
+[
+  { "username": "quanly", "password": "mat-khau-dai-ngau-nhien", "role": "manager" },
+  { "username": "thungan", "password": "mat-khau-dai-ngau-nhien", "role": "cashier" }
+]
+```
+
+Trong production hãy cấp JSON và secret bằng secret manager, không ghi trực tiếp vào repository.
 
 ### Biến môi trường web
 
@@ -366,7 +399,7 @@ erDiagram
 
 ### Kết quả rà soát database
 
-Ngày 21/07/2026, database MySQL `8.0.46` đang chạy có `14` bảng và `11` khóa ngoại. `npm run db:audit` đạt `33/33` nhóm ở chế độ `READ ONLY`: không có bản ghi mồ côi, batch gắn sai bàn, order lệch tổng hợp, lịch mở chồng nhau, hóa đơn trả trước mất liên kết hoặc ledger món thấp hơn số phần đang hoạt động. Đối chiếu sâu bổ sung trên `13` active order/`15` batch cũng không phát hiện nội dung JSON sai hoặc `cartId` trùng.
+Ngày 30/07/2026, database MySQL `8.0.46` đang chạy có thêm bảng `audit_events`; `npm run db:audit` đạt `33/33` nhóm ở chế độ `READ ONLY`: không có bản ghi mồ côi, batch gắn sai bàn, order lệch tổng hợp, lịch mở chồng nhau, hóa đơn trả trước mất liên kết hoặc ledger món thấp hơn số phần đang hoạt động.
 
 Các giới hạn cấu trúc đã biết nhưng **không gây corruption trong dữ liệu hiện tại**:
 
@@ -443,7 +476,7 @@ Development cho phép `localhost`, `127.x`, IPv6 loopback, `10.x`, `192.168.x` v
 6. **Trả sau:** nếu mọi batch đã `done` và không yêu cầu giữ bàn, giao dịch nhận `service_status=closed`; active order bị xóa, lịch `seated` liên quan chuyển `completed` và bàn về `empty` trong cùng transaction. Đây là luồng cũ và vẫn được giữ nguyên.
 7. **Trả trước:** khi còn batch `waiting/cooking`, hoặc client đã mở luồng trả trước với `keepTableOpen=true`, giao dịch nhận `service_status=awaiting_departure` và được liên kết với active order trong `active_order_payments`. Bàn tiếp tục ở trạng thái bếp thực tế, queue vẫn chạy, UI hiển thị **Đã thanh toán** và backend khóa gọi thêm, sửa hoặc hủy order.
 8. Khi tất cả batch của bàn trả trước đã `done`, nhân viên gọi `POST /api/orders/:tableId/confirm-departure`. Backend xác thực trạng thái, đổi giao dịch sang `closed`, ghi `departure_confirmed_at`, hoàn tất lịch `seated`, xóa active order và đưa bàn về `empty`. Gọi lại endpoint an toàn theo cơ chế idempotent.
-9. Response thanh toán trả `requiresDepartureConfirmation` và `orderClosed` để UI phân biệt hai nhánh. Chỉ sau khi transaction thanh toán commit thành công frontend mới cho in hóa đơn A4 tổng hợp.
+9. Response thanh toán trả `requiresDepartureConfirmation` và `orderClosed` để UI phân biệt hai nhánh. Chỉ sau khi transaction thanh toán commit thành công frontend mới cho in hóa đơn A4 hoặc 80 mm và mở lại bản chụp hóa đơn từ lịch sử.
 
 ### Báo cáo
 
@@ -465,12 +498,14 @@ Development cho phép `localhost`, `127.x`, IPv6 loopback, `10.x`, `192.168.x` v
 
 ## API chính
 
-Mọi endpoint `/api/*`, trừ health, đều yêu cầu Basic Auth trong production; development chỉ yêu cầu khi `AUTH_USERNAME` và `AUTH_PASSWORD` đã được cấu hình.
+Mọi endpoint `/api/*`, trừ health, login và logout, đều yêu cầu session cookie hợp lệ. Frontend không giữ mật khẩu trong Web Storage. Backend áp dụng quyền theo vai trò; tài khoản tương thích `AUTH_USERNAME/AUTH_PASSWORD` có vai trò `manager`.
 
 | Method | Endpoint | Chức năng |
 |---|---|---|
 | `GET` | `/api/health` | Kiểm tra API/MySQL |
-| `GET` | `/api/auth/session` | Kiểm tra phiên Basic Auth |
+| `POST` | `/api/auth/login` | Xác thực và cấp session cookie |
+| `POST` | `/api/auth/logout` | Thu hồi cookie trên trình duyệt |
+| `GET` | `/api/auth/session` | Kiểm tra phiên và trả username/role |
 | `GET/PUT` | `/api/settings` | Đọc/lưu cấu hình nhà hàng |
 | `GET/POST` | `/api/employees` | Danh sách hoặc tạo nhân viên |
 | `PUT/DELETE` | `/api/employees/:employeeId` | Sửa hoặc ngừng hoạt động nhân viên |
@@ -497,6 +532,7 @@ Mọi endpoint `/api/*`, trừ health, đều yêu cầu Basic Auth trong produc
 | `PUT/DELETE` | `/api/tables/:tableId` | Sửa hoặc xóa bàn; trùng ô trong cùng khu vực trả `409 TABLE_POSITION_OCCUPIED` |
 | `PATCH` | `/api/tables/:tableId/status` | Hoàn tất đúng `expectedBatchId` đang nấu; chống bấm lặp/client stale |
 | `GET` | `/api/payments?from=&to=` | Giao dịch trong khoảng thời gian |
+| `GET` | `/api/payments/:invoiceCode` | Tải snapshot hóa đơn và dòng món để xem/in lại |
 | `POST` | `/api/payments` | Thanh toán active order ở trạng thái chờ/nấu/đã xong; hỗ trợ `payment.keepTableOpen`, idempotent theo invoice và trả `requiresDepartureConfirmation`, `orderClosed` |
 | `GET` | `/api/reports/summary?from=&to=&timezoneOffsetMinutes=` | Aggregate KPI, `hourly[]`, `daily[]`, phương thức, món, danh mục và nhân viên |
 
@@ -511,26 +547,31 @@ Mọi endpoint `/api/*`, trừ health, đều yêu cầu Basic Auth trong produc
 | `npm run db:schema` | Bootstrap thủ công database mới `restaurant_casv2`; không nâng cấp DB cũ |
 | `npm run db:seed:test` | Ghi/làm mới dữ liệu demo trên database development/test |
 | `npm run db:audit` | Kiểm tra 33 nhóm ràng buộc và toàn vẹn ở chế độ READ ONLY |
+| `npm run lint` | ESLint cho backend JavaScript và frontend TypeScript/React |
 | `npm run typecheck` | TypeScript strict check |
-| `npm test` | Unit test backend |
+| `npm test` | Unit test backend và frontend/a11y |
+| `npm run test:e2e` | Chromium E2E cho đăng nhập, session cookie và điều hướng RBAC |
+| `npm run screenshots:update` | Chụp lại ảnh desktop/mobile trong `docs/screenshots` từ giao diện thật |
 | `npm run test:smoke` | Test end-to-end qua API đang chạy; có ghi dữ liệu test |
 | `npm run build` | Build frontend production |
-| `npm run check` | Typecheck + unit test + build |
-| `npm audit --audit-level=high` | Audit dependency |
+| `npm run check` | Lint + typecheck + unit/a11y test + build |
+| `npm audit --audit-level=moderate` | Audit toàn bộ dependency |
 
 ### Quality gates không ghi dữ liệu nghiệp vụ
 
 ```powershell
 npm run check
 npm run db:audit
-npm audit --audit-level=high
+npm audit --audit-level=moderate
 ```
 
-`npm run check` gồm typecheck, unit test và production build. `db:audit` chỉ đọc database. `npm audit` cần kết nối npm registry và nên được chạy trong CI khi dự án bổ sung pipeline.
+`npm run check` gồm lint, typecheck, unit/a11y test và production build. `db:audit` chỉ đọc database. CI chạy thêm dependency audit, MySQL migration/audit, API smoke và Chromium E2E.
 
 Phạm vi unit test hiện tại:
 
-- `31/31` test nghiệp vụ đang đạt.
+- `38/38` test backend và `4/4` test frontend/a11y đang đạt.
+- Auth test bao phủ session cookie `HttpOnly/SameSite`, thời hạn phiên, cấu hình nhiều tài khoản và RBAC.
+- Frontend test kiểm tra điều hướng theo vai trò và accessibility tự động của màn đăng nhập.
 - Canonicalization catalog và chống giả giá/topping.
 - Validation category, menu, quantity, VAT và thời gian nấu.
 - Hạn mức món theo ngày: xác định ngày kinh doanh, gộp số lượng cùng món, giữ đúng phần cuối, từ chối vượt mức, điều chỉnh khi sửa phiếu chờ và hoàn khi hủy.
@@ -566,22 +607,23 @@ Smoke test bao phủ cạnh tranh đặt bàn, optimistic version bếp, FIFO/ET
 
 ## Hiệu năng và giao diện
 
-Kích thước từ `npm run build` ngày 21/07/2026; đây là số artifact, không phải SLA runtime:
+Kích thước từ `npm run build` ngày 30/07/2026; đây là số artifact, không phải SLA runtime:
 
 | Artifact | Kích thước / gzip |
 |---|---:|
-| Main JS | `218,67 KB / 68,50 KB` |
-| CSS dùng chung | `57,24 KB / 12,08 KB` |
+| Main JS | `231,28 KB / 71,97 KB` |
+| CSS dùng chung | `84,16 KB / 16,46 KB` |
 | Chunk biểu đồ, chỉ tải khi mở Báo cáo | `395,08 KB / 108,86 KB` |
-| Chunk Đặt bàn JS | `21,23 KB / 6,73 KB` |
-| Chunk Đặt bàn CSS | `11,84 KB / 2,84 KB` |
-| Chunk Thanh toán CSS | `5,85 KB / 1,65 KB` |
+| Chunk Đặt bàn JS | `21,10 KB / 6,96 KB` |
+| Chunk Đặt bàn CSS | `10,81 KB / 2,63 KB` |
+| Chunk Thanh toán JS | `39,25 KB / 10,95 KB` |
+| Chunk Thanh toán CSS | `20,98 KB / 4,45 KB` |
 
 - Các trang nghiệp vụ lớn và Recharts được lazy-load; ảnh menu ngoài viewport dùng lazy decoding.
 - Polling dừng khi tab ẩn, không cho request chồng nhau và timeout sau 12 giây.
 - Snapshot `/api/operations` dùng repeatable-read transaction; queue và báo cáo có index tương ứng.
 - Giao diện dùng grid responsive, touch target chính tối thiểu 44 px, portal cho modal và hỗ trợ `prefers-reduced-motion`.
-- Phiếu bếp giữ khổ 80 mm; hóa đơn giữ bố cục A4 và cuộn ở viewport hẹp.
+- Phiếu bếp giữ khổ 80 mm; hóa đơn có hai định dạng A4 và cuộn nhiệt 80 mm.
 
 Repository chưa có Lighthouse CI, benchmark tải hoặc SLA. Trước production cần đo lại trên URL deploy thật và thiết bị POS/máy in mục tiêu, gồm Lighthouse, WCAG contrast, bàn phím, CPU/RAM API và p95 dưới tải đồng thời.
 
@@ -605,6 +647,9 @@ PORT=4100
 CORS_ORIGIN=https://pos.example.com
 AUTH_USERNAME=replace-me
 AUTH_PASSWORD=replace-with-a-long-random-secret
+AUTH_SESSION_SECRET=replace-with-at-least-32-random-characters
+AUTH_SESSION_HOURS=8
+TRUST_PROXY=loopback
 BUSINESS_TIME_ZONE=Asia/Ho_Chi_Minh
 DB_HOST=private-mysql-host
 DB_PORT=3306
@@ -614,7 +659,7 @@ DB_NAME=restaurant_casv2
 DB_AUTO_MIGRATE=false
 ```
 
-Không commit file này. `AUTH_PASSWORD` và tài khoản MySQL phải được cấp qua secret manager của hạ tầng.
+Không commit file này. `AUTH_PASSWORD`, `AUTH_USERS_JSON`, `AUTH_SESSION_SECRET` và tài khoản MySQL phải được cấp qua secret manager của hạ tầng.
 
 ### 2. Backup, migrate và audit
 
@@ -677,29 +722,29 @@ Sau đó đăng nhập, thực hiện một luồng thử trên dữ liệu ki�
 
 Giới hạn hiện tại:
 
-- Basic Auth chỉ có một vai trò `admin`; chưa có phân quyền quản lý/thu ngân/phục vụ/bếp.
 - Thanh toán thẻ/QR là ghi nhận nội bộ, chưa tích hợp terminal/callback đối soát, void hoặc hoàn tiền.
-- Repository chưa có CI, browser E2E, Lighthouse CI, Dockerfile/Compose hay cấu hình cloud cụ thể.
+- Repository đã có CI, API smoke, frontend unit/a11y và Chromium E2E cơ bản nhưng chưa có Lighthouse CI, benchmark tải, Dockerfile/Compose hay cấu hình cloud cụ thể.
 - Schema được mô tả ở cả `db.js` và `database/schema.sql`; thay đổi lớn có nguy cơ drift nếu không cập nhật đồng thời.
 - Order/batch lưu item dạng JSON và hạn mức món dùng ledger tổng hợp; chưa có movement ledger bất biến hoặc tồn kho nguyên liệu.
 - Frontend đồng bộ bằng polling 3 giây; chưa có offline queue hoặc cơ chế phục hồi khi mạng nội bộ mất lâu.
+- Session hiện là token ký HMAC từ cấu hình môi trường; thay đổi/xóa tài khoản sẽ chặn phiên ở request tiếp theo, nhưng triển khai nhiều chi nhánh/public quy mô lớn nên chuyển sang OIDC hoặc identity store tập trung.
 
 Ưu tiên bắt buộc trước khi mở ra Internet:
 
-1. Thay Basic Auth bằng session cookie `HttpOnly/Secure/SameSite` hoặc OIDC và thêm RBAC.
-2. Dùng migration tool có version/rollback, backup/restore drill và một manifest chung cho schema verifier/audit.
-3. Gia cố CHECK lifecycle reservation, mở rộng audit so nội dung order–batch đầy đủ và chặn ledger underflow.
-4. Bổ sung audit log cho đổi giá, cấu hình bếp, hủy order, thanh toán và thao tác quản trị.
-5. Thêm CI gồm `npm ci`, `npm run check`, database test, `db:audit`, browser E2E và accessibility.
-6. Tích hợp payment gateway/POS thật, idempotency key phía nhà cung cấp, callback xác minh và quy trình hoàn tiền.
+1. Tích hợp payment gateway/POS thật, idempotency key phía nhà cung cấp, callback xác minh, đối soát và quy trình hoàn tiền.
+2. Dùng migration tool có version/rollback và thực hiện backup/restore drill trên hạ tầng đích.
+3. Thiết lập log tập trung, metrics/cảnh báo, SLA và benchmark tải trên thiết bị/mạng POS thực tế.
+4. Chạy Lighthouse/WCAG đầy đủ trên URL deploy và kiểm tra bản in A4/80 mm bằng máy in mục tiêu.
+5. Cân nhắc OIDC/identity store tập trung nếu hệ thống mở ra Internet, chạy nhiều chi nhánh hoặc cần thu hồi phiên tức thời trên nhiều instance.
 
 Mở rộng nghiệp vụ khi cần: chuẩn hóa `active_order_items`, tồn kho nguyên liệu/định mức, chuyển hoặc ghép bàn, tách/gộp hóa đơn, chia thanh toán, waitlist và SMS/Zalo nhắc lịch. Khi số client tăng, cân nhắc SSE/WebSocket; nếu POS phải chạy khi mất mạng, cần PWA/offline queue có chiến lược giải quyết xung đột.
 
 ## Bảo mật production
 
-- Chạy API sau HTTPS/reverse proxy; không dùng Basic Auth qua HTTP công cộng.
+- Chạy API sau HTTPS/reverse proxy để cookie production luôn có thuộc tính `Secure`.
 - Đặt `NODE_ENV=production`, password/secret qua secret manager.
 - Production phải đặt allowlist `CORS_ORIGIN` cụ thể; không bật private-network wildcard.
+- Đặt `TRUST_PROXY=loopback` khi reverse proxy chạy cùng máy; không dùng `true` nếu topology proxy chưa được kiểm soát.
 - Chạy migration bằng user có quyền DDL, sau đó đặt `DB_AUTO_MIGRATE=false`.
 - API runtime nên dùng MySQL user quyền tối thiểu.
 - Thiết lập backup, restore drill, log tập trung và monitor `/api/health`.
@@ -730,9 +775,10 @@ Frontend đang chạy nhưng không kết nối được API tại đích proxy.
 
 ### Đăng nhập luôn thất bại
 
-- Kiểm tra `AUTH_USERNAME`, `AUTH_PASSWORD` trong `apps/api/.env`.
+- Kiểm tra `AUTH_USERS_JSON` hoặc `AUTH_USERNAME`, `AUTH_PASSWORD` trong `apps/api/.env`.
+- Production phải có `AUTH_SESSION_SECRET` dài tối thiểu 32 ký tự và truy cập qua HTTPS.
 - Restart API sau khi đổi `.env`.
-- Credential chỉ lưu trong `sessionStorage`; mở tab mới cần đăng nhập lại.
+- Session nằm trong cookie `HttpOnly`; không thể đọc từ JavaScript. Nếu đổi secret hoặc tài khoản, hãy đăng nhập lại.
 
 ### Điện thoại không mở được web
 

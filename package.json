@@ -14,14 +14,31 @@
     "dev:web": "npm run dev --workspace @cas/web",
     "dev:api": "npm run dev --workspace @cas/api",
     "build": "npm run build --workspace @cas/web",
+    "lint": "eslint .",
     "typecheck": "npm run typecheck --workspace @cas/web",
     "test": "npm run test --workspaces --if-present",
+    "test:e2e": "playwright test",
+    "screenshots:update": "cross-env UPDATE_SCREENSHOTS=1 playwright test e2e/screenshots.spec.ts",
     "test:smoke": "npm run test:smoke --workspace @cas/api",
-    "check": "npm run typecheck && npm test && npm run build",
+    "check": "npm run lint && npm run typecheck && npm test && npm run build",
     "start:api": "npm run start --workspace @cas/api",
     "db:migrate": "npm run migrate --workspace @cas/api",
     "db:seed:test": "npm run seed:test --workspace @cas/api",
     "db:audit": "npm run db:audit --workspace @cas/api",
     "db:schema": "mysql -h 127.0.0.1 -P 3306 -u root -p < database/schema.sql"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "1.61.1",
+    "@testing-library/jest-dom": "^7.0.0",
+    "@testing-library/react": "^16.3.2",
+    "axe-core": "^4.12.1",
+    "cross-env": "^10.1.0",
+    "eslint": "^10.8.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.8.0",
+    "jsdom": "^30.0.1",
+    "typescript-eslint": "^8.65.0",
+    "vitest": "^4.1.10"
   }
 }

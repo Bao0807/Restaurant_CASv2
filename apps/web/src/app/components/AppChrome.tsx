@@ -1,5 +1,5 @@
 import { LogOut, UserRound } from 'lucide-react';
-import type { AppView, OrderStep } from '../data';
+import type { AppView, EmployeeRole, OrderStep } from '../data';
 import { APP_VIEW_LABELS, BRAND_ASSETS } from '../config/restaurant';
 import { getServerNowMs } from '../services/api';
 import type { ToastMessage } from '../hooks/useTransientToast';
@@ -12,12 +12,20 @@ interface AppTopBarProps {
   servingTableCount: number;
   tableCount: number;
   username: string;
+  role: EmployeeRole;
   onLogout: () => void;
 }
 
+const ROLE_LABELS: Record<EmployeeRole, string> = {
+  manager: 'Quản lý',
+  cashier: 'Thu ngân',
+  server: 'Phục vụ',
+  chef: 'Bếp',
+};
+
 export function AppTopBar({
   view, restaurantName, syncStatus, lastSyncAt,
-  servingTableCount, tableCount, username, onLogout,
+  servingTableCount, tableCount, username, role, onLogout,
 }: AppTopBarProps) {
   const displayName = username || 'Người dùng';
   return (
@@ -48,7 +56,7 @@ export function AppTopBar({
         </div>
         <div className="cas-account" aria-label={`Đã đăng nhập: ${displayName}`}>
           <span className="cas-account-avatar"><UserRound size={16} /></span>
-          <span className="cas-account-copy"><small>Đã đăng nhập</small><strong>{displayName}</strong></span>
+          <span className="cas-account-copy"><small>{ROLE_LABELS[role]}</small><strong>{displayName}</strong></span>
           <button className="cas-signout-button" type="button" onClick={onLogout} title="Đăng xuất">
             <LogOut size={16} /><span>Đăng xuất</span>
           </button>

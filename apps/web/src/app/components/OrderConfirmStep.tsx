@@ -5,6 +5,7 @@ import {
   cartItemTotal, cartQuantityForMenuItem, cartTotal, formatVND, getCartStockIssues,
   menuItemDailyAllowance, STATUS_CONFIG,
 } from '../data';
+import { MenuItemImage } from './MenuItemImage';
 
 interface OrderConfirmStepProps {
   table: Table;
@@ -135,7 +136,7 @@ export function OrderConfirmStep({ table, cart, isAddition, isEditing, menuItems
         <div style={{ marginBottom: 8, fontSize: '12px', color: '#9CA3AF', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
           {cart.length} món · {cart.reduce((s, i) => s + i.quantity, 0)} phần
         </div>
-        {cart.map((item, idx) => {
+        {cart.map(item => {
           const latest = catalog.get(item.menuItem.id) ?? item.menuItem;
           const allowance = menuItemDailyAllowance(latest, inventoryCredits[latest.id] ?? 0);
           const cannotIncrease = item.quantity >= 99
@@ -150,7 +151,7 @@ export function OrderConfirmStep({ table, cart, isAddition, isEditing, menuItems
             }}
           >
             <div style={{ display: 'flex', gap: 12 }}>
-              <img
+              <MenuItemImage
                 src={item.menuItem.image}
                 alt={item.menuItem.name}
                 loading="lazy"

@@ -9,6 +9,21 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
   applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS audit_events (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  occurred_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  request_id VARCHAR(128) NOT NULL,
+  actor_username VARCHAR(80) NOT NULL,
+  actor_role VARCHAR(20) NOT NULL,
+  action VARCHAR(160) NOT NULL,
+  entity_type VARCHAR(80) NOT NULL,
+  entity_id VARCHAR(160) NULL,
+  metadata JSON NULL,
+  INDEX idx_audit_occurred (occurred_at, id),
+  INDEX idx_audit_actor (actor_username, occurred_at),
+  CONSTRAINT chk_audit_actor_role CHECK (actor_role IN ('manager', 'cashier', 'server', 'chef'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS restaurant_settings (
   id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
   settings JSON NOT NULL,

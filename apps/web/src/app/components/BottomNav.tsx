@@ -1,20 +1,21 @@
 import { BarChart3, CalendarCheck2, ClipboardList, CreditCard, Settings2, type LucideIcon } from 'lucide-react';
-import type { AppView } from '../data';
+import type { AppView, EmployeeRole } from '../data';
 
 interface BottomNavProps {
   view: AppView;
+  role: EmployeeRole;
   onViewChange: (v: AppView) => void;
 }
 
-const TABS: { id: AppView; label: string; Icon: LucideIcon }[] = [
-  { id: 'order',     label: 'Vận hành',   Icon: ClipboardList },
-  { id: 'reservations', label: 'Đặt bàn', Icon: CalendarCheck2 },
-  { id: 'payment',   label: 'Thanh toán', Icon: CreditCard    },
-  { id: 'reports',   label: 'Báo cáo',    Icon: BarChart3     },
-  { id: 'dashboard', label: 'Quản trị',   Icon: Settings2     },
+const TABS: { id: AppView; label: string; Icon: LucideIcon; roles: EmployeeRole[] }[] = [
+  { id: 'order', label: 'Vận hành', Icon: ClipboardList, roles: ['manager', 'cashier', 'server', 'chef'] },
+  { id: 'reservations', label: 'Đặt bàn', Icon: CalendarCheck2, roles: ['manager', 'cashier', 'server'] },
+  { id: 'payment', label: 'Thanh toán', Icon: CreditCard, roles: ['manager', 'cashier'] },
+  { id: 'reports', label: 'Báo cáo', Icon: BarChart3, roles: ['manager', 'cashier'] },
+  { id: 'dashboard', label: 'Quản trị', Icon: Settings2, roles: ['manager'] },
 ];
 
-export function BottomNav({ view, onViewChange }: BottomNavProps) {
+export function BottomNav({ view, role, onViewChange }: BottomNavProps) {
   return (
     <nav
       className="cas-nav"
@@ -25,7 +26,7 @@ export function BottomNav({ view, onViewChange }: BottomNavProps) {
         display: 'flex',
       }}
     >
-      {TABS.map(({ id, label, Icon }) => {
+      {TABS.filter(tab => tab.roles.includes(role)).map(({ id, label, Icon }) => {
         const active = view === id;
         return (
           <button

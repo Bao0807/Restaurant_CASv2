@@ -6,7 +6,7 @@ import {
 import type { CartItem, KitchenStatus, Table, TableStatus } from '../data';
 import type { EditableOrderBatch } from '../services/api';
 import { getServerNowMs } from '../services/api';
-import { formatReservationSlot, STATUS_CONFIG } from '../data';
+import { formatReservationTimeRange, STATUS_CONFIG } from '../data';
 import { OrderTimer } from './OrderTimer';
 import { getTableOptionsHistoryTableId, TableOptionsModal } from './TableOptionsModal';
 
@@ -20,6 +20,7 @@ interface TableSelectStepProps {
   onDeleteOrder: (tableId: string) => Promise<void>;
   onMarkDone: (tableId: string) => Promise<void>;
   onConfirmDeparture: (tableId: string) => Promise<void>;
+  onCheckInReservation: (tableId: string) => Promise<void>;
   onPay: (tableId: string) => void;
 }
 
@@ -407,12 +408,12 @@ function TableCard({
           {table.nextReservation && (
             <span
               className="operations-reservation-note"
-              aria-label={`Đặt trước ${formatReservationSlot(table.nextReservation.reservedAt)}, khách ${table.nextReservation.customerName}`}
-              title={`${formatReservationSlot(table.nextReservation.reservedAt)} · ${table.nextReservation.customerName}`}
+              aria-label={`Đặt trước ${formatReservationTimeRange(table.nextReservation.reservedAt, table.nextReservation.endsAt)}, khách ${table.nextReservation.customerName}`}
+              title={`${formatReservationTimeRange(table.nextReservation.reservedAt, table.nextReservation.endsAt)} · ${table.nextReservation.customerName}`}
             >
               <Clock size={12} aria-hidden="true" />
               <time dateTime={table.nextReservation.reservedAt}>
-                {formatReservationSlot(table.nextReservation.reservedAt)}
+                {formatReservationTimeRange(table.nextReservation.reservedAt, table.nextReservation.endsAt)}
               </time>
               <span className="operations-reservation-separator" aria-hidden="true">·</span>
               <span className="operations-reservation-customer">{table.nextReservation.customerName}</span>
@@ -427,7 +428,7 @@ function TableCard({
         data-table-id={table.id}
         className="operations-table-open"
         onClick={onOpen}
-        aria-label={`Bàn ${table.number}, khu vực ${areaName}, ${cfg.label}${isReady ? ', cần phục vụ món' : ''}${table.isPaid ? ', đã thanh toán' : ''}${table.nextReservation ? `. Lịch kế tiếp ${formatReservationSlot(table.nextReservation.reservedAt)}, ${table.nextReservation.customerName}` : ''}. Mở thao tác bàn.`}
+        aria-label={`Bàn ${table.number}, khu vực ${areaName}, ${cfg.label}${isReady ? ', cần phục vụ món' : ''}${table.isPaid ? ', đã thanh toán' : ''}${table.nextReservation ? `. Lịch gần nhất hôm nay ${formatReservationTimeRange(table.nextReservation.reservedAt, table.nextReservation.endsAt)}, ${table.nextReservation.customerName}` : ''}. Mở thao tác bàn.`}
       />
 
       <footer className="operations-table-card-footer">
@@ -453,6 +454,7 @@ export function TableSelectStep({
   onDeleteOrder,
   onMarkDone,
   onConfirmDeparture,
+  onCheckInReservation,
   onPay,
 }: TableSelectStepProps) {
   const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
@@ -654,6 +656,7 @@ export function TableSelectStep({
           onDeleteOrder={() => onDeleteOrder(selectedTable.id)}
           onMarkDone={() => onMarkDone(selectedTable.id)}
           onConfirmDeparture={() => onConfirmDeparture(selectedTable.id)}
+          onCheckInReservation={() => onCheckInReservation(selectedTable.id)}
           onPay={() => onPay(selectedTable.id)}
         />
       )}

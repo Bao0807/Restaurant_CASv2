@@ -1,4 +1,6 @@
 export const RESERVATION_STATUSES = new Set(['booked', 'seated', 'cancelled', 'no_show', 'completed']);
+export const RESERVATION_BUFFER_MINUTES = 15;
+export const RESERVATION_TIME_STEP_MINUTES = 15;
 
 const PHONE_PATTERN = /^[0-9+().\s-]+$/;
 const MAX_BOOKING_HORIZON_MS = 730 * 24 * 60 * 60 * 1000;
@@ -41,6 +43,13 @@ export function normalizeReservation(input, { now = new Date(), allowPast = fals
   if (Number.isNaN(reservedAt.getTime())) {
     throw invalid('Ngày giờ đặt bàn không hợp lệ.', 'reservedAt');
   }
+  if (
+    reservedAt.getUTCMinutes() % RESERVATION_TIME_STEP_MINUTES !== 0
+    || reservedAt.getUTCSeconds() !== 0
+    || reservedAt.getUTCMilliseconds() !== 0
+  ) {
+    throw invalid('Giờ đặt bàn phải theo mốc 15 phút (:00, :15, :30 hoặc :45).', 'reservedAt');
+  }
   const nowTime = now.getTime();
   if (!allowPast && reservedAt.getTime() < nowTime - 15 * 60_000) {
     throw invalid('Không thể tạo lịch đặt bàn trong quá khứ.', 'reservedAt');
@@ -52,6 +61,9 @@ export function normalizeReservation(input, { now = new Date(), allowPast = fals
   const durationMinutes = Number(input.durationMinutes ?? 120);
   if (!Number.isSafeInteger(durationMinutes) || durationMinutes < 30 || durationMinutes > 480) {
     throw invalid('Thời lượng giữ bàn phải nằm trong khoảng 30–480 phút.', 'durationMinutes');
+  }
+  if (durationMinutes % RESERVATION_TIME_STEP_MINUTES !== 0) {
+    throw invalid('Giờ kết thúc phải theo mốc 15 phút (:00, :15, :30 hoặc :45).', 'durationMinutes');
   }
 
   const notes = input.notes == null ? '' : String(input.notes).trim();
@@ -70,13 +82,25 @@ export function normalizeReservation(input, { now = new Date(), allowPast = fals
   };
 }
 
-/** Kiểm tra hai khung giờ dạng nửa mở [start, end) có giao nhau hay không. */
-export function reservationIntervalsOverlap(leftStart, leftDuration, rightStart, rightDuration) {
+/** Kiểm tra hai khung giờ có giao nhau hoặc không đủ khoảng đệm vận hành. */
+export function reservationIntervalsOverlap(
+  leftStart,
+  leftDuration,
+  rightStart,
+  rightDuration,
+  bufferMinutes = RESERVATION_BUFFER_MINUTES,
+) {
   const left = new Date(leftStart).getTime();
   const right = new Date(rightStart).getTime();
   const leftEnd = left + Number(leftDuration) * 60_000;
   const rightEnd = right + Number(rightDuration) * 60_000;
-  return Number.isFinite(left) && Number.isFinite(right) && left < rightEnd && right < leftEnd;
+  const buffer = Number(bufferMinutes) * 60_000;
+  return Number.isFinite(left)
+    && Number.isFinite(right)
+    && Number.isFinite(buffer)
+    && buffer >= 0
+    && left < rightEnd + buffer
+    && right < leftEnd + buffer;
 }
 
 /** Vòng đời đặt bàn có chủ đích; trạng thái kết thúc không được mở lại âm thầm. */

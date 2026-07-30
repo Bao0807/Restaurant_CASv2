@@ -4,12 +4,23 @@ const MAX_DAILY_QUANTITY = 2_000_000_000;
 export const businessTimeZone = process.env.BUSINESS_TIME_ZONE?.trim() || DEFAULT_BUSINESS_TIME_ZONE;
 
 let businessDateFormatter;
+let businessDateTimeFormatter;
 try {
   businessDateFormatter = new Intl.DateTimeFormat('en-CA', {
     timeZone: businessTimeZone,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
+  });
+  businessDateTimeFormatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: businessTimeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
   });
   businessDateFormatter.format(new Date());
 } catch {
@@ -22,6 +33,43 @@ export function businessDateFor(value = new Date()) {
   if (Number.isNaN(date.getTime())) throw new Error('Không thể xác định ngày kinh doanh từ thời gian không hợp lệ.');
   const parts = new Map(businessDateFormatter.formatToParts(date).map(part => [part.type, part.value]));
   return `${parts.get('year')}-${parts.get('month')}-${parts.get('day')}`;
+}
+
+function timeZoneOffsetAt(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  const parts = new Map(businessDateTimeFormatter.formatToParts(date).map(part => [part.type, part.value]));
+  const representedAsUtc = Date.UTC(
+    Number(parts.get('year')),
+    Number(parts.get('month')) - 1,
+    Number(parts.get('day')),
+    Number(parts.get('hour')),
+    Number(parts.get('minute')),
+    Number(parts.get('second')),
+  );
+  return representedAsUtc - Math.trunc(date.getTime() / 1000) * 1000;
+}
+
+function localMidnightAsUtc(dateKey) {
+  const [year, month, day] = dateKey.split('-').map(Number);
+  const desiredWallClock = Date.UTC(year, month - 1, day);
+  let instant = desiredWallClock;
+  // Lặp lại để xử lý cả múi giờ có DST tại đúng ranh giới ngày.
+  for (let iteration = 0; iteration < 3; iteration += 1) {
+    instant = desiredWallClock - timeZoneOffsetAt(new Date(instant));
+  }
+  return new Date(instant);
+}
+
+/** Khoảng UTC [from, to) tương ứng một ngày tại múi giờ kinh doanh. */
+export function businessDayRangeFor(value = new Date()) {
+  const date = businessDateFor(value);
+  const [year, month, day] = date.split('-').map(Number);
+  const nextDate = new Date(Date.UTC(year, month - 1, day + 1)).toISOString().slice(0, 10);
+  return {
+    date,
+    from: localMidnightAsUtc(date),
+    to: localMidnightAsUtc(nextDate),
+  };
 }
 
 /** Gộp mọi biến thể size/topping của cùng một món trước khi giữ hoặc hoàn hạn mức. */

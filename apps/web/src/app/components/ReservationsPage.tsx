@@ -4,7 +4,14 @@ import {
   Ban, CalendarCheck2, CalendarPlus, CheckCircle2, Clock3, LogIn,
   MapPin, Pencil, Phone, RefreshCw, Search, UserX, Users, X,
 } from 'lucide-react';
-import type { Reservation, ReservationInput, ReservationStatus, Table } from '../data';
+import {
+  formatReservationTimeRange,
+  RESERVATION_BUFFER_MINUTES,
+  type Reservation,
+  type ReservationInput,
+  type ReservationStatus,
+  type Table,
+} from '../data';
 import {
   createReservation, fetchReservationAvailability, fetchReservations,
   getServerNowMs,
@@ -28,7 +35,7 @@ interface ReservationFormState {
   partySize: number;
   date: string;
   time: string;
-  durationMinutes: number;
+  endTime: string;
   tableId: string;
   notes: string;
 }
@@ -55,6 +62,18 @@ const STATUS_FILTERS: Array<{ id: StatusFilter; label: string }> = [
   { id: 'cancelled', label: 'Đã hủy' },
   { id: 'no_show', label: 'Không đến' },
 ];
+
+const RESERVATION_TIME_SLOTS = Array.from({ length: 24 * 4 }, (_, index) => {
+  const hours = Math.floor(index / 4);
+  const minutes = (index % 4) * 15;
+  const value = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+  return { value, label: value };
+});
+
+function isQuarterHour(value: string): boolean {
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(value);
+  return Boolean(match && Number(match[2]) % 15 === 0);
+}
 
 function localDateValue(date: Date): string {
   const year = date.getFullYear();
@@ -92,6 +111,7 @@ function rangeForScope(scope: ReservationScope): { from: Date; to: Date; label: 
 
 function initialForm(tables: Table[], reservation?: Reservation): ReservationFormState {
   const start = reservation ? new Date(reservation.reservedAt) : defaultStart();
+  const end = reservation ? new Date(reservation.endsAt) : new Date(start.getTime() + 120 * 60_000);
   const firstTable = [...tables].sort((left, right) => left.number - right.number)[0];
   return {
     customerName: reservation?.customerName ?? '',
@@ -99,10 +119,45 @@ function initialForm(tables: Table[], reservation?: Reservation): ReservationFor
     partySize: reservation?.partySize ?? 2,
     date: localDateValue(start),
     time: localTimeValue(start),
-    durationMinutes: reservation?.durationMinutes ?? 120,
+    endTime: localTimeValue(end),
     tableId: reservation?.tableId ?? firstTable?.id ?? '',
     notes: (reservation?.notes ?? '').slice(0, 500),
   };
+}
+
+function reservationWindow(form: Pick<ReservationFormState, 'date' | 'time' | 'endTime'>): {
+  start: Date;
+  end: Date;
+  durationMinutes: number;
+  crossesMidnight: boolean;
+} | null {
+  if (!form.date || !form.time || !form.endTime) return null;
+  const start = new Date(`${form.date}T${form.time}:00`);
+  const end = new Date(`${form.date}T${form.endTime}:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
+  let crossesMidnight = false;
+  if (end <= start) {
+    end.setDate(end.getDate() + 1);
+    crossesMidnight = true;
+  }
+  const durationMinutes = (end.getTime() - start.getTime()) / 60_000;
+  if (!Number.isSafeInteger(durationMinutes)) return null;
+  return { start, end, durationMinutes, crossesMidnight };
+}
+
+function moveReservationStart(
+  current: ReservationFormState,
+  date: string,
+  time: string,
+): ReservationFormState {
+  const currentWindow = reservationWindow(current);
+  const durationMinutes = currentWindow?.durationMinutes && currentWindow.durationMinutes <= 480
+    ? currentWindow.durationMinutes
+    : 120;
+  const nextStart = new Date(`${date}T${time}:00`);
+  if (Number.isNaN(nextStart.getTime())) return { ...current, date, time };
+  const nextEnd = new Date(nextStart.getTime() + durationMinutes * 60_000);
+  return { ...current, date, time, endTime: localTimeValue(nextEnd) };
 }
 
 function formatReservationDate(value: string): string {
@@ -152,7 +207,7 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
     } finally {
       if (showLoader) setLoading(false);
     }
-  }, [range.from.getTime(), range.to.getTime()]);
+  }, [range]);
 
   useEffect(() => {
     void loadReservations(true);
@@ -189,23 +244,25 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
   }, [editing]);
 
   useEffect(() => {
+    const bookingWindow = reservationWindow({
+      date: form.date,
+      time: form.time,
+      endTime: form.endTime,
+    });
     if (
-      editing !== 'new' || !form.date || !form.time || form.partySize < 1
-      || !Number.isInteger(form.durationMinutes)
-      || form.durationMinutes < 30 || form.durationMinutes > 480
+      editing !== 'new' || !bookingWindow || form.partySize < 1
+      || bookingWindow.durationMinutes < 30 || bookingWindow.durationMinutes > 480
     ) {
       setAvailableTableIds(null);
       setAvailabilityLoading(false);
       setAvailabilityError(null);
       return undefined;
     }
-    const reservedAt = new Date(`${form.date}T${form.time}:00`);
-    if (Number.isNaN(reservedAt.getTime())) return undefined;
     let active = true;
     setAvailabilityLoading(true);
     setAvailabilityError(null);
     const timer = window.setTimeout(() => {
-      fetchReservationAvailability(reservedAt, form.durationMinutes, form.partySize)
+      fetchReservationAvailability(bookingWindow.start, bookingWindow.durationMinutes, form.partySize)
         .then(rows => { if (active) setAvailableTableIds(new Set(rows.map(row => row.id))); })
         .catch(() => {
           if (!active) return;
@@ -218,7 +275,7 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
       active = false;
       window.clearTimeout(timer);
     };
-  }, [editing, form.date, form.durationMinutes, form.partySize, form.time]);
+  }, [editing, form.date, form.endTime, form.partySize, form.time]);
 
   const normalizedSearch = search.trim().toLocaleLowerCase('vi-VN');
   const visibleReservations = useMemo(() => reservations.filter(reservation => {
@@ -232,18 +289,21 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
     .sort((left, right) => left.number - right.number), [tables]);
 
   const localConflict = useMemo(() => {
-    if (!form.date || !form.time || !form.tableId) return null;
-    const start = new Date(`${form.date}T${form.time}:00`);
-    const end = new Date(start.getTime() + form.durationMinutes * 60_000);
-    if (Number.isNaN(start.getTime())) return null;
+    const bookingWindow = reservationWindow({
+      date: form.date,
+      time: form.time,
+      endTime: form.endTime,
+    });
+    if (!bookingWindow || !form.tableId) return null;
+    const bufferMs = RESERVATION_BUFFER_MINUTES * 60_000;
     return reservations.find(row => (
       row.id !== (editing === 'new' || !editing ? -1 : editing.id)
       && row.tableId === form.tableId
       && (row.status === 'booked' || row.status === 'seated')
-      && start.getTime() < new Date(row.endsAt).getTime()
-      && new Date(row.reservedAt).getTime() < end.getTime()
+      && bookingWindow.start.getTime() < new Date(row.endsAt).getTime() + bufferMs
+      && new Date(row.reservedAt).getTime() < bookingWindow.end.getTime() + bufferMs
     )) ?? null;
-  }, [editing, form.date, form.durationMinutes, form.tableId, form.time, reservations]);
+  }, [editing, form.date, form.endTime, form.tableId, form.time, reservations]);
 
   const openEditor = (reservation?: Reservation) => {
     editorReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -262,8 +322,17 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
     if (!form.tableId) { setFormError('Vui lòng chọn bàn.'); return null; }
     const table = tables.find(row => row.id === form.tableId);
     if (!table) { setFormError('Bàn đã chọn không còn tồn tại.'); return null; }
-    if (!Number.isInteger(form.durationMinutes) || form.durationMinutes < 30 || form.durationMinutes > 480) {
-      setFormError('Thời lượng phải từ 30 đến 480 phút.');
+    const bookingWindow = reservationWindow(form);
+    if (!bookingWindow) {
+      setFormError('Giờ bắt đầu hoặc giờ kết thúc không hợp lệ.');
+      return null;
+    }
+    if (!isQuarterHour(form.time) || !isQuarterHour(form.endTime)) {
+      setFormError('Giờ đặt bàn phải theo mốc 15 phút, ví dụ 13:15, 13:30 hoặc 13:45.');
+      return null;
+    }
+    if (bookingWindow.durationMinutes < 30 || bookingWindow.durationMinutes > 480) {
+      setFormError('Khung giờ phải kéo dài từ 30 phút đến tối đa 8 giờ.');
       return null;
     }
     if (form.partySize < 1 || form.partySize > table.seats) {
@@ -274,14 +343,12 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
       setFormError(`Bàn ${table.number} đã có lịch giao nhau trong khung giờ này.`);
       return null;
     }
-    const reservedAt = new Date(`${form.date}T${form.time}:00`);
-    if (Number.isNaN(reservedAt.getTime())) { setFormError('Ngày hoặc giờ đặt bàn không hợp lệ.'); return null; }
-    if (editing === 'new' && reservedAt.getTime() < getServerNowMs() - 60_000) {
+    if (editing === 'new' && bookingWindow.start.getTime() < getServerNowMs() - 60_000) {
       setFormError('Thời gian đặt bàn phải ở hiện tại hoặc tương lai.');
       return null;
     }
     if (localConflict) {
-      setFormError(`Khung giờ này trùng với lịch ${localConflict.code} của ${localConflict.customerName}.`);
+      setFormError(`Khung giờ này trùng hoặc cách lịch ${localConflict.code} dưới ${RESERVATION_BUFFER_MINUTES} phút.`);
       return null;
     }
     return {
@@ -289,8 +356,8 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
       customerName,
       customerPhone,
       partySize: form.partySize,
-      reservedAt: reservedAt.toISOString(),
-      durationMinutes: form.durationMinutes,
+      reservedAt: bookingWindow.start.toISOString(),
+      durationMinutes: bookingWindow.durationMinutes,
       notes: form.notes.trim(),
     };
   };
@@ -350,7 +417,7 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
     seated: {
       title: 'Xác nhận khách đã đến?',
       message: `Bàn ${transition.reservation.tableNumber} sẽ được nhận cho ${transition.reservation.customerName} và mở ngay phần gọi món.`,
-      label: 'Check-in và gọi món',
+      label: 'Nhận bàn và gọi món',
     },
     cancelled: {
       title: 'Hủy lịch đặt bàn?',
@@ -369,6 +436,7 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
     },
     booked: { title: '', message: '', label: '' },
   } satisfies Record<ReservationStatus, { title: string; message: string; label: string }>)[transition.status] : null;
+  const formTimeWindow = reservationWindow(form);
 
   return (
     <div className="reservations-page">
@@ -424,9 +492,9 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
           return (
             <article className={`reservation-card status-${meta.className}`} key={reservation.id}>
               <div className="reservation-card-time">
-                <strong>{new Date(reservation.reservedAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}</strong>
+                <strong>{formatReservationTimeRange(reservation.reservedAt, reservation.endsAt)}</strong>
                 <span>{formatReservationDate(reservation.reservedAt)}</span>
-                <small>{reservation.durationMinutes} phút</small>
+                <small>Giữ bàn {reservation.durationMinutes} phút</small>
               </div>
               <div className="reservation-card-main">
                 <div className="reservation-card-title">
@@ -446,7 +514,7 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
                   {reservation.status === 'booked' && (
                     <>
                       <button type="button" className="reservation-action edit" disabled={busy || anotherActionBusy} onClick={() => openEditor(reservation)}><Pencil size={16} /> Sửa</button>
-                      <button type="button" className="reservation-action check-in" disabled={busy || anotherActionBusy || !canCheckIn} title={canCheckIn ? 'Nhận bàn và mở gọi món' : 'Có thể nhận bàn sớm tối đa 60 phút'} onClick={() => setTransition({ reservation, status: 'seated' })}><LogIn size={16} /> Check-in</button>
+                      <button type="button" className="reservation-action check-in" disabled={busy || anotherActionBusy || !canCheckIn} title={canCheckIn ? 'Nhận bàn và mở gọi món' : 'Có thể nhận bàn sớm tối đa 60 phút'} onClick={() => setTransition({ reservation, status: 'seated' })}><LogIn size={16} /> Nhận bàn</button>
                       <button type="button" className="reservation-action subtle-danger" disabled={busy || anotherActionBusy} onClick={() => setTransition({ reservation, status: 'cancelled' })}><Ban size={16} /> Hủy</button>
                       <button type="button" className="reservation-action subtle-danger" disabled={busy || anotherActionBusy || !canMarkNoShow} title={canMarkNoShow ? 'Đóng lịch do khách không đến' : 'Chỉ đánh dấu sau giờ hẹn 15 phút'} onClick={() => setTransition({ reservation, status: 'no_show' })}><UserX size={16} /> Không đến</button>
                     </>
@@ -493,20 +561,44 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
                 <label className="wide">Tên khách *<input ref={firstFieldRef} value={form.customerName} maxLength={120} autoComplete="name" onChange={event => setForm(current => ({ ...current, customerName: event.target.value }))} placeholder="Nguyễn Văn A" /></label>
                 <label>Số điện thoại *<input type="tel" value={form.customerPhone} maxLength={32} autoComplete="tel" onChange={event => setForm(current => ({ ...current, customerPhone: event.target.value }))} placeholder="0901 234 567" /></label>
                 <label>Số khách *<input type="number" min={1} max={100} value={form.partySize} onChange={event => setForm(current => ({ ...current, partySize: Number(event.target.value) }))} /></label>
-                <label>Ngày *<input type="date" min={editing === 'new' ? localDateValue(new Date(getServerNowMs())) : undefined} value={form.date} onChange={event => setForm(current => ({ ...current, date: event.target.value }))} /></label>
-                <label>Giờ *<input type="time" step={900} value={form.time} onChange={event => setForm(current => ({ ...current, time: event.target.value }))} /></label>
-                <label>Thời lượng (phút)<input type="number" min={30} max={480} step={15} value={form.durationMinutes} onChange={event => setForm(current => ({ ...current, durationMinutes: Number(event.target.value) }))} /></label>
+                <label>Ngày *<input type="date" min={editing === 'new' ? localDateValue(new Date(getServerNowMs())) : undefined} value={form.date} onChange={event => setForm(current => moveReservationStart(current, event.target.value, current.time))} /></label>
+                <label>Từ giờ *
+                  <select value={form.time} onChange={event => setForm(current => moveReservationStart(current, current.date, event.target.value))}>
+                    {!isQuarterHour(form.time) && <option value={form.time} disabled>{form.time} · giờ cũ, hãy chọn lại</option>}
+                    {RESERVATION_TIME_SLOTS.map(slot => <option key={slot.value} value={slot.value}>{slot.label}</option>)}
+                  </select>
+                </label>
+                <label>Đến giờ *
+                  <select value={form.endTime} onChange={event => setForm(current => ({ ...current, endTime: event.target.value }))}>
+                    {!isQuarterHour(form.endTime) && <option value={form.endTime} disabled>{form.endTime} · giờ cũ, hãy chọn lại</option>}
+                    {RESERVATION_TIME_SLOTS.map(slot => <option key={slot.value} value={slot.value}>{slot.label}</option>)}
+                  </select>
+                </label>
                 <label>Bàn *{availabilityLoading && <small className="availability-label">Đang kiểm tra lịch trống…</small>}<select value={form.tableId} onChange={event => setForm(current => ({ ...current, tableId: event.target.value }))}>
                   <option value="">Chọn bàn phù hợp</option>
                   {eligibleTables.map(table => {
                     const lacksSeats = table.seats < form.partySize;
                     const unavailable = editing === 'new' && availableTableIds !== null && !availableTableIds.has(table.id);
-                    return <option key={table.id} value={table.id} disabled={lacksSeats || unavailable}>Bàn {table.number} · {table.seats} chỗ{lacksSeats ? ' · không đủ chỗ' : unavailable ? ' · đã có lịch' : ''}</option>;
+                    return <option key={table.id} value={table.id} disabled={lacksSeats || unavailable}>Bàn {table.number} · {table.seats} chỗ{lacksSeats ? ' · không đủ chỗ' : unavailable ? ` · trùng/sát lịch ${RESERVATION_BUFFER_MINUTES} phút` : ''}</option>;
                   })}
                 </select></label>
+                <div className="reservation-window-hint wide" role="note">
+                  <Clock3 size={15} aria-hidden="true" />
+                  <span>
+                    {formTimeWindow && formTimeWindow.durationMinutes >= 30 && formTimeWindow.durationMinutes <= 480
+                      ? `Khung ${formTimeWindow.durationMinutes} phút${formTimeWindow.crossesMidnight ? ' · kết thúc ngày kế tiếp' : ''}`
+                      : 'Khung giờ phải từ 30 phút đến tối đa 8 giờ'}
+                    {' · '}Giờ chọn theo từng mốc 15 phút · Cần cách lịch liền kề ít nhất {RESERVATION_BUFFER_MINUTES} phút.
+                  </span>
+                </div>
                 <label className="wide">Ghi chú<textarea rows={3} maxLength={500} value={form.notes} onChange={event => setForm(current => ({ ...current, notes: event.target.value }))} placeholder="Vị trí mong muốn, dị ứng, sinh nhật…" /></label>
               </div>
-              {localConflict && <div className="reservation-conflict"><Clock3 size={16} /> Trùng lịch {localConflict.code} · {localConflict.customerName} tại bàn {localConflict.tableNumber}</div>}
+              {localConflict && (
+                <div className="reservation-conflict">
+                  <Clock3 size={16} />
+                  Khung giờ trùng hoặc cách lịch {localConflict.code} của {localConflict.customerName} dưới {RESERVATION_BUFFER_MINUTES} phút.
+                </div>
+              )}
               {availabilityError && <div className="reservation-form-error" role="alert">{availabilityError}</div>}
             </div>
             <footer>

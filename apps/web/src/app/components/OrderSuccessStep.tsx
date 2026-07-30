@@ -2,6 +2,7 @@ import { CheckCircle, Clock3, Plus, Printer } from 'lucide-react';
 import { Table, CartItem, cartEstimatedCookMinutes, cartTotal, formatVND } from '../data';
 import { BRAND_ASSETS } from '../config/restaurant';
 import type { SavedOrderBatch } from '../services/api';
+import { MenuItemImage } from './MenuItemImage';
 
 interface OrderSuccessStepProps {
   orderNumber: string;
@@ -80,7 +81,7 @@ export function OrderSuccessStep({ orderNumber, table, cart, batch, isEditing, o
                   alignItems: 'flex-start',
                 }}
               >
-                <img
+                <MenuItemImage
                   src={item.menuItem.image}
                   alt={item.menuItem.name}
                   loading="lazy"

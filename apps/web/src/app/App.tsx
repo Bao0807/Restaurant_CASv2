@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  type AppView, type CartItem, type PaymentRecord, type PaymentResult, type Reservation,
+  type AppView, type CartItem, type EmployeeRole, type PaymentRecord, type PaymentResult, type Reservation,
   formatVND,
 } from './data';
 import {
@@ -17,10 +17,12 @@ import {
   fetchCatalog,
   fetchPayments,
   fetchRestaurantSettings,
+  logoutApiSession,
   recordPayment,
   saveOrder,
   saveRestaurantSettings,
   updateTableStatus,
+  updateReservationStatus,
   updateWaitingOrderBatch,
   type SavedOrderBatch,
 } from './services/api';
@@ -46,6 +48,13 @@ const ReservationsPage = lazy(() => import('./components/ReservationsPage').then
 const PaymentPage = lazy(() => import('./components/PaymentPage').then(module => ({ default: module.PaymentPage })));
 const DashboardPage = lazy(() => import('./components/DashboardPage').then(module => ({ default: module.DashboardPage })));
 
+const ROLE_VIEWS: Record<EmployeeRole, AppView[]> = {
+  manager: ['order', 'reservations', 'payment', 'reports', 'dashboard'],
+  cashier: ['order', 'reservations', 'payment', 'reports'],
+  server: ['order', 'reservations'],
+  chef: ['order'],
+};
+
 export default function App() {
   const {
     navigation, view, orderStep, selectedTableId, orderMode, editingBatchId,
@@ -63,6 +72,7 @@ export default function App() {
   const { toast, showToast } = useTransientToast();
   const [authStatus, setAuthStatus] = useState<'checking' | 'required' | 'authenticated'>('checking');
   const [authenticatedUsername, setAuthenticatedUsername] = useState('');
+  const [authenticatedRole, setAuthenticatedRole] = useState<EmployeeRole>('manager');
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [bootstrapStatus, setBootstrapStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
@@ -73,6 +83,7 @@ export default function App() {
   const handleSessionExpired = useCallback(() => {
     clearApiCredentials();
     setAuthenticatedUsername('');
+    setAuthenticatedRole('manager');
     setAuthStatus('required');
     setLoginError('Phiên đăng nhập không còn hợp lệ.');
   }, []);
@@ -111,7 +122,10 @@ export default function App() {
       window.history.replaceState(navigation, '');
     }
     historyReadyRef.current = true;
-  }, [authStatus, bootstrapStatus, editingBatchId, orderMode, orderStep, selectedTableId, tables, view, waitingBatchesByTable]);
+  }, [
+    applyNavigation, authStatus, bootstrapStatus, editingBatchId, historyReadyRef, navigation,
+    orderMode, orderStep, selectedTableId, tables, view, waitingBatchesByTable,
+  ]);
 
   useEffect(() => {
     const handlePopState = (event: PopStateEvent) => {
@@ -144,7 +158,7 @@ export default function App() {
 
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, [editingBatchId, orderMode, tables, waitingBatchesByTable]);
+  }, [applyNavigation, editingBatchId, orderMode, showToast, tables, waitingBatchesByTable]);
 
   useEffect(() => {
     let mounted = true;
@@ -153,6 +167,7 @@ export default function App() {
       .then(session => {
         if (!mounted) return;
         setAuthenticatedUsername(session.username);
+        setAuthenticatedRole(session.role);
         setAuthStatus('authenticated');
       })
       .catch(error => {
@@ -160,6 +175,7 @@ export default function App() {
         if (error instanceof ApiError && error.status === 401) {
           clearApiCredentials();
           setAuthenticatedUsername('');
+          setAuthenticatedRole('manager');
           setAuthStatus('required');
           return;
         }
@@ -180,10 +196,11 @@ export default function App() {
     setSettingsStatus('loading');
 
     const catalogRequest = fetchCatalog();
+    const canReadPayments = authenticatedRole === 'manager' || authenticatedRole === 'cashier';
     Promise.all([
       fetchRestaurantSettings(),
       refreshOperationsSnapshot(() => mounted),
-      fetchPayments(),
+      canReadPayments ? fetchPayments() : Promise.resolve([]),
       catalogRequest,
     ])
       .then(([settings, operations, payments, catalog]) => {
@@ -197,6 +214,7 @@ export default function App() {
         if (error instanceof ApiError && error.status === 401) {
           clearApiCredentials();
           setAuthenticatedUsername('');
+          setAuthenticatedRole('manager');
           setAuthStatus('required');
           setLoginError('Phiên đăng nhập không còn hợp lệ.');
           return;
@@ -207,7 +225,19 @@ export default function App() {
       });
 
     return () => { mounted = false; };
-  }, [applyBootstrapData, authStatus, refreshOperationsSnapshot, reloadKey]);
+  }, [applyBootstrapData, authStatus, authenticatedRole, refreshOperationsSnapshot, reloadKey]);
+
+  useEffect(() => {
+    if (authStatus !== 'authenticated' || ROLE_VIEWS[authenticatedRole].includes(view)) return;
+    navigate({
+      view: 'order',
+      orderStep: 'tables',
+      selectedTableId: null,
+      orderMode: 'new',
+      editingBatchId: null,
+      casPaymentTableId: null,
+    });
+  }, [authStatus, authenticatedRole, navigate, view]);
 
   useEffect(() => {
     if (
@@ -226,14 +256,18 @@ export default function App() {
     applyNavigation(next);
     setCart([]);
     showToast('Phiếu đã được bếp nhận nấu nên không thể tiếp tục sửa.', 'info');
-  }, [bootstrapStatus, editingBatchId, orderMode, orderStep, selectedTableId, waitingBatchesByTable]);
+  }, [
+    applyNavigation, bootstrapStatus, editingBatchId, orderMode, orderStep,
+    selectedTableId, showToast, waitingBatchesByTable,
+  ]);
 
   const handleLogin = async (username: string, password: string) => {
     setLoginBusy(true);
     setLoginError(null);
     try {
-      await authenticate(username, password);
-      setAuthenticatedUsername(username);
+      const session = await authenticate(username, password);
+      setAuthenticatedUsername(session.username);
+      setAuthenticatedRole(session.role);
       setAuthStatus('authenticated');
       setReloadKey(key => key + 1);
     } catch (error) {
@@ -243,10 +277,12 @@ export default function App() {
     }
   };
 
-  /** Xóa credential của tab và quay lại màn đăng nhập mà không reload toàn trang. */
+  /** Thu hồi cookie phiên và quay lại màn đăng nhập mà không reload toàn trang. */
   const handleLogout = () => {
+    void logoutApiSession();
     clearApiCredentials();
     setAuthenticatedUsername('');
+    setAuthenticatedRole('manager');
     setLoginError(null);
     setAuthStatus('required');
     setBootstrapStatus('idle');
@@ -290,7 +326,10 @@ export default function App() {
     applyNavigation(next);
     setCart([]);
     showToast(table?.isPaid ? 'Bàn vừa được thanh toán trên thiết bị khác.' : 'Lượt phục vụ của bàn đã kết thúc.', 'info');
-  }, [bootstrapStatus, orderMode, orderStep, selectedTableId, tableOrders, tables, view]);
+  }, [
+    applyNavigation, bootstrapStatus, orderMode, orderStep, selectedTableId,
+    showToast, tableOrders, tables, view,
+  ]);
 
   /* ─── Order Flow ─── */
   const handleStartOrder = (tableId: string) => {
@@ -506,9 +545,29 @@ export default function App() {
     });
   };
 
+  /** Check-in trực tiếp từ card vận hành rồi mở đúng bàn để gọi món. */
+  const handleCheckInTableReservation = async (tableId: string) => {
+    const reservation = tables.find(table => table.id === tableId)?.nextReservation;
+    if (!reservation || reservation.status !== 'booked') {
+      const error = new Error('Lịch gần nhất của bàn đã thay đổi. Hãy tải lại trạng thái bàn.');
+      showToast(error.message, 'info');
+      throw error;
+    }
+
+    try {
+      const seated = await updateReservationStatus(reservation.id, 'seated', reservation.version);
+      showToast(`Đã nhận bàn cho ${seated.customerName}`, 'success');
+      await handleOpenReservationOrder(seated);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Không thể nhận bàn lúc này.', 'error');
+      throw error;
+    }
+  };
+
   /* ─── View Change ─── */
   const handleViewChange = (v: AppView) => {
     const nextView: AppView = v === 'overview' ? 'order' : v;
+    if (!ROLE_VIEWS[authenticatedRole].includes(nextView)) return;
     if (nextView === view && (nextView !== 'order' || orderStep === 'tables')) return;
 
     if (nextView === 'order') {
@@ -553,6 +612,7 @@ export default function App() {
         servingTableCount={servingTableCount}
         tableCount={tables.length}
         username={authenticatedUsername}
+        role={authenticatedRole}
         onLogout={handleLogout}
       />
       {view === 'order' && <OrderBreadcrumb current={orderStep} />}
@@ -574,6 +634,7 @@ export default function App() {
                   onDeleteOrder={handleDeleteOrder}
                   onMarkDone={handleMarkDone}
                   onConfirmDeparture={handleConfirmDeparture}
+                  onCheckInReservation={handleCheckInTableReservation}
                   onPay={handleOpenTablePayment}
                 />
               </div>
@@ -686,7 +747,7 @@ export default function App() {
       </main>
 
       {/* Bottom Nav */}
-      <BottomNav view={view} onViewChange={handleViewChange} />
+      <BottomNav view={view} role={authenticatedRole} onViewChange={handleViewChange} />
 
       <AppToast toast={toast} />
     </div>

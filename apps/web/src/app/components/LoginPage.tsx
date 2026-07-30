@@ -45,11 +45,12 @@ export function LoginPage({ busy, error, onLogin }: LoginPageProps) {
             <p>Đăng nhập để tiếp tục phiên vận hành.</p>
           </div>
 
-          <label className="login-field">
-            <span>Tên đăng nhập</span>
+          <div className="login-field">
+            <label htmlFor="login-username">Tên đăng nhập</label>
             <div className="login-input-wrap">
               <UserRound size={18} aria-hidden="true" />
               <input
+                id="login-username"
                 autoComplete="username"
                 autoFocus
                 value={username}
@@ -58,13 +59,14 @@ export function LoginPage({ busy, error, onLogin }: LoginPageProps) {
                 aria-invalid={Boolean(error)}
               />
             </div>
-          </label>
+          </div>
 
-          <label className="login-field">
-            <span>Mật khẩu</span>
+          <div className="login-field">
+            <label htmlFor="login-password">Mật khẩu</label>
             <div className="login-input-wrap">
               <LockKeyhole size={18} aria-hidden="true" />
               <input
+                id="login-password"
                 type={showPassword ? 'text' : 'password'}
                 autoComplete="current-password"
                 value={password}
@@ -81,7 +83,7 @@ export function LoginPage({ busy, error, onLogin }: LoginPageProps) {
                 {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
               </button>
             </div>
-          </label>
+          </div>
 
           {error && (
             <div className="login-error" role="alert">

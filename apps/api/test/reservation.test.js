@@ -22,9 +22,29 @@ test('từ chối số điện thoại, quá khứ và thời lượng không h�
   assert.throws(() => normalizeReservation({ tableId: 't1', customerName: 'A', customerPhone: '0901234567', partySize: 2, reservedAt: '2026-07-15T12:30:00Z', durationMinutes: 10 }, { now }), /30–480/);
 });
 
-test('phát hiện giao khung giờ nhưng cho phép hai lịch chạm biên', () => {
+test('chỉ chấp nhận giờ bắt đầu và kết thúc theo mốc 15 phút', () => {
+  const base = {
+    tableId: 't1', customerName: 'A', customerPhone: '0901234567', partySize: 2,
+  };
+  assert.throws(
+    () => normalizeReservation({ ...base, reservedAt: '2026-07-15T12:37:00Z', durationMinutes: 60 }, { now }),
+    /mốc 15 phút/,
+  );
+  assert.throws(
+    () => normalizeReservation({ ...base, reservedAt: '2026-07-15T12:45:00Z', durationMinutes: 50 }, { now }),
+    /kết thúc.*15 phút/,
+  );
+  assert.equal(
+    normalizeReservation({ ...base, reservedAt: '2026-07-15T12:45:00Z', durationMinutes: 75 }, { now }).endsAt.toISOString(),
+    '2026-07-15T14:00:00.000Z',
+  );
+});
+
+test('phát hiện giao khung giờ và bắt buộc khoảng đệm 15 phút', () => {
   assert.equal(reservationIntervalsOverlap('2026-07-15T10:00:00Z', 120, '2026-07-15T11:59:00Z', 60), true);
-  assert.equal(reservationIntervalsOverlap('2026-07-15T10:00:00Z', 120, '2026-07-15T12:00:00Z', 60), false);
+  assert.equal(reservationIntervalsOverlap('2026-07-15T10:00:00Z', 120, '2026-07-15T12:00:00Z', 60), true);
+  assert.equal(reservationIntervalsOverlap('2026-07-15T10:00:00Z', 120, '2026-07-15T12:14:00Z', 60), true);
+  assert.equal(reservationIntervalsOverlap('2026-07-15T10:00:00Z', 120, '2026-07-15T12:15:00Z', 60), false);
 });
 
 test('vòng đời đặt bàn chỉ cho phép chuyển trạng thái hợp lệ', () => {

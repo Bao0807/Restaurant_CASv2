@@ -163,7 +163,7 @@ function nextAvailableTablePosition(
 
 function TableEditor({ table, tables, areaOptions, onChanged, report, confirmAction }: { table: Table; tables: Table[]; areaOptions: string[]; onChanged: Props['onChanged']; report: (message: string, error?: boolean) => void; confirmAction: ConfirmAction }) {
   const [draft, setDraft] = useState(table);
-  useEffect(() => setDraft(table), [table.area, table.number, table.positionX, table.positionY, table.seats, table.status]);
+  useEffect(() => setDraft(table), [table]);
 
   const changeArea = (area: string) => {
     setDraft(current => {

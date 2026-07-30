@@ -65,6 +65,20 @@ const schemaStatements = [
     id VARCHAR(120) NOT NULL PRIMARY KEY,
     applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS audit_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    occurred_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    request_id VARCHAR(128) NOT NULL,
+    actor_username VARCHAR(80) NOT NULL,
+    actor_role VARCHAR(20) NOT NULL,
+    action VARCHAR(160) NOT NULL,
+    entity_type VARCHAR(80) NOT NULL,
+    entity_id VARCHAR(160) NULL,
+    metadata JSON NULL,
+    INDEX idx_audit_occurred (occurred_at, id),
+    INDEX idx_audit_actor (actor_username, occurred_at),
+    CONSTRAINT chk_audit_actor_role CHECK (actor_role IN ('manager', 'cashier', 'server', 'chef'))
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS restaurant_settings (
     id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
     settings JSON NOT NULL,
@@ -1307,6 +1321,7 @@ async function ensureKitchenQueueColumns(connection) {
 /** Fail-fast khi production tắt auto-migrate nhưng schema chưa đúng phiên bản ứng dụng. */
 async function verifyDatabaseSchema(connection) {
   const probes = [
+    'SELECT id, occurred_at, request_id, actor_username, actor_role, action, entity_type, entity_id, metadata FROM audit_events LIMIT 0',
     'SELECT id, settings FROM restaurant_settings LIMIT 0',
     'SELECT id, table_number, seats, status, area, position_x, position_y FROM restaurant_tables LIMIT 0',
     'SELECT id, reservation_code, table_id, table_number, customer_name, customer_phone, phone_normalized, party_size, reserved_at, ends_at, duration_minutes, status, seated_table_id, version FROM reservations LIMIT 0',

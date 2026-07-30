@@ -1,6 +1,6 @@
 import type {
-  CartItem, EditableOrderBatch, Employee, KitchenStatus, MenuCategory, MenuItem,
-  MenuAvailability, PaymentRecord, PaymentResult, ReportSummary, Reservation, ReservationInput, ReservationStatus,
+  CartItem, EditableOrderBatch, Employee, EmployeeRole, KitchenStatus, MenuCategory, MenuItem,
+  MenuAvailability, PaymentReceiptDetails, PaymentRecord, PaymentResult, ReportSummary, Reservation, ReservationInput, ReservationStatus,
   Table, TableStatus,
 } from '../data';
 import { normalizeSettings, type RestaurantSettings } from '../config/restaurant';
@@ -35,34 +35,23 @@ export class ApiError extends Error {
   }
 }
 
-function getAuthorization(): string | null {
-  return sessionStorage.getItem(AUTH_STORAGE_KEY);
-}
-
-function encodeBasicAuth(username: string, password: string): string {
-  const bytes = new TextEncoder().encode(`${username}:${password}`);
-  let binary = '';
-  bytes.forEach(byte => { binary += String.fromCharCode(byte); });
-  return `Basic ${btoa(binary)}`;
-}
-
+/** Dọn credential Basic Auth cũ sau khi nâng cấp sang cookie HttpOnly. */
 export function clearApiCredentials(): void {
   sessionStorage.removeItem(AUTH_STORAGE_KEY);
 }
 
-/** Client HTTP dùng chung: gắn auth theo tab và chuẩn hóa mọi lỗi API. */
+/** Client HTTP dùng chung: trình duyệt tự gửi session cookie HttpOnly. */
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const authorization = getAuthorization();
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), 12_000);
   let response: Response;
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
       ...options,
+      credentials: 'include',
       signal: options?.signal ?? controller.signal,
       headers: {
         'Content-Type': 'application/json',
-        ...(authorization ? { Authorization: authorization } : {}),
         ...(options?.headers ?? {}),
       },
     });
@@ -92,21 +81,34 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return body as T;
 }
 
-export async function checkApiSession(): Promise<{ authRequired: boolean; username: string }> {
+export async function checkApiSession(): Promise<{ authRequired: boolean; username: string; role: EmployeeRole }> {
   const data = await request<{
     authRequired: boolean;
-    user: { username: string };
+    user: { username: string; role: EmployeeRole };
   }>('/auth/session');
-  return { authRequired: data.authRequired, username: data.user.username };
+  return { authRequired: data.authRequired, username: data.user.username, role: data.user.role };
 }
 
-export async function authenticate(username: string, password: string): Promise<void> {
-  sessionStorage.setItem(AUTH_STORAGE_KEY, encodeBasicAuth(username, password));
+export async function authenticate(
+  username: string,
+  password: string,
+): Promise<{ authRequired: boolean; username: string; role: EmployeeRole }> {
+  clearApiCredentials();
+  const data = await request<{
+    authRequired: boolean;
+    user: { username: string; role: EmployeeRole };
+  }>('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
+  });
+  return { authRequired: data.authRequired, username: data.user.username, role: data.user.role };
+}
+
+export async function logoutApiSession(): Promise<void> {
   try {
-    await checkApiSession();
-  } catch (error) {
+    await request('/auth/logout', { method: 'POST', body: '{}' });
+  } finally {
     clearApiCredentials();
-    throw error;
   }
 }
 
@@ -392,7 +394,11 @@ export async function fetchPayments(): Promise<PaymentRecord[]> {
   // Không truyền khoảng ngày để backend trả tối đa 100 hóa đơn mới nhất cho lịch sử thu ngân.
   // Báo cáo theo ngày/tuần/tháng dùng endpoint aggregate riêng nên không bị giới hạn bởi danh sách này.
   const data = await request<{ payments: PaymentRecord[] }>('/payments');
-  return data.payments.map(payment => ({
+  return data.payments.map(normalizePaymentRecord);
+}
+
+function normalizePaymentRecord(payment: PaymentRecord): PaymentRecord {
+  return {
     ...payment,
     tableNumber: Number(payment.tableNumber),
     ...(payment.reservationId != null ? { reservationId: Number(payment.reservationId) } : {}),
@@ -402,9 +408,25 @@ export async function fetchPayments(): Promise<PaymentRecord[]> {
     serviceFee: Number(payment.serviceFee),
     vat: Number(payment.vat),
     total: Number(payment.total),
+    ...(payment.cashReceived != null ? { cashReceived: Number(payment.cashReceived) } : {}),
+    ...(payment.cashChange != null ? { cashChange: Number(payment.cashChange) } : {}),
     itemCount: Number(payment.itemCount),
     paidAt: new Date(payment.paidAt).toISOString(),
-  }));
+  };
+}
+
+/** Tải snapshot món và cấu hình tại thời điểm thu tiền để xem hoặc in lại hóa đơn. */
+export async function fetchPaymentReceipt(invoiceCode: string): Promise<PaymentReceiptDetails> {
+  const data = await request<PaymentReceiptDetails>(`/payments/${encodeURIComponent(invoiceCode)}`);
+  return {
+    payment: normalizePaymentRecord(data.payment),
+    items: data.items.map(item => ({
+      ...item,
+      quantity: Number(item.quantity),
+      price: Number(item.price),
+    })),
+    snapshot: data.snapshot ?? {},
+  };
 }
 
 /** Lấy số liệu đã aggregate từ hóa đơn; không phụ thuộc order đang mở hay giới hạn danh sách 1.000 dòng. */
@@ -428,17 +450,7 @@ export async function recordPayment(payment: PaymentRecord): Promise<PaymentResu
     body: JSON.stringify({ payment }),
   });
   return {
-    ...data.payment,
-    tableNumber: Number(data.payment.tableNumber),
-    ...(data.payment.reservationId != null ? { reservationId: Number(data.payment.reservationId) } : {}),
-    ...(data.payment.guestCount != null ? { guestCount: Number(data.payment.guestCount) } : {}),
-    subtotal: Number(data.payment.subtotal),
-    discount: Number(data.payment.discount),
-    serviceFee: Number(data.payment.serviceFee),
-    vat: Number(data.payment.vat),
-    total: Number(data.payment.total),
-    itemCount: Number(data.payment.itemCount),
-    paidAt: new Date(data.payment.paidAt).toISOString(),
+    ...normalizePaymentRecord(data.payment),
     requiresDepartureConfirmation: Boolean(data.requiresDepartureConfirmation),
     orderClosed: Boolean(data.orderClosed),
   };

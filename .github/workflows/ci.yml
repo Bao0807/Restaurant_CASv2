@@ -1,0 +1,96 @@
+name: Quality Gate
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: restaurant_casv2_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    env:
+      NODE_ENV: test
+      HOST: 127.0.0.1
+      PORT: 4100
+      AUTH_USERNAME: ci-manager
+      AUTH_PASSWORD: ci-manager-password-long
+      AUTH_SESSION_SECRET: ci-session-secret-0123456789abcdef0123456789
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: root
+      DB_NAME: restaurant_casv2_test
+      DB_AUTO_MIGRATE: 'false'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.19
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Dependency audit
+        run: npm audit --audit-level=moderate
+
+      - name: Lint, typecheck, unit tests and build
+        run: npm run check
+
+      - name: Migrate, seed and audit isolated database
+        run: |
+          npm run db:migrate
+          npm run db:seed:test
+          npm run db:audit
+
+      - name: Start API
+        run: |
+          npm run start:api > api.log 2>&1 &
+          echo $! > api.pid
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:4100/api/health > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat api.log
+          exit 1
+
+      - name: API and MySQL smoke test
+        run: npm run test:smoke
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Browser E2E
+        run: npm run test:e2e
+
+      - name: Upload API log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-log
+          path: api.log

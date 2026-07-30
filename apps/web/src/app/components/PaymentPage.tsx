@@ -2,18 +2,25 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNod
 import {
   ArrowRight, X, CreditCard, Banknote, QrCode, CheckCircle, Users,
   Printer, ReceiptText, BadgeCheck, History, Search, ChevronDown, ChevronUp,
+  SlidersHorizontal,
 } from 'lucide-react';
 import {
-  Table, CartItem, Employee, PaymentMethodId, PaymentRecord, PaymentResult,
+  Table, CartItem, Employee, PaymentMethodId, PaymentReceiptDetails, PaymentRecord, PaymentResult,
   STATUS_CONFIG, cartTotal, cartItemTotal, formatVND,
 } from '../data';
 import {
   BRAND_ASSETS, PAYMENT_METHOD_LABELS,
   calculateInvoiceTotals, type RestaurantSettings,
 } from '../config/restaurant';
-import { RestaurantInvoice, type PrintableInvoiceData } from './invoice/RestaurantInvoice';
+import {
+  RestaurantInvoice,
+  type InvoicePrintFormat,
+  type PrintableInvoiceData,
+} from './invoice/RestaurantInvoice';
 import { OrderTimer } from './OrderTimer';
-import { fetchEmployees, getServerNowMs } from '../services/api';
+import { fetchEmployees, fetchPaymentReceipt, getServerNowMs } from '../services/api';
+import { PaymentHistoryPanel } from './payment/PaymentHistoryPanel';
+import '../../styles/payment.css';
 
 interface PaymentPageProps {
   tables: Table[];
@@ -28,6 +35,9 @@ const PAYMENT_VIEW_HISTORY_KEY = 'casPaymentView';
 const PAYMENT_HISTORY_LIMIT = 10;
 
 type PaymentView = 'queue' | 'history';
+type PaymentQueueFilter = 'all' | 'ready' | 'early';
+
+const INVOICE_PRINT_FORMAT_KEY = 'casInvoicePrintFormat';
 
 function paymentHistoryTableId(state: unknown = window.history.state): string | null {
   if (!state || typeof state !== 'object') return null;
@@ -74,13 +84,215 @@ function payableTotal(order: CartItem[], settings: RestaurantSettings): number {
   return calculateInvoiceTotals(cartTotal(order), settings).total;
 }
 
-function formatPaymentDate(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString('vi-VN', {
-    day: '2-digit', month: '2-digit', year: 'numeric',
-    hour: '2-digit', minute: '2-digit',
-  });
+function initialPrintFormat(): InvoicePrintFormat {
+  return window.localStorage.getItem(INVOICE_PRINT_FORMAT_KEY) === 'thermal' ? 'thermal' : 'a4';
+}
+
+function printInvoice(format: InvoicePrintFormat) {
+  const root = document.documentElement;
+  const style = document.createElement('style');
+  style.dataset.invoicePrintPage = 'true';
+  style.textContent = `@page { size: ${format === 'thermal' ? '80mm auto' : 'A4 portrait'}; margin: 0; }`;
+  root.dataset.invoicePrintFormat = format;
+  document.head.appendChild(style);
+  try {
+    window.print();
+  } finally {
+    delete root.dataset.invoicePrintFormat;
+    style.remove();
+  }
+}
+
+function setStoredPrintFormat(format: InvoicePrintFormat) {
+  window.localStorage.setItem(INVOICE_PRINT_FORMAT_KEY, format);
+}
+
+function historicalItemName(item: PaymentReceiptDetails['items'][number]): string {
+  const options = [
+    item.options?.size,
+    ...(item.options?.toppings ?? []),
+  ].filter(Boolean);
+  return options.length ? `${item.name} (${options.join(', ')})` : item.name;
+}
+
+function historicalInvoice(
+  details: PaymentReceiptDetails,
+  settings: RestaurantSettings,
+): PrintableInvoiceData {
+  const { payment, snapshot } = details;
+  const paidAt = new Date(payment.paidAt);
+  const taxableBase = Math.max(payment.subtotal - payment.discount, 0);
+  const serviceFeeRate = taxableBase > 0 ? payment.serviceFee / taxableBase : 0;
+  const vatBase = taxableBase + payment.serviceFee;
+  const vatRate = vatBase > 0 ? payment.vat / vatBase : 0;
+  return {
+    logo: BRAND_ASSETS.logoStacked,
+    invoiceCode: payment.invoiceCode,
+    transactionCode: payment.transactionCode,
+    date: paidAt.toLocaleDateString('vi-VN'),
+    time: paidAt.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }),
+    table: String(payment.tableNumber),
+    area: snapshot.area || settings.defaultArea,
+    customerName: payment.customerName || settings.customerName,
+    guestCount: payment.guestCount ?? settings.guestCount,
+    staffName: payment.staffName,
+    cashierName: payment.cashierName,
+    restaurant: {
+      name: snapshot.restaurantName || settings.restaurantName,
+      legalName: snapshot.legalName || settings.legalName,
+      tagline: snapshot.tagline || settings.tagline,
+      address: snapshot.address || settings.address,
+      phone: snapshot.phone || settings.phone,
+      email: snapshot.email || settings.email,
+      website: snapshot.website || settings.website,
+    },
+    items: details.items.map(item => ({
+      name: historicalItemName(item),
+      quantity: item.quantity,
+      price: item.price,
+    })),
+    subtotal: payment.subtotal,
+    discount: payment.discount,
+    serviceFee: payment.serviceFee,
+    serviceFeeRate: Number(snapshot.serviceFeeRate ?? serviceFeeRate),
+    vat: payment.vat,
+    vatRate: Number(snapshot.vatRate ?? vatRate),
+    total: payment.total,
+    paymentMethod: PAYMENT_METHOD_LABELS[payment.method],
+    paymentStatus: 'Đã thanh toán',
+    ...(payment.cashReceived != null ? { cashReceived: payment.cashReceived } : {}),
+    ...(payment.cashChange != null ? { cashChange: payment.cashChange } : {}),
+    note: snapshot.invoiceNote || settings.invoiceNote,
+  };
+}
+
+function InvoicePreviewContent({
+  data,
+  format,
+  onFormatChange,
+  onClose,
+  headingId,
+  title,
+  supportingText,
+}: {
+  data: PrintableInvoiceData;
+  format: InvoicePrintFormat;
+  onFormatChange: (format: InvoicePrintFormat) => void;
+  onClose: () => void;
+  headingId: string;
+  title: string;
+  supportingText?: string;
+}) {
+  return (
+    <>
+      <div className="invoice-actions payment-invoice-toolbar">
+        <div className="payment-invoice-success-icon"><CheckCircle size={22} /></div>
+        <div className="payment-invoice-heading">
+          <div id={headingId}>{title}</div>
+          <span>{data.invoiceCode} · {formatVND(data.total)}</span>
+          {supportingText && <small>{supportingText}</small>}
+        </div>
+        <div className="payment-print-format" aria-label="Khổ in hóa đơn">
+          <button
+            type="button"
+            className={format === 'a4' ? 'active' : ''}
+            aria-pressed={format === 'a4'}
+            onClick={() => onFormatChange('a4')}
+          >
+            A4
+          </button>
+          <button
+            type="button"
+            className={format === 'thermal' ? 'active' : ''}
+            aria-pressed={format === 'thermal'}
+            onClick={() => onFormatChange('thermal')}
+          >
+            80 mm
+          </button>
+        </div>
+        <button type="button" className="payment-invoice-print" onClick={() => printInvoice(format)}>
+          <Printer size={17} /> In
+        </button>
+        <button type="button" className="payment-invoice-close" onClick={onClose} aria-label="Đóng hóa đơn">
+          <X size={18} />
+        </button>
+      </div>
+      <div className={`invoice-preview payment-invoice-preview format-${format}`}>
+        <RestaurantInvoice data={data} format={format} />
+      </div>
+    </>
+  );
+}
+
+function HistoryInvoiceDialog({
+  data,
+  format,
+  onFormatChange,
+  onClose,
+}: {
+  data: PrintableInvoiceData;
+  format: InvoicePrintFormat;
+  onFormatChange: (format: InvoicePrintFormat) => void;
+  onClose: () => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onCloseRef.current();
+      if (event.key !== 'Tab') return;
+      const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      ) ?? []);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.body.style.overflow = 'hidden';
+    document.addEventListener('keydown', handleKeyDown);
+    requestAnimationFrame(() => dialogRef.current?.querySelector<HTMLElement>('button')?.focus());
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener('keydown', handleKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, []);
+
+  return (
+    <div
+      className="payment-dialog-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="history-invoice-dialog-title"
+      onClick={onClose}
+    >
+      <div
+        ref={dialogRef}
+        className="payment-dialog-shell is-invoice"
+        onClick={event => event.stopPropagation()}
+      >
+        <InvoicePreviewContent
+          data={data}
+          format={format}
+          onFormatChange={onFormatChange}
+          onClose={onClose}
+          headingId="history-invoice-dialog-title"
+          title="Chi tiết hóa đơn"
+          supportingText="Bản lưu đã chốt · có thể in lại"
+        />
+      </div>
+    </div>
+  );
 }
 
 /** Sinh mã hóa đơn đủ ngẫu nhiên để backend dùng làm khóa idempotency. */
@@ -122,7 +334,9 @@ function BillPanel({
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [employeeError, setEmployeeError] = useState<string | null>(null);
   const [employeeId, setEmployeeId] = useState('');
+  const [cashReceivedInput, setCashReceivedInput] = useState('');
   const [departureRequired, setDepartureRequired] = useState(false);
+  const [printFormat, setPrintFormat] = useState<InvoicePrintFormat>(initialPrintFormat);
   const paymentCodes = useRef(makePaymentCodes());
   const keepTableOpenRef = useRef(table.status !== 'done');
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -186,11 +400,27 @@ function BillPanel({
     keepTableOpenRef.current = table.status !== 'done';
     setInvoiceData(null);
     setPaymentError(null);
+    setCashReceivedInput('');
     setDepartureRequired(false);
-  }, [table.id]);
+  }, [table.id, table.status]);
 
   const subtotal = cartTotal(order);
   const totals = calculateInvoiceTotals(subtotal, settings);
+  const cashReceived = cashReceivedInput === '' ? null : Number(cashReceivedInput);
+  const cashPaymentInvalid = selectedMethod === 'cash' && (
+    !Number.isSafeInteger(cashReceived)
+    || cashReceived! < totals.total
+    || cashReceived! > 2_000_000_000
+  );
+  const cashChange = selectedMethod === 'cash' && cashReceived != null && !cashPaymentInvalid
+    ? cashReceived - totals.total
+    : null;
+  const cashSuggestions = [...new Set([
+    totals.total,
+    Math.ceil(totals.total / 10_000) * 10_000,
+    Math.ceil(totals.total / 50_000) * 50_000,
+    Math.ceil(totals.total / 100_000) * 100_000,
+  ])].filter(value => value > 0 && value <= 2_000_000_000).slice(0, 4);
   const paymentUnavailable = !invoiceData && !processing && (table.isPaid || order.length === 0);
 
   useEffect(() => {
@@ -217,7 +447,7 @@ function BillPanel({
       date: now.toLocaleDateString('vi-VN'),
       time: now.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }),
       table: String(table.number),
-      area: settings.defaultArea,
+      area: table.area || settings.defaultArea,
       customerName: checkedInReservation?.customerName ?? settings.customerName,
       guestCount: checkedInReservation?.partySize ?? settings.guestCount,
       batchCount: table.batchCount ?? 1,
@@ -247,6 +477,10 @@ function BillPanel({
       total: totals.total,
       paymentMethod: PAYMENT_METHOD_LABELS[paymentMethod],
       paymentStatus: 'Đã thanh toán',
+      ...(paymentMethod === 'cash' && cashReceived != null ? {
+        cashReceived,
+        cashChange: Math.max(0, cashReceived - totals.total),
+      } : {}),
       note: settings.invoiceNote,
     };
 
@@ -262,6 +496,7 @@ function BillPanel({
       serviceFee: totals.serviceFee,
       vat: totals.vat,
       total: totals.total,
+      ...(paymentMethod === 'cash' && cashReceived != null ? { cashReceived } : {}),
       itemCount,
       paidAt: now.toISOString(),
       keepTableOpen: keepTableOpenRef.current,
@@ -275,7 +510,7 @@ function BillPanel({
 
   /** Chỉ mở hóa đơn in sau khi transaction thanh toán ở server thành công. */
   const handleConfirm = async () => {
-    if (invoiceData || processing || paymentUnavailable) return;
+    if (invoiceData || processing || paymentUnavailable || cashPaymentInvalid) return;
     const { invoice, payment } = buildInvoice(selectedMethod);
     setProcessing(true);
     setPaymentError(null);
@@ -294,6 +529,8 @@ function BillPanel({
         vat: saved.vat,
         total: saved.total,
         paymentMethod: PAYMENT_METHOD_LABELS[saved.method],
+        ...(saved.cashReceived != null ? { cashReceived: saved.cashReceived } : {}),
+        ...(saved.cashChange != null ? { cashChange: saved.cashChange } : {}),
         customerName: saved.customerName || invoice.customerName,
         guestCount: saved.guestCount ?? invoice.guestCount,
         staffName: saved.staffName,
@@ -313,53 +550,32 @@ function BillPanel({
       role="dialog"
       aria-modal="true"
       aria-labelledby="payment-dialog-title"
-      style={{ position: 'fixed', inset: 0, zIndex: 80, background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(2px)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+      className="payment-dialog-overlay"
       onClick={() => { if (!processing) onClose(); }}
     >
       <div
         ref={dialogRef}
-        style={{ background: '#fff', borderRadius: '18px 18px 0 0', width: '100%', maxWidth: invoiceData ? 980 : 520, maxHeight: '96vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+        className={`payment-dialog-shell ${invoiceData ? 'is-invoice' : 'is-checkout'}`}
         onClick={event => event.stopPropagation()}
       >
         {invoiceData ? (
-          <>
-            <div className="invoice-actions" style={{ padding: '14px 16px', borderBottom: '1px solid #E5E7EB', display: 'flex', alignItems: 'center', gap: 12, background: '#fff', flexShrink: 0 }}>
-              <div style={{ width: 40, height: 40, borderRadius: 10, background: '#ECFDF5', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#15803D', flexShrink: 0 }}>
-                <CheckCircle size={22} />
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div id="payment-dialog-title" style={{ fontWeight: 800, color: '#111827', fontSize: '15px' }}>Thanh toán thành công</div>
-                <div style={{ color: '#6B7280', fontSize: '12px', marginTop: 2 }}>
-                  {invoiceData.invoiceCode} · {formatVND(invoiceData.total)}
-                </div>
-                {departureRequired && (
-                  <div style={{ color: '#166534', fontSize: '12px', marginTop: 3, fontWeight: 700 }}>
-                    Bàn vẫn đang phục vụ · xác nhận khách rời sau khi món hoàn tất
-                  </div>
-                )}
-              </div>
-              <button
-                onClick={() => window.print()}
-                style={{ background: '#0D9488', color: '#fff', border: 'none', borderRadius: 10, height: 38, padding: '0 14px', cursor: 'pointer', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}
-              >
-                <Printer size={17} />
-                In
-              </button>
-              <button
-                onClick={onClose}
-                style={{ background: '#F3F4F6', border: 'none', borderRadius: 10, width: 38, height: 38, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                aria-label="Đóng hóa đơn"
-              >
-                <X size={18} color="#374151" />
-              </button>
-            </div>
-            <div className="invoice-preview">
-              <RestaurantInvoice data={invoiceData} />
-            </div>
-          </>
+          <InvoicePreviewContent
+            data={invoiceData}
+            format={printFormat}
+            onFormatChange={format => {
+              setPrintFormat(format);
+              setStoredPrintFormat(format);
+            }}
+            onClose={onClose}
+            headingId="payment-dialog-title"
+            title="Thanh toán thành công"
+            supportingText={departureRequired
+              ? 'Bàn vẫn đang phục vụ · xác nhận khách rời sau khi món hoàn tất'
+              : undefined}
+          />
         ) : (
           <>
-            <div style={{ padding: '16px 20px 12px', borderBottom: '1px solid #F3F4F6', display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div className="payment-checkout-header">
               <div style={{ width: 40, height: 40, borderRadius: 10, background: '#ECFEFF', border: '1px solid #99F6E4', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                 <img src={BRAND_ASSETS.mark} alt="CAS" style={{ width: 24, height: 24 }} />
               </div>
@@ -375,7 +591,8 @@ function BillPanel({
               </button>
             </div>
 
-            <div style={{ flex: 1, overflowY: 'auto' }}>
+            <div className="payment-checkout-body">
+              <div className="payment-checkout-receipt-pane">
               {keepTableOpenRef.current && (
                 <div style={{ margin: '14px 16px 0', padding: '11px 13px', borderRadius: 11, background: '#FFF7ED', border: '1px solid #FDBA74', color: '#9A3412', fontSize: 12, lineHeight: 1.5 }}>
                   <strong>Thanh toán trước khi món hoàn tất.</strong> Bếp vẫn tiếp tục chuẩn bị món và bàn vẫn được giữ cho khách.
@@ -452,25 +669,25 @@ function BillPanel({
                   </div>
                 </div>
               </div>
+              </div>
 
-              <div style={{ padding: '0 16px 8px' }}>
-                <label style={{ display: 'block', fontSize: '13px', fontWeight: 600, color: '#374151', marginBottom: 12 }}>
+              <div className="payment-checkout-controls-pane">
+                <label className="payment-employee-field">
                   Nhân viên phục vụ
                   <select
                     value={employeeId}
                     onChange={event => setEmployeeId(event.target.value)}
                     disabled={employees.length === 0}
-                    style={{ display: 'block', width: '100%', marginTop: 7, border: '1px solid #D1D5DB', borderRadius: 10, padding: '10px 11px', background: '#fff', color: '#111827', fontSize: 13 }}
                   >
                     {employees.length === 0 && <option value="">{settings.staffName}</option>}
                     {employees.map(employee => <option key={employee.id} value={employee.id}>{employee.code} · {employee.name}</option>)}
                   </select>
                   {employeeError && <span style={{ display: 'block', marginTop: 5, color: '#B45309', fontSize: 11, fontWeight: 500 }}>{employeeError}</span>}
                 </label>
-                <div style={{ fontSize: '13px', fontWeight: 600, color: '#374151', marginBottom: 10 }}>
+                <div className="payment-method-label">
                   Phương thức thanh toán
                 </div>
-                <div style={{ display: 'flex', gap: 8 }}>
+                <div className="payment-method-options">
                   {enabledMethods.map(item => {
                     const selected = selectedMethod === item.id;
                     return (
@@ -478,28 +695,61 @@ function BillPanel({
                         key={item.id}
                         onClick={() => setMethod(item.id)}
                         aria-pressed={selected}
-                        style={{
-                          flex: 1, padding: '12px 8px', borderRadius: 10,
-                          border: selected ? '2px solid #0D9488' : '2px solid #E5E7EB',
-                          background: selected ? '#F0FDFA' : '#FAFAFA',
-                          cursor: 'pointer', textAlign: 'center',
-                        }}
+                        className={`payment-method-option${selected ? ' selected' : ''}`}
                       >
-                        <div style={{ color: selected ? '#0D9488' : '#6B7280', marginBottom: 4, display: 'flex', justifyContent: 'center' }}>
+                        <span className="payment-method-icon">
                           {item.icon}
-                        </div>
-                        <div style={{ fontSize: '12px', fontWeight: selected ? 700 : 500, color: selected ? '#0F766E' : '#374151' }}>
+                        </span>
+                        <strong>
                           {item.label}
-                        </div>
-                        <div style={{ fontSize: '10px', color: '#9CA3AF', marginTop: 2, lineHeight: 1.3 }}>{item.desc}</div>
+                        </strong>
+                        <small>{item.desc}</small>
                       </button>
                     );
                   })}
                 </div>
+                {selectedMethod === 'cash' && (
+                  <div className="payment-cash-panel">
+                    <label htmlFor="payment-cash-received">Khách đưa</label>
+                    <div className="payment-cash-input">
+                      <input
+                        id="payment-cash-received"
+                        type="number"
+                        inputMode="numeric"
+                        min={totals.total}
+                        max={2_000_000_000}
+                        step={1_000}
+                        value={cashReceivedInput}
+                        onChange={event => setCashReceivedInput(event.target.value)}
+                        placeholder={String(totals.total)}
+                        aria-describedby="payment-cash-feedback"
+                      />
+                      <span>đ</span>
+                    </div>
+                    <div className="payment-cash-suggestions" aria-label="Số tiền khách đưa thường dùng">
+                      {cashSuggestions.map(value => (
+                        <button type="button" key={value} onClick={() => setCashReceivedInput(String(value))}>
+                          {formatVND(value)}
+                        </button>
+                      ))}
+                    </div>
+                    <div
+                      id="payment-cash-feedback"
+                      className={`payment-cash-feedback${cashPaymentInvalid ? ' is-error' : ''}`}
+                      aria-live="polite"
+                    >
+                      {cashReceivedInput === ''
+                        ? 'Nhập số tiền khách đưa để tính tiền thừa.'
+                        : cashPaymentInvalid
+                          ? `Còn thiếu ${formatVND(Math.max(0, totals.total - Number(cashReceived || 0)))}`
+                          : <>Tiền thừa <strong>{formatVND(cashChange ?? 0)}</strong></>}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
-            <div style={{ padding: '12px 16px 28px', borderTop: '1px solid #F3F4F6', background: '#fff', flexShrink: 0 }}>
+            <div className="payment-checkout-footer">
               {paymentError && (
                 <div role="alert" style={{ marginBottom: 10, color: '#B91C1C', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 10, padding: 10, fontSize: 13 }}>
                   {paymentError} {!paymentUnavailable && 'Phiếu gọi món vẫn được giữ nguyên để bạn thử lại.'}
@@ -507,12 +757,12 @@ function BillPanel({
               )}
               <button
                 onClick={() => void handleConfirm()}
-                disabled={processing || paymentUnavailable}
+                disabled={processing || paymentUnavailable || cashPaymentInvalid}
                 style={{
                   width: '100%', background: '#15803D', color: '#fff', border: 'none',
                   borderRadius: 12, padding: '15px', cursor: processing ? 'wait' : 'pointer', fontWeight: 700,
                   fontSize: '15px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
-                  opacity: processing || paymentUnavailable ? 0.7 : 1,
+                  opacity: processing || paymentUnavailable || cashPaymentInvalid ? 0.7 : 1,
                 }}
               >
                 <CheckCircle size={20} />
@@ -529,9 +779,16 @@ function BillPanel({
 export function PaymentPage({ tables, tableOrders, payments, settings, onProcessPayment }: PaymentPageProps) {
   const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
   const [paymentView, setPaymentView] = useState<PaymentView>(() => paymentViewFromHistory());
+  const [queueSearch, setQueueSearch] = useState('');
+  const [queueFilter, setQueueFilter] = useState<PaymentQueueFilter>('all');
+  const [showPaidServing, setShowPaidServing] = useState(true);
   const [historySearch, setHistorySearch] = useState('');
   const [historyMethod, setHistoryMethod] = useState<'all' | PaymentMethodId>('all');
   const [showAllHistory, setShowAllHistory] = useState(false);
+  const [historyInvoiceData, setHistoryInvoiceData] = useState<PrintableInvoiceData | null>(null);
+  const [historyReceiptLoading, setHistoryReceiptLoading] = useState<string | null>(null);
+  const [historyReceiptError, setHistoryReceiptError] = useState<string | null>(null);
+  const [historyPrintFormat, setHistoryPrintFormat] = useState<InvoicePrintFormat>(initialPrintFormat);
   const paymentTabsRef = useRef<HTMLElement>(null);
   const tablesRef = useRef(tables);
   const ordersRef = useRef(tableOrders);
@@ -582,6 +839,20 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
       PAYMENT_STATUS_PRIORITY[left.status] - PAYMENT_STATUS_PRIORITY[right.status]
       || left.number - right.number
     ));
+  const normalizedQueueSearch = queueSearch.trim().toLocaleLowerCase('vi-VN');
+  const visibleUnpaidTables = unpaidTables.filter(table => {
+    if (queueFilter === 'ready' && table.status !== 'done') return false;
+    if (queueFilter === 'early' && table.status === 'done') return false;
+    if (!normalizedQueueSearch) return true;
+    const order = tableOrders[table.id] || [];
+    return [
+      String(table.number),
+      `bàn ${table.number}`,
+      table.area ?? '',
+      STATUS_CONFIG[table.status].label,
+      ...order.map(item => item.menuItem.name),
+    ].some(value => value.toLocaleLowerCase('vi-VN').includes(normalizedQueueSearch));
+  });
   const paidServingTables = orderedTables.filter(table => table.isPaid);
   const unpaidTotal = unpaidTables.reduce((sum, table) => (
     sum + payableTotal(tableOrders[table.id] || [], settings)
@@ -612,6 +883,20 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
     ? filteredPayments
     : filteredPayments.slice(0, PAYMENT_HISTORY_LIMIT);
   const filteredPaymentTotal = filteredPayments.reduce((sum, payment) => sum + payment.total, 0);
+
+  const openHistoryReceipt = async (payment: PaymentRecord) => {
+    if (historyReceiptLoading) return;
+    setHistoryReceiptLoading(payment.invoiceCode);
+    setHistoryReceiptError(null);
+    try {
+      const details = await fetchPaymentReceipt(payment.invoiceCode);
+      setHistoryInvoiceData(historicalInvoice(details, settings));
+    } catch (error) {
+      setHistoryReceiptError(error instanceof Error ? error.message : 'Không thể tải chi tiết hóa đơn.');
+    } finally {
+      setHistoryReceiptLoading(null);
+    }
+  };
 
   return (
     <div className="payment-page">
@@ -648,7 +933,7 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
             <header className="payment-section-header">
               <div>
                 <h2 id="payment-unpaid-title">Chưa thanh toán</h2>
-                <p>{unpaidTables.length} bàn · bàn đã xong được ưu tiên trước</p>
+                <p>{visibleUnpaidTables.length}/{unpaidTables.length} bàn đang hiển thị · bàn đã xong được ưu tiên trước</p>
               </div>
               <div className="payment-unpaid-total" aria-label={`Tổng chưa thu ${formatVND(unpaidTotal)}`}>
                 <span>Tổng chưa thu</span>
@@ -656,8 +941,38 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
               </div>
             </header>
 
+            <div className="payment-queue-controls">
+              <label className="payment-queue-search">
+                <Search size={17} aria-hidden="true" />
+                <span className="sr-only">Tìm bàn cần thanh toán</span>
+                <input
+                  value={queueSearch}
+                  onChange={event => setQueueSearch(event.target.value)}
+                  placeholder="Tìm số bàn, khu vực hoặc món"
+                />
+              </label>
+              <div className="payment-queue-filters" aria-label="Lọc mức sẵn sàng thanh toán">
+                <SlidersHorizontal size={16} aria-hidden="true" />
+                {([
+                  ['all', 'Tất cả', unpaidTables.length],
+                  ['ready', 'Sẵn sàng thu', unpaidTables.filter(table => table.status === 'done').length],
+                  ['early', 'Trả trước', unpaidTables.filter(table => table.status !== 'done').length],
+                ] as Array<[PaymentQueueFilter, string, number]>).map(([id, label, count]) => (
+                  <button
+                    type="button"
+                    key={id}
+                    className={queueFilter === id ? 'active' : ''}
+                    aria-pressed={queueFilter === id}
+                    onClick={() => setQueueFilter(id)}
+                  >
+                    {label} <strong>{count}</strong>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="payment-table-list">
-              {unpaidTables.map(table => {
+              {visibleUnpaidTables.map(table => {
                 const order = tableOrders[table.id] || [];
                 const cfg = STATUS_CONFIG[table.status];
                 const total = payableTotal(order, settings);
@@ -696,11 +1011,11 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
                         )}
                         <OrderTimer table={table} compact />
                       </span>
-                      <span className="payment-table-guidance">
-                        {readyToClose
-                          ? 'Món đã xong · ưu tiên thu tiền và đóng bàn'
-                          : 'Có thể trả trước · bàn vẫn được giữ cho khách'}
-                      </span>
+                      {!readyToClose && (
+                        <span className="payment-table-guidance">
+                          Có thể trả trước · bàn vẫn được giữ cho khách
+                        </span>
+                      )}
                     </span>
 
                     <span className="payment-table-amount">
@@ -716,59 +1031,75 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
                   </button>
                 );
               })}
+              {visibleUnpaidTables.length === 0 && (
+                <div className="payment-queue-empty">
+                  <Search size={24} aria-hidden="true" />
+                  <strong>Không có bàn phù hợp</strong>
+                  <span>Thử đổi từ khóa hoặc bộ lọc trạng thái thu tiền.</span>
+                </div>
+              )}
             </div>
           </section>
         )}
 
         {paidServingTables.length > 0 && (
-          <>
-            <div style={{ fontSize: '12px', fontWeight: 700, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>
-              Đã trả trước · {paidServingTables.length} bàn đang phục vụ
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <section className="payment-paid-section" aria-labelledby="payment-paid-title">
+            <button
+              type="button"
+              className="payment-paid-toggle"
+              aria-expanded={showPaidServing}
+              onClick={() => setShowPaidServing(value => !value)}
+            >
+              <span>
+                <BadgeCheck size={18} aria-hidden="true" />
+                <span>
+                  <strong id="payment-paid-title">Đã trả trước</strong>
+                  <small>{paidServingTables.length} bàn vẫn đang phục vụ</small>
+                </span>
+              </span>
+              {showPaidServing ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+            </button>
+            {showPaidServing && <div className="payment-paid-list">
               {paidServingTables.map(table => {
                 const cfg = STATUS_CONFIG[table.status];
                 const order = tableOrders[table.id] || [];
                 const paidTotal = table.paidTotal ?? payableTotal(order, settings);
+                const rowStyle = {
+                  '--payment-row-border': cfg.border,
+                  '--payment-row-status-bg': cfg.bg,
+                  '--payment-row-status-text': cfg.text,
+                } as CSSProperties;
                 return (
-                  <div
-                    key={table.id}
-                    style={{
-                      background: '#F0FDF4', border: '1.5px solid #86EFAC',
-                      borderRadius: 12, padding: '13px 14px',
-                      display: 'flex', alignItems: 'center', gap: 12,
-                    }}
-                  >
-                    <div style={{ width: 46, height: 46, borderRadius: 12, background: '#fff', border: '1px solid #86EFAC', display: 'grid', placeItems: 'center', fontWeight: 900, fontSize: 18, color: '#111827', flexShrink: 0 }}>
-                      {table.number}
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
-                        <strong style={{ color: '#111827' }}>Bàn {table.number}</strong>
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, borderRadius: 999, padding: '3px 8px', background: '#16A34A', color: '#fff', fontSize: 11, fontWeight: 900 }}>
-                          <BadgeCheck size={13} /> Đã thanh toán
-                        </span>
-                        <span style={{ borderRadius: 999, padding: '3px 8px', background: cfg.bg, border: `1px solid ${cfg.border}`, color: cfg.text, fontSize: 11, fontWeight: 800 }}>{cfg.label}</span>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', marginTop: 5, color: '#4B5563', fontSize: 12 }}>
-                        <span><Users size={12} style={{ verticalAlign: -2 }} /> {table.seats} chỗ</span>
-                        <span>· {order.reduce((sum, item) => sum + item.quantity, 0)} phần</span>
+                  <div className="payment-paid-row" key={table.id} style={rowStyle}>
+                    <span className="payment-table-number">{table.number}</span>
+                    <span className="payment-paid-copy">
+                      <span className="payment-table-title">
+                        <strong>Bàn {table.number}</strong>
+                        <span className="payment-paid-badge"><BadgeCheck size={13} /> Đã thanh toán</span>
+                        <span className="payment-table-status">{cfg.label}</span>
+                      </span>
+                      <span className="payment-table-meta">
+                        <span><Users size={12} aria-hidden="true" /> {table.seats} chỗ</span>
+                        <span>{order.reduce((sum, item) => sum + item.quantity, 0)} phần</span>
                         <OrderTimer table={table} compact />
-                      </div>
-                      <div style={{ color: '#166534', fontSize: 12, fontWeight: 700, marginTop: 5 }}>
+                      </span>
+                      <span className="payment-paid-guidance">
                         {table.status === 'done' ? 'Món đã xong · chờ nhân viên xác nhận khách rời tại bàn' : 'Bếp vẫn đang chuẩn bị món'}
-                      </div>
-                      <div style={{ color: '#4B5563', fontSize: 12, marginTop: 4 }}>
-                        Đã thu {formatVND(paidTotal)}
+                      </span>
+                    </span>
+                    <span className="payment-paid-amount">
+                      <strong>{formatVND(paidTotal)}</strong>
+                      <small>
+                        Đã thu
                         {table.paidAt ? ` lúc ${new Date(table.paidAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}` : ''}
                         {table.paymentId ? ` · ${table.paymentId}` : ''}
-                      </div>
-                    </div>
+                      </small>
+                    </span>
                   </div>
                 );
               })}
-            </div>
-          </>
+            </div>}
+          </section>
         )}
 
           {orderedTables.length === 0 && (
@@ -784,103 +1115,28 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
         )}
 
         {paymentView === 'history' && (
-          <section className="payment-history-section" aria-labelledby="payment-history-title">
-          <header className="payment-history-header">
-            <div className="payment-history-heading">
-              <span className="payment-history-heading-icon" aria-hidden="true">
-                <History size={20} />
-              </span>
-              <div>
-                <h2 id="payment-history-title">Lịch sử đơn đã thanh toán</h2>
-                <p>Tối đa 100 hóa đơn gần nhất được đồng bộ từ hệ thống</p>
-              </div>
-            </div>
-            <div className="payment-history-summary" aria-live="polite">
-              <span>{filteredPayments.length} hóa đơn</span>
-              <strong>{formatVND(filteredPaymentTotal)}</strong>
-            </div>
-          </header>
-
-          <div className="payment-history-controls">
-            <label className="payment-history-search">
-              <Search size={16} aria-hidden="true" />
-              <span className="payment-history-control-label">Tìm hóa đơn</span>
-              <input
-                value={historySearch}
-                onChange={event => {
-                  setHistorySearch(event.target.value);
-                  setShowAllHistory(false);
-                }}
-                placeholder="Mã hóa đơn, bàn, khách hoặc nhân viên"
-                aria-label="Tìm trong lịch sử thanh toán"
-              />
-            </label>
-            <label className="payment-history-method">
-              <span className="payment-history-control-label">Phương thức</span>
-              <select
-                value={historyMethod}
-                onChange={event => {
-                  setHistoryMethod(event.target.value as 'all' | PaymentMethodId);
-                  setShowAllHistory(false);
-                }}
-                aria-label="Lọc lịch sử theo phương thức thanh toán"
-              >
-                <option value="all">Tất cả phương thức</option>
-                {METHODS.map(method => (
-                  <option key={method.id} value={method.id}>{method.label}</option>
-                ))}
-              </select>
-            </label>
-          </div>
-
-          <div className="payment-history-list">
-            {visiblePayments.map(payment => (
-              <article className="payment-history-row" key={payment.invoiceCode}>
-                <span className="payment-history-table-number">
-                  <small>Bàn</small>
-                  <strong>{payment.tableNumber}</strong>
-                </span>
-                <span className="payment-history-copy">
-                  <span className="payment-history-title-row">
-                    <strong>{payment.invoiceCode}</strong>
-                    <span className={`payment-history-method-badge method-${payment.method}`}>
-                      {PAYMENT_METHOD_LABELS[payment.method]}
-                    </span>
-                  </span>
-                  <span className="payment-history-meta">
-                    <span>{formatPaymentDate(payment.paidAt)}</span>
-                    <span>{payment.itemCount} phần</span>
-                    <span>{payment.cashierName || payment.staffName}</span>
-                    {payment.customerName && <span>{payment.customerName}</span>}
-                  </span>
-                </span>
-                <span className="payment-history-amount">
-                  <strong>{formatVND(payment.total)}</strong>
-                  <small>{payment.transactionCode}</small>
-                </span>
-              </article>
-            ))}
-
-            {filteredPayments.length === 0 && (
-              <div className="payment-history-empty">
-                <ReceiptText size={26} aria-hidden="true" />
-                <strong>{payments.length ? 'Không tìm thấy hóa đơn phù hợp' : 'Chưa có hóa đơn đã thanh toán'}</strong>
-                <span>{payments.length ? 'Thử đổi từ khóa hoặc phương thức thanh toán.' : 'Hóa đơn hoàn tất sẽ xuất hiện tại đây.'}</span>
-              </div>
-            )}
-          </div>
-
-          {filteredPayments.length > PAYMENT_HISTORY_LIMIT && (
-            <button
-              type="button"
-              className="payment-history-toggle"
-              onClick={() => setShowAllHistory(value => !value)}
-            >
-              {showAllHistory ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-              {showAllHistory ? 'Thu gọn lịch sử' : `Xem thêm ${filteredPayments.length - PAYMENT_HISTORY_LIMIT} hóa đơn`}
-            </button>
-          )}
-          </section>
+          <PaymentHistoryPanel
+            payments={payments}
+            filteredPayments={filteredPayments}
+            visiblePayments={visiblePayments}
+            filteredPaymentTotal={filteredPaymentTotal}
+            historyLimit={PAYMENT_HISTORY_LIMIT}
+            search={historySearch}
+            method={historyMethod}
+            showAll={showAllHistory}
+            receiptLoading={historyReceiptLoading}
+            receiptError={historyReceiptError}
+            onSearchChange={value => {
+              setHistorySearch(value);
+              setShowAllHistory(false);
+            }}
+            onMethodChange={value => {
+              setHistoryMethod(value);
+              setShowAllHistory(false);
+            }}
+            onToggleShowAll={() => setShowAllHistory(value => !value)}
+            onOpenReceipt={payment => void openHistoryReceipt(payment)}
+          />
         )}
       </div>
 
@@ -891,6 +1147,17 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
           settings={settings}
           onClose={closePayment}
           onConfirm={(payment, items) => onProcessPayment(payment, items)}
+        />
+      )}
+      {historyInvoiceData && (
+        <HistoryInvoiceDialog
+          data={historyInvoiceData}
+          format={historyPrintFormat}
+          onFormatChange={format => {
+            setHistoryPrintFormat(format);
+            setStoredPrintFormat(format);
+          }}
+          onClose={() => setHistoryInvoiceData(null)}
         />
       )}
     </div>

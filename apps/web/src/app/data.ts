@@ -4,10 +4,12 @@ export type OrderStep = 'tables' | 'menu' | 'confirm' | 'success';
 export type PaymentMethodId = 'cash' | 'card' | 'qr';
 export type EmployeeRole = 'manager' | 'cashier' | 'server' | 'chef';
 export type ReservationStatus = 'booked' | 'seated' | 'cancelled' | 'no_show' | 'completed';
+export const RESERVATION_BUFFER_MINUTES = 15;
 
 export interface NextReservation {
   id: number;
   code: string;
+  version: number;
   customerName: string;
   partySize: number;
   reservedAt: string;
@@ -16,7 +18,6 @@ export interface NextReservation {
 }
 
 export interface Reservation extends Omit<NextReservation, 'status'> {
-  version: number;
   tableId?: string | null;
   tableNumber: number;
   tableSeats?: number;
@@ -228,6 +229,8 @@ export interface PaymentRecord {
   serviceFee: number;
   vat: number;
   total: number;
+  cashReceived?: number;
+  cashChange?: number;
   itemCount: number;
   paidAt: string;
   employeeId?: string;
@@ -235,6 +238,37 @@ export interface PaymentRecord {
   cashierName: string;
   /** Ý định giữ bàn của thu ngân khi mở thanh toán trước lúc món hoàn tất. */
   keepTableOpen?: boolean;
+}
+
+export interface PaymentReceiptItem {
+  name: string;
+  quantity: number;
+  price: number;
+  note?: string;
+  options?: {
+    size?: string | null;
+    toppings?: string[];
+  };
+}
+
+export interface PaymentInvoiceSnapshot {
+  restaurantName?: string;
+  legalName?: string;
+  tagline?: string;
+  address?: string;
+  phone?: string;
+  email?: string;
+  website?: string;
+  area?: string;
+  vatRate?: number;
+  serviceFeeRate?: number;
+  invoiceNote?: string;
+}
+
+export interface PaymentReceiptDetails {
+  payment: PaymentRecord;
+  items: PaymentReceiptItem[];
+  snapshot: PaymentInvoiceSnapshot;
 }
 
 export interface PaymentResult extends PaymentRecord {
@@ -290,6 +324,18 @@ export function formatReservationSlot(value: string): string {
   return date.toLocaleString('vi-VN', sameDay
     ? { hour: '2-digit', minute: '2-digit' }
     : { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+/** Hiển thị khung giờ ngắn; lịch qua nửa đêm được đánh dấu rõ là ngày kế tiếp. */
+export function formatReservationTimeRange(reservedAt: string, endsAt: string): string {
+  const start = new Date(reservedAt);
+  const end = new Date(endsAt);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return formatReservationSlot(reservedAt);
+  const time = (date: Date) => date.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
+  const sameDay = start.getFullYear() === end.getFullYear()
+    && start.getMonth() === end.getMonth()
+    && start.getDate() === end.getDate();
+  return `${formatReservationSlot(reservedAt)}–${time(end)}${sameDay ? '' : ' (+1 ngày)'}`;
 }
 
 export function genId(): string {

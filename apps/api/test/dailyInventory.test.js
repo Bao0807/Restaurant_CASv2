@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   aggregateMenuQuantities,
+  businessDayRangeFor,
   businessDateFor,
   releaseDailyInventory,
   replaceDailyInventory,
@@ -33,6 +34,10 @@ function inventoryConnection(initialRows) {
 test('ngày kinh doanh Asia/Ho_Chi_Minh đổi bucket đúng lúc 00:00 địa phương', () => {
   assert.equal(businessDateFor('2026-07-20T16:59:59.999Z'), '2026-07-20');
   assert.equal(businessDateFor('2026-07-20T17:00:00.000Z'), '2026-07-21');
+  const range = businessDayRangeFor('2026-07-20T18:00:00.000Z');
+  assert.equal(range.date, '2026-07-21');
+  assert.equal(range.from.toISOString(), '2026-07-20T17:00:00.000Z');
+  assert.equal(range.to.toISOString(), '2026-07-21T17:00:00.000Z');
 });
 
 test('gộp mọi dòng size/topping của cùng món trước khi giữ số lượng', () => {

@@ -2,6 +2,7 @@ import 'dotenv/config';
 import crypto from 'node:crypto';
 import cors from 'cors';
 import express from 'express';
+import { createAuth } from './auth.js';
 import { defaultSettings } from './defaultSettings.js';
 import { closePool, databaseConfigSummary, getPool, initDatabase } from './db.js';
 import {
@@ -20,6 +21,7 @@ import {
   saveMenuItem,
 } from './catalog.js';
 import {
+  businessDayRangeFor,
   businessDateFor,
   getDailyMenuAvailability,
   releaseDailyInventory,
@@ -27,6 +29,7 @@ import {
   reserveDailyInventory,
 } from './dailyInventory.js';
 import { isKitchenOrderStale, lockKitchenQueue, processKitchenQueue, promoteKitchenQueue, syncTableStatuses } from './kitchenQueue.js';
+import { errorDetails, logEvent, requestContext } from './logger.js';
 import {
   canCancelOrder,
   canPayOrder,
@@ -34,10 +37,18 @@ import {
   isOrderComplete,
   paymentRequiresDepartureConfirmation,
 } from './orderPolicy.js';
-import { canTransitionReservation, normalizeReservation, RESERVATION_STATUSES } from './reservation.js';
+import {
+  canTransitionReservation,
+  normalizeReservation,
+  RESERVATION_BUFFER_MINUTES,
+  RESERVATION_STATUSES,
+  RESERVATION_TIME_STEP_MINUTES,
+} from './reservation.js';
 
 const app = express();
 const isProduction = process.env.NODE_ENV === 'production';
+const auth = createAuth();
+if (auth.trustProxy !== false) app.set('trust proxy', auth.trustProxy);
 const port = Number(process.env.PORT || 4100);
 const host = process.env.HOST || (isProduction ? '0.0.0.0' : '127.0.0.1');
 const allowedOrigins = new Set(
@@ -47,18 +58,17 @@ const allowedOrigins = new Set(
     .filter(Boolean),
 );
 const allowPrivateNetworkOrigins = !isProduction && process.env.CORS_ALLOW_PRIVATE_NETWORK !== 'false';
-const authUsername = process.env.AUTH_USERNAME;
-const authPassword = process.env.AUTH_PASSWORD;
-const authConfigured = Boolean(authUsername && authPassword);
-const authRequired = process.env.NODE_ENV === 'production' || authConfigured;
-const authAttempts = new Map();
+const managerOnly = auth.allowRoles('manager');
+const managerOrChef = auth.allowRoles('manager', 'chef');
+const frontOfHouse = auth.allowRoles('manager', 'cashier', 'server');
+const paymentStaff = auth.allowRoles('manager', 'cashier');
+const serviceOrKitchenStaff = auth.allowRoles('manager', 'server', 'chef');
 const configuredStaleMinutes = Number(process.env.KITCHEN_STALE_MINUTES || 120);
 const kitchenStaleMinutes = Number.isInteger(configuredStaleMinutes)
   ? Math.min(Math.max(configuredStaleMinutes, 15), 1_440)
   : 120;
 
 let dbReady = false;
-let dbError = null;
 let connecting = false;
 let kitchenCycleRunning = false;
 
@@ -76,9 +86,8 @@ function isDatabaseConnectivityError(error) {
     || /pool is closed|connection.*closed|read ECONNRESET/i.test(error?.message || '');
 }
 
-function markDatabaseUnavailable(error) {
+function markDatabaseUnavailable(_error) {
   dbReady = false;
-  dbError = error;
 }
 
 /** Chuyển lỗi từ route async về error middleware chung của Express. */
@@ -195,61 +204,6 @@ function isAllowedOrigin(origin) {
   }
 }
 
-function safeEqual(actual, expected) {
-  const actualBuffer = Buffer.from(actual || '');
-  const expectedBuffer = Buffer.from(expected || '');
-  return actualBuffer.length === expectedBuffer.length
-    && crypto.timingSafeEqual(actualBuffer, expectedBuffer);
-}
-
-/** Xác thực Basic Auth và giới hạn 10 lần sai/IP/phút. */
-function requireAuth(req, res, next) {
-  if (!authRequired) {
-    next();
-    return;
-  }
-  if (!authConfigured) {
-    res.status(503).json({ error: 'AUTH_NOT_CONFIGURED', message: 'Xác thực production chưa được cấu hình.' });
-    return;
-  }
-
-  const attemptKey = req.ip || req.socket.remoteAddress || 'unknown';
-  const now = Date.now();
-  const previousAttempt = authAttempts.get(attemptKey);
-  const attempt = previousAttempt && previousAttempt.resetAt > now
-    ? previousAttempt
-    : { count: 0, resetAt: now + 60_000 };
-  if (attempt.count >= 10) {
-    res.set('Retry-After', String(Math.ceil((attempt.resetAt - now) / 1000)));
-    res.status(429).json({ error: 'TOO_MANY_AUTH_ATTEMPTS', message: 'Quá nhiều lần đăng nhập sai. Vui lòng thử lại sau.' });
-    return;
-  }
-
-  const authorization = req.get('authorization') || '';
-  const [scheme, encoded] = authorization.split(' ');
-  let username = '';
-  let password = '';
-  if (scheme?.toLowerCase() === 'basic' && encoded) {
-    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
-    const separator = decoded.indexOf(':');
-    if (separator >= 0) {
-      username = decoded.slice(0, separator);
-      password = decoded.slice(separator + 1);
-    }
-  }
-
-  if (!safeEqual(username, authUsername) || !safeEqual(password, authPassword)) {
-    attempt.count += 1;
-    authAttempts.set(attemptKey, attempt);
-    res.status(401).json({ error: 'UNAUTHORIZED', message: 'Tên đăng nhập hoặc mật khẩu không đúng.' });
-    return;
-  }
-
-  authAttempts.delete(attemptKey);
-  req.user = { username, role: 'admin' };
-  next();
-}
-
 /** Trả 503 rõ ràng trong thời gian API đang kết nối lại MySQL. */
 function requireDatabase(_req, res, next) {
   if (!dbReady) {
@@ -259,6 +213,42 @@ function requireDatabase(_req, res, next) {
     });
     return;
   }
+  next();
+}
+
+/** Ghi lại mọi mutation thành công; không lưu body để tránh đưa thông tin nhạy cảm vào audit log. */
+function auditSuccessfulMutation(req, res, next) {
+  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    next();
+    return;
+  }
+  res.on('finish', () => {
+    if (!dbReady || res.statusCode < 200 || res.statusCode >= 400 || !req.user) return;
+    const pathSegments = req.path.split('/').filter(Boolean);
+    const entityType = pathSegments[0] || 'system';
+    const entityId = Object.values(req.params ?? {}).map(String).join(':') || null;
+    const action = `${req.method} ${req.route?.path || req.path}`.slice(0, 160);
+    void getPool().query(
+      `INSERT INTO audit_events (
+        request_id, actor_username, actor_role, action, entity_type, entity_id, metadata
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        req.requestId,
+        req.user.username,
+        req.user.role,
+        action,
+        entityType.slice(0, 80),
+        entityId?.slice(0, 160) ?? null,
+        JSON.stringify({ status: res.statusCode }),
+      ],
+    ).catch(error => {
+      logEvent('error', 'audit_write_failed', {
+        requestId: req.requestId,
+        action,
+        ...errorDetails(error),
+      });
+    });
+  });
   next();
 }
 
@@ -286,6 +276,8 @@ function paymentSelect(whereClause) {
     cashier_name AS cashierName,
     service_status AS serviceStatus,
     departure_confirmed_at AS departureConfirmedAt,
+    CAST(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.cashReceived')) AS UNSIGNED) AS cashReceived,
+    CAST(JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.cashChange')) AS UNSIGNED) AS cashChange,
     paid_at AS paidAt
   FROM payment_transactions ${whereClause}`;
 }
@@ -339,7 +331,7 @@ function serializeReservation(row) {
   };
 }
 
-/** Khóa bàn và chống hai reservation đang mở giao nhau trên cùng một khung giờ. */
+/** Khóa bàn và chống hai reservation đang mở giao nhau hoặc cách nhau dưới 15 phút. */
 async function assertReservationSlot(connection, reservation, excludeId = null) {
   const [tables] = await connection.query(
     'SELECT id, table_number AS number, seats FROM restaurant_tables WHERE id = ? FOR UPDATE',
@@ -350,7 +342,9 @@ async function assertReservationSlot(connection, reservation, excludeId = null) 
   if (reservation.partySize > Number(table.seats)) {
     throw httpError(409, 'TABLE_CAPACITY_EXCEEDED', `Bàn ${table.number} chỉ có ${table.seats} chỗ.`);
   }
-  const params = [reservation.tableId, reservation.endsAt, reservation.reservedAt];
+  const bufferedEnd = new Date(reservation.endsAt.getTime() + RESERVATION_BUFFER_MINUTES * 60_000);
+  const bufferedStart = new Date(reservation.reservedAt.getTime() - RESERVATION_BUFFER_MINUTES * 60_000);
+  const params = [reservation.tableId, bufferedEnd, bufferedStart];
   let exclude = '';
   if (excludeId !== null) {
     exclude = 'AND id <> ?';
@@ -366,7 +360,11 @@ async function assertReservationSlot(connection, reservation, excludeId = null) 
     params,
   );
   if (conflicts[0]) {
-    throw httpError(409, 'RESERVATION_CONFLICT', `Khung giờ này trùng với lịch ${conflicts[0].code}.`);
+    throw httpError(
+      409,
+      'RESERVATION_CONFLICT',
+      `Khung giờ này trùng hoặc cách lịch ${conflicts[0].code} dưới ${RESERVATION_BUFFER_MINUTES} phút.`,
+    );
   }
   return table;
 }
@@ -391,6 +389,7 @@ async function getReservationById(connection, id) {
 }
 
 app.disable('x-powered-by');
+app.use(requestContext);
 app.use((_req, res, next) => {
   res.set({
     'X-Content-Type-Options': 'nosniff',
@@ -406,7 +405,8 @@ app.use(cors({
     return callback(httpError(403, 'ORIGIN_NOT_ALLOWED', 'Địa chỉ truy cập này chưa được cho phép.'));
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type'],
+  credentials: true,
 }));
 app.use(express.json({ limit: '256kb' }));
 
@@ -424,15 +424,18 @@ app.get('/api/health', asyncRoute(async (_req, res) => {
   });
 }));
 
-app.get('/api/auth/session', requireAuth, (req, res) => {
+app.post('/api/auth/login', auth.login);
+app.post('/api/auth/logout', auth.logout);
+app.get('/api/auth/session', auth.requireAuth, (req, res) => {
   res.json({
     ok: true,
-    authRequired,
-    user: req.user ?? { username: 'local-development', role: 'admin' },
+    authRequired: auth.authRequired,
+    user: req.user ?? { username: 'local-development', role: 'manager' },
   });
 });
 
-app.use('/api', requireAuth);
+app.use('/api', auth.requireAuth);
+app.use('/api', auditSuccessfulMutation);
 
 app.get('/api/settings', requireDatabase, asyncRoute(async (_req, res) => {
   const [rows] = await getPool().query('SELECT settings FROM restaurant_settings WHERE id = 1 LIMIT 1');
@@ -440,7 +443,7 @@ app.get('/api/settings', requireDatabase, asyncRoute(async (_req, res) => {
   res.json({ settings: sanitizeSettings(settings, defaultSettings) });
 }));
 
-app.put('/api/settings', requireDatabase, asyncRoute(async (req, res) => {
+app.put('/api/settings', requireDatabase, managerOnly, asyncRoute(async (req, res) => {
   const [rows] = await getPool().query('SELECT settings FROM restaurant_settings WHERE id = 1 LIMIT 1');
   const current = sanitizeSettings(parseJsonColumn(rows[0]?.settings, defaultSettings), defaultSettings);
   const settings = sanitizeSettings(req.body?.settings, current);
@@ -455,7 +458,7 @@ app.put('/api/settings', requireDatabase, asyncRoute(async (req, res) => {
 }));
 
 /** Danh sách nhân sự dùng chung cho quản trị, phân công phục vụ và báo cáo. */
-app.get('/api/employees', requireDatabase, asyncRoute(async (req, res) => {
+app.get('/api/employees', requireDatabase, paymentStaff, asyncRoute(async (req, res) => {
   const activeOnly = req.query.active === 'true';
   const [rows] = await getPool().query(
     `${employeeSelect(activeOnly ? 'WHERE active = TRUE' : '')} ORDER BY active DESC, full_name, employee_code`,
@@ -463,7 +466,7 @@ app.get('/api/employees', requireDatabase, asyncRoute(async (req, res) => {
   res.json({ employees: rows.map(serializeEmployee) });
 }));
 
-app.post('/api/employees', requireDatabase, asyncRoute(async (req, res) => {
+app.post('/api/employees', requireDatabase, managerOnly, asyncRoute(async (req, res) => {
   const employee = normalizeEmployee(req.body?.employee);
   const [duplicates] = await getPool().query('SELECT id FROM employees WHERE employee_code = ? LIMIT 1', [employee.code]);
   if (duplicates[0]) throw httpError(409, 'EMPLOYEE_CODE_EXISTS', 'Mã nhân viên đã tồn tại.');
@@ -477,7 +480,7 @@ app.post('/api/employees', requireDatabase, asyncRoute(async (req, res) => {
   res.status(201).json({ employee: serializeEmployee(rows[0]) });
 }));
 
-app.put('/api/employees/:employeeId', requireDatabase, asyncRoute(async (req, res) => {
+app.put('/api/employees/:employeeId', requireDatabase, managerOnly, asyncRoute(async (req, res) => {
   const [currentRows] = await getPool().query(`${employeeSelect('WHERE id = ?')} LIMIT 1`, [req.params.employeeId]);
   if (!currentRows[0]) throw httpError(404, 'EMPLOYEE_NOT_FOUND', 'Không tìm thấy nhân viên.');
   const employee = normalizeEmployee(req.body?.employee, serializeEmployee(currentRows[0]));
@@ -496,7 +499,7 @@ app.put('/api/employees/:employeeId', requireDatabase, asyncRoute(async (req, re
 }));
 
 // Không xóa vật lý để hóa đơn cũ vẫn giữ được lịch sử nhân sự.
-app.delete('/api/employees/:employeeId', requireDatabase, asyncRoute(async (req, res) => {
+app.delete('/api/employees/:employeeId', requireDatabase, managerOnly, asyncRoute(async (req, res) => {
   const [result] = await getPool().query('UPDATE employees SET active = FALSE WHERE id = ?', [req.params.employeeId]);
   if (result.affectedRows === 0) throw httpError(404, 'EMPLOYEE_NOT_FOUND', 'Không tìm thấy nhân viên.');
   res.json({ ok: true });
@@ -506,7 +509,7 @@ app.get('/api/catalog', requireDatabase, asyncRoute(async (_req, res) => {
   res.json(await getCatalog(getPool()));
 }));
 
-app.post('/api/catalog/bootstrap', requireDatabase, asyncRoute(async (req, res) => {
+app.post('/api/catalog/bootstrap', requireDatabase, managerOnly, asyncRoute(async (req, res) => {
   const connection = await getPool().getConnection();
   try {
     await connection.beginTransaction();
@@ -521,17 +524,17 @@ app.post('/api/catalog/bootstrap', requireDatabase, asyncRoute(async (req, res) 
   }
 }));
 
-app.post('/api/categories', requireDatabase, asyncRoute(async (req, res) => {
+app.post('/api/categories', requireDatabase, managerOnly, asyncRoute(async (req, res) => {
   const category = await saveCategory(getPool(), req.body?.category);
   res.status(201).json({ category });
 }));
 
-app.put('/api/categories/:categoryId', requireDatabase, asyncRoute(async (req, res) => {
+app.put('/api/categories/:categoryId', requireDatabase, managerOnly, asyncRoute(async (req, res) => {
   const category = await saveCategory(getPool(), req.body?.category, req.params.categoryId);
   res.json({ category });
 }));
 
-app.delete('/api/categories/:categoryId', requireDatabase, asyncRoute(async (req, res) => {
+app.delete('/api/categories/:categoryId', requireDatabase, managerOnly, asyncRoute(async (req, res) => {
   const [items] = await getPool().query('SELECT id FROM menu_items WHERE category_id = ? LIMIT 1', [req.params.categoryId]);
   if (items[0]) throw httpError(409, 'CATEGORY_IN_USE', 'Danh mục vẫn còn món ăn.');
   const [result] = await getPool().query('DELETE FROM menu_categories WHERE id = ?', [req.params.categoryId]);
@@ -539,24 +542,24 @@ app.delete('/api/categories/:categoryId', requireDatabase, asyncRoute(async (req
   res.json({ ok: true });
 }));
 
-app.post('/api/menu-items', requireDatabase, asyncRoute(async (req, res) => {
+app.post('/api/menu-items', requireDatabase, managerOnly, asyncRoute(async (req, res) => {
   const item = await saveMenuItem(getPool(), req.body?.item);
   res.status(201).json({ item });
 }));
 
-app.put('/api/menu-items/:itemId', requireDatabase, asyncRoute(async (req, res) => {
+app.put('/api/menu-items/:itemId', requireDatabase, managerOnly, asyncRoute(async (req, res) => {
   const item = await saveMenuItem(getPool(), req.body?.item, req.params.itemId);
   res.json({ item });
 }));
 
-app.delete('/api/menu-items/:itemId', requireDatabase, asyncRoute(async (req, res) => {
+app.delete('/api/menu-items/:itemId', requireDatabase, managerOnly, asyncRoute(async (req, res) => {
   const [result] = await getPool().query('UPDATE menu_items SET available = FALSE WHERE id = ?', [req.params.itemId]);
   if (result.affectedRows === 0) throw httpError(404, 'MENU_ITEM_NOT_FOUND', 'Không tìm thấy món.');
   res.json({ ok: true });
 }));
 
 /** Danh sách đặt bàn có bộ lọc thời gian, trạng thái, bàn và tìm kiếm khách. */
-app.get('/api/reservations', requireDatabase, asyncRoute(async (req, res) => {
+app.get('/api/reservations', requireDatabase, frontOfHouse, asyncRoute(async (req, res) => {
   const clauses = [];
   const params = [];
   let parsedFrom = null;
@@ -612,12 +615,22 @@ app.get('/api/reservations', requireDatabase, asyncRoute(async (req, res) => {
 }));
 
 /** Gợi ý các bàn đủ chỗ và không giao lịch trong khung giờ yêu cầu. */
-app.get('/api/reservations/availability', requireDatabase, asyncRoute(async (req, res) => {
+app.get('/api/reservations/availability', requireDatabase, frontOfHouse, asyncRoute(async (req, res) => {
   const reservedAt = new Date(String(req.query.reservedAt ?? ''));
   if (Number.isNaN(reservedAt.getTime())) throw httpError(400, 'VALIDATION_ERROR', 'Ngày giờ đặt bàn không hợp lệ.');
   const durationMinutes = boundedInteger(req.query.durationMinutes ?? 120, 'durationMinutes', 30, 480);
+  if (
+    reservedAt.getUTCMinutes() % RESERVATION_TIME_STEP_MINUTES !== 0
+    || reservedAt.getUTCSeconds() !== 0
+    || reservedAt.getUTCMilliseconds() !== 0
+    || durationMinutes % RESERVATION_TIME_STEP_MINUTES !== 0
+  ) {
+    throw httpError(400, 'VALIDATION_ERROR', 'Khung giờ đặt bàn phải theo từng mốc 15 phút.');
+  }
   const partySize = boundedInteger(req.query.partySize, 'partySize', 1, 100);
   const endsAt = new Date(reservedAt.getTime() + durationMinutes * 60_000);
+  const bufferedStart = new Date(reservedAt.getTime() - RESERVATION_BUFFER_MINUTES * 60_000);
+  const bufferedEnd = new Date(endsAt.getTime() + RESERVATION_BUFFER_MINUTES * 60_000);
   const [rows] = await getPool().query(
     `SELECT t.id, t.table_number AS number, t.seats
      FROM restaurant_tables t
@@ -627,12 +640,12 @@ app.get('/api/reservations/availability', requireDatabase, asyncRoute(async (req
          AND r.reserved_at < ? AND r.ends_at > ?
      )
      ORDER BY t.seats, t.table_number`,
-    [partySize, endsAt, reservedAt],
+    [partySize, bufferedEnd, bufferedStart],
   );
   res.json({ tables: rows.map(row => ({ id: row.id, number: Number(row.number), seats: Number(row.seats) })) });
 }));
 
-app.post('/api/reservations', requireDatabase, asyncRoute(async (req, res) => {
+app.post('/api/reservations', requireDatabase, frontOfHouse, asyncRoute(async (req, res) => {
   const reservation = normalizeReservation(req.body?.reservation);
   const connection = await getPool().getConnection();
   try {
@@ -661,7 +674,7 @@ app.post('/api/reservations', requireDatabase, asyncRoute(async (req, res) => {
   }
 }));
 
-app.put('/api/reservations/:reservationId', requireDatabase, asyncRoute(async (req, res) => {
+app.put('/api/reservations/:reservationId', requireDatabase, frontOfHouse, asyncRoute(async (req, res) => {
   const id = parseReservationId(req.params.reservationId);
   const expectedVersion = parseExpectedVersion(req.body?.expectedVersion);
   const reservation = normalizeReservation(req.body?.reservation);
@@ -703,7 +716,7 @@ app.put('/api/reservations/:reservationId', requireDatabase, asyncRoute(async (r
   }
 }));
 
-app.patch('/api/reservations/:reservationId/status', requireDatabase, asyncRoute(async (req, res) => {
+app.patch('/api/reservations/:reservationId/status', requireDatabase, frontOfHouse, asyncRoute(async (req, res) => {
   const id = parseReservationId(req.params.reservationId);
   const expectedVersion = parseExpectedVersion(req.body?.expectedVersion);
   const nextStatus = String(req.body?.status ?? '');
@@ -741,6 +754,24 @@ app.patch('/api/reservations/:reservationId/status', requireDatabase, asyncRoute
       }
       if (serverNow >= new Date(current.endsAt)) {
         throw httpError(409, 'RESERVATION_EXPIRED', 'Khung giờ đặt bàn đã kết thúc. Hãy đánh dấu vắng mặt.');
+      }
+      const protectedFrom = new Date(serverNow.getTime() - RESERVATION_BUFFER_MINUTES * 60_000);
+      const protectedTo = new Date(serverNow.getTime() + RESERVATION_BUFFER_MINUTES * 60_000);
+      const [otherBookings] = await connection.query(
+        `SELECT id, reservation_code AS code, reserved_at AS reservedAt, ends_at AS endsAt
+         FROM reservations
+         WHERE table_id = ? AND status = 'booked' AND id <> ?
+           AND reserved_at < ? AND ends_at > ?
+         ORDER BY reserved_at
+         LIMIT 1 FOR UPDATE`,
+        [current.tableId, id, protectedTo, protectedFrom],
+      );
+      if (otherBookings[0]) {
+        throw httpError(
+          409,
+          'TABLE_HAS_PROTECTED_RESERVATION',
+          `Bàn đang thuộc khung phục vụ của lịch ${otherBookings[0].code}. Hãy kết thúc hoặc xử lý lịch đó trước khi nhận khách mới.`,
+        );
       }
       const [otherSeated] = await connection.query(
         `SELECT id, reservation_code AS code FROM reservations
@@ -841,31 +872,44 @@ app.get('/api/operations', requireDatabase, asyncRoute(async (_req, res) => {
        FROM kitchen_queue_state WHERE id = 1 LIMIT 1`,
     );
     const [clockRows] = await connection.query('SELECT CURRENT_TIMESTAMP(3) AS serverNow');
+    const serverNow = new Date(clockRows[0].serverNow);
+    const reservationDay = businessDayRangeFor(serverNow);
     const [reservationRows] = await connection.query(
-      `SELECT id, code, tableId, customerName, partySize, reservedAt, endsAt, status
+      `SELECT id, code, tableId, customerName, partySize, reservedAt, endsAt, status, version
        FROM (
          SELECT id, reservation_code AS code, table_id AS tableId,
            customer_name AS customerName, party_size AS partySize,
-           reserved_at AS reservedAt, ends_at AS endsAt, status,
+           reserved_at AS reservedAt, ends_at AS endsAt, status, version,
            ROW_NUMBER() OVER (
              PARTITION BY table_id
-             ORDER BY CASE WHEN status = 'seated' THEN 0 ELSE 1 END, reserved_at, id
+             ORDER BY
+               CASE
+                 WHEN status = 'seated' THEN 0
+                 WHEN reserved_at <= CURRENT_TIMESTAMP(3) AND ends_at > CURRENT_TIMESTAMP(3) THEN 1
+                 WHEN reserved_at > CURRENT_TIMESTAMP(3) THEN 2
+                 ELSE 3
+               END,
+               CASE WHEN reserved_at > CURRENT_TIMESTAMP(3) THEN reserved_at END ASC,
+               CASE WHEN reserved_at <= CURRENT_TIMESTAMP(3) THEN reserved_at END DESC,
+               id
            ) AS rowNumber
          FROM reservations
          WHERE table_id IS NOT NULL AND status IN ('booked', 'seated')
            AND (
              status = 'seated'
-             OR (ends_at > DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 15 MINUTE)
-               AND reserved_at < DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 90 DAY))
+             OR (
+               reserved_at >= ? AND reserved_at < ?
+               AND ends_at > DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 15 MINUTE)
+             )
            )
        ) ranked
       WHERE rowNumber = 1`,
+      [reservationDay.from, reservationDay.to],
     );
     const menuAvailability = await getDailyMenuAvailability(connection);
     await connection.commit();
 
     const staleAfterMinutes = Number(kitchenRows[0]?.staleAfterMinutes) || kitchenStaleMinutes;
-    const serverNow = new Date(clockRows[0].serverNow);
     const tableOrders = {};
     const waitingBatchesByTable = {};
     const waitingRows = batchRows
@@ -957,6 +1001,7 @@ app.get('/api/operations', requireDatabase, asyncRoute(async (_req, res) => {
             reservedAt: new Date(nextReservationRow.reservedAt).toISOString(),
             endsAt: new Date(nextReservationRow.endsAt).toISOString(),
             status: nextReservationRow.status,
+            version: Number(nextReservationRow.version),
           },
         } : {}),
         ...(row.orderNumber ? { orderNumber: Number(row.orderNumber) } : {}),
@@ -1005,7 +1050,7 @@ app.get('/api/operations', requireDatabase, asyncRoute(async (_req, res) => {
 }));
 
 // Lưu order, chuẩn hóa catalog và điều phối FIFO trong cùng một transaction.
-app.put('/api/orders/:tableId', requireDatabase, asyncRoute(async (req, res) => {
+app.put('/api/orders/:tableId', requireDatabase, frontOfHouse, asyncRoute(async (req, res) => {
   const validatedItems = validateOrderItems(req.body?.items);
   const append = req.body?.append === true;
   const connection = await getPool().getConnection();
@@ -1189,7 +1234,7 @@ app.put('/api/orders/:tableId', requireDatabase, asyncRoute(async (req, res) => 
 }));
 
 // Chỉ sửa đúng một phiếu bếp còn chờ; các phiếu đã nấu và vị trí FIFO được giữ nguyên.
-app.put('/api/orders/:tableId/batches/:batchId', requireDatabase, asyncRoute(async (req, res) => {
+app.put('/api/orders/:tableId/batches/:batchId', requireDatabase, frontOfHouse, asyncRoute(async (req, res) => {
   const validatedItems = validateOrderItems(req.body?.items);
   const batchId = boundedInteger(req.params.batchId, 'batchId', 1, Number.MAX_SAFE_INTEGER);
   const connection = await getPool().getConnection();
@@ -1348,10 +1393,10 @@ const updateKitchenConfig = asyncRoute(async (req, res) => {
   }
 });
 
-app.patch('/api/kitchen/config', requireDatabase, updateKitchenConfig);
-app.put('/api/kitchen/config', requireDatabase, updateKitchenConfig);
+app.patch('/api/kitchen/config', requireDatabase, managerOnly, updateKitchenConfig);
+app.put('/api/kitchen/config', requireDatabase, managerOnly, updateKitchenConfig);
 
-app.post('/api/kitchen/dispatch-next', requireDatabase, asyncRoute(async (_req, res) => {
+app.post('/api/kitchen/dispatch-next', requireDatabase, managerOrChef, asyncRoute(async (_req, res) => {
   const connection = await getPool().getConnection();
   try {
     await connection.beginTransaction();
@@ -1371,7 +1416,7 @@ app.post('/api/kitchen/dispatch-next', requireDatabase, asyncRoute(async (_req, 
   }
 }));
 
-app.post('/api/tables', requireDatabase, asyncRoute(async (req, res) => {
+app.post('/api/tables', requireDatabase, managerOnly, asyncRoute(async (req, res) => {
   const number = boundedInteger(req.body?.table?.number, 'number', 1, 999);
   const seats = boundedInteger(req.body?.table?.seats, 'seats', 1, 100);
   const layout = normalizeTableLayout(req.body?.table);
@@ -1389,7 +1434,7 @@ app.post('/api/tables', requireDatabase, asyncRoute(async (req, res) => {
   res.status(201).json({ table: { id, number, seats, status: 'empty', ...layout } });
 }));
 
-app.put('/api/tables/:tableId', requireDatabase, asyncRoute(async (req, res) => {
+app.put('/api/tables/:tableId', requireDatabase, managerOnly, asyncRoute(async (req, res) => {
   const number = boundedInteger(req.body?.table?.number, 'number', 1, 999);
   const seats = boundedInteger(req.body?.table?.seats, 'seats', 1, 100);
   const status = req.body?.table?.status;
@@ -1476,7 +1521,7 @@ app.put('/api/tables/:tableId', requireDatabase, asyncRoute(async (req, res) => 
   }
 }));
 
-app.delete('/api/tables/:tableId', requireDatabase, asyncRoute(async (req, res) => {
+app.delete('/api/tables/:tableId', requireDatabase, managerOnly, asyncRoute(async (req, res) => {
   const connection = await getPool().getConnection();
   try {
     await connection.beginTransaction();
@@ -1509,7 +1554,7 @@ app.delete('/api/tables/:tableId', requireDatabase, asyncRoute(async (req, res) 
   }
 }));
 
-app.post('/api/orders/:tableId/requeue', requireDatabase, asyncRoute(async (req, res) => {
+app.post('/api/orders/:tableId/requeue', requireDatabase, managerOrChef, asyncRoute(async (req, res) => {
   const expectedBatchId = boundedInteger(req.body?.expectedBatchId, 'expectedBatchId', 1, Number.MAX_SAFE_INTEGER);
   const connection = await getPool().getConnection();
   try {
@@ -1548,7 +1593,7 @@ app.post('/api/orders/:tableId/requeue', requireDatabase, asyncRoute(async (req,
   }
 }));
 
-app.delete('/api/orders/:tableId', requireDatabase, asyncRoute(async (req, res) => {
+app.delete('/api/orders/:tableId', requireDatabase, frontOfHouse, asyncRoute(async (req, res) => {
   const connection = await getPool().getConnection();
   try {
     await connection.beginTransaction();
@@ -1595,7 +1640,7 @@ app.delete('/api/orders/:tableId', requireDatabase, asyncRoute(async (req, res) 
   }
 }));
 
-app.patch('/api/tables/:tableId/status', requireDatabase, asyncRoute(async (req, res) => {
+app.patch('/api/tables/:tableId/status', requireDatabase, serviceOrKitchenStaff, asyncRoute(async (req, res) => {
   const nextStatus = req.body?.status;
   if (nextStatus !== 'done') throw httpError(400, 'VALIDATION_ERROR', 'Chỉ hỗ trợ hoàn tất lượt đang nấu.');
   const expectedBatchId = boundedInteger(req.body?.expectedBatchId, 'expectedBatchId', 1, Number.MAX_SAFE_INTEGER);
@@ -1640,7 +1685,7 @@ app.patch('/api/tables/:tableId/status', requireDatabase, asyncRoute(async (req,
  * Đóng một order đã thanh toán sớm sau khi bếp hoàn tất và nhân viên xác nhận khách đã rời bàn.
  * Xóa order, hoàn tất lịch đặt bàn và trả bàn về trống trong cùng một transaction.
  */
-app.post('/api/orders/:tableId/confirm-departure', requireDatabase, asyncRoute(async (req, res) => {
+app.post('/api/orders/:tableId/confirm-departure', requireDatabase, frontOfHouse, asyncRoute(async (req, res) => {
   const connection = await getPool().getConnection();
   try {
     await connection.beginTransaction();
@@ -1742,7 +1787,7 @@ app.post('/api/orders/:tableId/confirm-departure', requireDatabase, asyncRoute(a
 }));
 
 /** Tổng hợp trực tiếp trên hóa đơn đã thanh toán, không dùng order đang mở làm số liệu bán hàng. */
-app.get('/api/reports/summary', requireDatabase, asyncRoute(async (req, res) => {
+app.get('/api/reports/summary', requireDatabase, paymentStaff, asyncRoute(async (req, res) => {
   if (typeof req.query.from !== 'string' || typeof req.query.to !== 'string') {
     throw httpError(400, 'INVALID_DATE_RANGE', 'Khoảng thời gian báo cáo không hợp lệ.');
   }
@@ -1859,7 +1904,7 @@ app.get('/api/reports/summary', requireDatabase, asyncRoute(async (req, res) => 
   }
 }));
 
-app.get('/api/payments', requireDatabase, asyncRoute(async (req, res) => {
+app.get('/api/payments', requireDatabase, paymentStaff, asyncRoute(async (req, res) => {
   const hasRange = req.query.from != null || req.query.to != null;
   if (hasRange && (typeof req.query.from !== 'string' || typeof req.query.to !== 'string')) {
     throw httpError(400, 'INVALID_DATE_RANGE', 'Khoảng thời gian báo cáo không hợp lệ.');
@@ -1879,8 +1924,58 @@ app.get('/api/payments', requireDatabase, asyncRoute(async (req, res) => {
   res.json({ payments: rows });
 }));
 
+/** Trả chi tiết một hóa đơn đã chốt để thu ngân có thể xem và in lại an toàn. */
+app.get('/api/payments/:invoiceCode', requireDatabase, paymentStaff, asyncRoute(async (req, res) => {
+  const invoiceCode = String(req.params.invoiceCode ?? '').trim();
+  if (!/^[A-Z0-9-]{8,64}$/.test(invoiceCode)) {
+    throw httpError(400, 'INVALID_PAYMENT_CODE', 'Mã hóa đơn không hợp lệ.');
+  }
+  const [rows] = await getPool().query(
+    `${paymentSelect('WHERE invoice_code = ?')} LIMIT 1`,
+    [invoiceCode],
+  );
+  const payment = rows[0];
+  if (!payment) throw httpError(404, 'PAYMENT_NOT_FOUND', 'Không tìm thấy hóa đơn.');
+
+  const [rawResult, itemResult, tableResult] = await Promise.all([
+    getPool().query('SELECT raw_payload AS rawPayload FROM payment_transactions WHERE id = ? LIMIT 1', [payment.databaseId]),
+    getPool().query(
+      `SELECT name, quantity, price, note, options_json AS options
+       FROM payment_items WHERE transaction_id = ? ORDER BY id`,
+      [payment.databaseId],
+    ),
+    getPool().query('SELECT area FROM restaurant_tables WHERE id = ? LIMIT 1', [payment.tableId]),
+  ]);
+  const rawRow = rawResult[0][0];
+  const itemRows = itemResult[0];
+  const tableRows = tableResult[0];
+  const rawPayload = parseJsonColumn(rawRow?.rawPayload, {});
+  const cashReceived = rawPayload?.cashReceived == null ? Number.NaN : Number(rawPayload.cashReceived);
+  const cashChange = rawPayload?.cashChange == null ? Number.NaN : Number(rawPayload.cashChange);
+  res.json({
+    payment: {
+      ...payment,
+      ...(Number.isSafeInteger(cashReceived) ? { cashReceived } : {}),
+      ...(Number.isSafeInteger(cashChange) ? { cashChange } : {}),
+    },
+    items: itemRows.map(item => ({
+      name: item.name,
+      quantity: Number(item.quantity),
+      price: Number(item.price),
+      ...(item.note ? { note: item.note } : {}),
+      options: parseJsonColumn(item.options, {}),
+    })),
+    snapshot: {
+      ...(rawPayload?.invoiceSnapshot && typeof rawPayload.invoiceSnapshot === 'object'
+        ? rawPayload.invoiceSnapshot
+        : {}),
+      area: rawPayload?.invoiceSnapshot?.area || tableRows[0]?.area || '',
+    },
+  });
+}));
+
 // Thanh toán luôn chốt hóa đơn; chỉ đóng order ngay khi toàn bộ phiếu bếp đã xong.
-app.post('/api/payments', requireDatabase, asyncRoute(async (req, res) => {
+app.post('/api/payments', requireDatabase, paymentStaff, asyncRoute(async (req, res) => {
   const draft = req.body?.payment;
   const tableId = typeof draft?.tableId === 'string' ? draft.tableId : '';
   if (!tableId) throw httpError(400, 'INVALID_PAYMENT', 'Thiếu mã bàn thanh toán.');
@@ -1920,7 +2015,7 @@ app.post('/api/payments', requireDatabase, asyncRoute(async (req, res) => {
     }
 
     const [tables] = await connection.query(
-      'SELECT id, table_number AS number, status FROM restaurant_tables WHERE id = ? FOR UPDATE',
+      'SELECT id, table_number AS number, status, area FROM restaurant_tables WHERE id = ? FOR UPDATE',
       [tableId],
     );
     const table = tables[0];
@@ -2011,8 +2106,8 @@ app.post('/api/payments', requireDatabase, asyncRoute(async (req, res) => {
         invoice_code, transaction_code, table_id, table_number, reservation_id,
         reservation_code, customer_name, guest_count, payment_method,
         subtotal, discount, service_fee, vat, total, item_count, staff_id,
-        staff_name, cashier_name, service_status, paid_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        staff_name, cashier_name, service_status, paid_at, raw_payload
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         payment.invoiceCode, payment.transactionCode, payment.tableId, payment.tableNumber,
         payment.reservationId ?? null, payment.reservationCode ?? null,
@@ -2020,6 +2115,25 @@ app.post('/api/payments', requireDatabase, asyncRoute(async (req, res) => {
         payment.subtotal, payment.discount, payment.serviceFee, payment.vat, payment.total, payment.itemCount,
         payment.employeeId ?? null,
         payment.staffName, payment.cashierName, payment.serviceStatus, new Date(payment.paidAt),
+        JSON.stringify({
+          ...(payment.cashReceived != null ? {
+            cashReceived: payment.cashReceived,
+            cashChange: payment.cashChange,
+          } : {}),
+          invoiceSnapshot: {
+            restaurantName: settings.restaurantName,
+            legalName: settings.legalName,
+            tagline: settings.tagline,
+            address: settings.address,
+            phone: settings.phone,
+            email: settings.email,
+            website: settings.website,
+            area: table.area,
+            vatRate: settings.vatRate,
+            serviceFeeRate: settings.serviceFeeRate,
+            invoiceNote: settings.invoiceNote,
+          },
+        }),
       ],
     );
 
@@ -2119,7 +2233,14 @@ app.use((error, _req, res, _next) => {
   const code = error.code && typeof error.code === 'string' && !error.code.startsWith('ER_')
     ? error.code
     : (databaseConflict ? 'DUPLICATE_DATA' : status === 400 ? 'INVALID_JSON' : 'INTERNAL_ERROR');
-  if (status >= 500) console.error(error);
+  if (status >= 500) {
+    logEvent('error', 'request_failed', {
+      requestId: _req.requestId,
+      method: _req.method,
+      path: _req.path,
+      ...errorDetails(error),
+    });
+  }
   res.status(status).json({
     error: code,
     message: databaseConflict ? 'Số bàn hoặc mã dữ liệu đã tồn tại.' : status >= 500 ? 'Đã xảy ra lỗi nội bộ.' : error.message,
@@ -2135,19 +2256,18 @@ async function connectDatabase() {
     await initDatabase();
     const promoted = await processKitchenQueue(getPool());
     dbReady = true;
-    dbError = null;
-    console.log(`MySQL connected: ${databaseConfigSummary.host}:${databaseConfigSummary.port}/${databaseConfigSummary.database}`);
-    if (promoted.length > 0) console.log(`Kitchen queue promoted ${promoted.length} order(s).`);
+    logEvent('info', 'database_connected', databaseConfigSummary);
+    if (promoted.length > 0) logEvent('info', 'kitchen_queue_promoted', { count: promoted.length });
   } catch (error) {
     markDatabaseUnavailable(error);
-    console.warn(`MySQL unavailable: ${error.message}`);
+    logEvent('warn', 'database_unavailable', errorDetails(error));
   } finally {
     connecting = false;
   }
 }
 
 const server = app.listen(port, host, () => {
-  console.log(`CAS API listening on http://${host}:${port}`);
+  logEvent('info', 'api_listening', { host, port });
   void connectDatabase();
 });
 
@@ -2167,7 +2287,7 @@ const kitchenCycleTimer = setInterval(async () => {
     await processKitchenQueue(getPool());
   } catch (error) {
     if (isDatabaseConnectivityError(error)) markDatabaseUnavailable(error);
-    console.warn(`Kitchen timer cycle failed: ${error.message}`);
+    logEvent('warn', 'kitchen_cycle_failed', errorDetails(error));
   } finally {
     kitchenCycleRunning = false;
   }
@@ -2176,11 +2296,11 @@ kitchenCycleTimer.unref();
 
 /** Dừng nhận request mới và đóng pool trước khi thoát tiến trình. */
 async function shutdown(signal) {
-  console.log(`${signal} received, shutting down.`);
+  logEvent('info', 'api_shutdown', { signal });
   clearInterval(retryTimer);
   clearInterval(kitchenCycleTimer);
   server.close(async () => {
-    await closePool().catch(error => console.error(error));
+    await closePool().catch(error => logEvent('error', 'database_close_failed', errorDetails(error)));
     process.exit(0);
   });
   setTimeout(() => process.exit(1), 10_000).unref();

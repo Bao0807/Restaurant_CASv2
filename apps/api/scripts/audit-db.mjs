@@ -80,7 +80,7 @@ function normalizeCheckClause(value) {
 
 async function auditStructure() {
   const requiredTables = [
-    'schema_migrations', 'restaurant_settings', 'restaurant_tables', 'reservations',
+    'schema_migrations', 'audit_events', 'restaurant_settings', 'restaurant_tables', 'reservations',
     'menu_categories', 'menu_items', 'menu_item_daily_usage', 'active_orders', 'order_batches',
     'kitchen_queue_state', 'employees', 'payment_transactions', 'active_order_payments',
     'payment_items',
@@ -107,6 +107,8 @@ async function auditStructure() {
   );
   const columns = new Map(columnRows.map(row => [`${row.tableName}.${row.columnName}`, row]));
   const requiredColumnDefinitions = [
+    { table: 'audit_events', column: 'request_id', type: 'varchar(128)', nullable: 'NO' },
+    { table: 'audit_events', column: 'actor_role', type: 'varchar(20)', nullable: 'NO' },
     { table: 'restaurant_tables', column: 'area', type: 'varchar(80)', nullable: 'NO' },
     { table: 'restaurant_tables', column: 'position_x', type: 'int unsigned', nullable: 'YES' },
     { table: 'restaurant_tables', column: 'position_y', type: 'int unsigned', nullable: 'YES' },
@@ -167,6 +169,8 @@ async function auditStructure() {
   }
 
   const requiredIndexes = [
+    { table: 'audit_events', columns: ['occurred_at', 'id'], name: 'idx_audit_occurred' },
+    { table: 'audit_events', columns: ['actor_username', 'occurred_at'], name: 'idx_audit_actor' },
     { table: 'restaurant_tables', columns: ['id'], unique: true, name: 'PRIMARY' },
     { table: 'restaurant_tables', columns: ['table_number'], unique: true },
     { table: 'restaurant_tables', columns: ['status'], name: 'idx_restaurant_table_status' },
@@ -287,6 +291,10 @@ async function auditStructure() {
   else addPass('Foreign key bắt buộc đúng cột và quy tắc xóa');
 
   const requiredChecks = [
+    {
+      table: 'audit_events', name: 'chk_audit_actor_role',
+      tokens: ['actor_role', "'manager'", "'cashier'", "'server'", "'chef'"],
+    },
     { table: 'restaurant_settings', name: 'chk_settings_singleton', tokens: ['id=1'] },
     { table: 'restaurant_tables', name: 'chk_restaurant_table_number', tokens: ['table_number', 'between1and999'] },
     { table: 'restaurant_tables', name: 'chk_restaurant_table_seats', tokens: ['seats', 'between1and100'] },
@@ -545,14 +553,15 @@ async function auditReservations(existingTables) {
   );
 
   await checkViolationRows(
-    'Không có reservation đang mở trùng khung giờ trên cùng bàn',
+    'Reservation đang mở cùng bàn không trùng và cách nhau ít nhất 15 phút',
     `SELECT first.id AS firstReservationId, first.reservation_code AS firstCode,
        second.id AS secondReservationId, second.reservation_code AS secondCode,
        first.table_id AS tableId
      FROM reservations first
      INNER JOIN reservations second
        ON second.table_id = first.table_id AND second.id > first.id
-      AND first.reserved_at < second.ends_at AND second.reserved_at < first.ends_at
+       AND first.reserved_at < DATE_ADD(second.ends_at, INTERVAL 15 MINUTE)
+       AND second.reserved_at < DATE_ADD(first.ends_at, INTERVAL 15 MINUTE)
      WHERE first.status IN ('booked', 'seated')
        AND second.status IN ('booked', 'seated')`,
   );

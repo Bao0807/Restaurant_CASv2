@@ -175,7 +175,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 export function DashboardPage({
   mode,
   tables,
-  tableOrders,
+  tableOrders: _tableOrders,
   payments,
   settings,
   settingsStatus,
@@ -194,8 +194,12 @@ export function DashboardPage({
   const [reportReference, setReportReference] = useState(() => new Date(getServerNowMs()));
   const reportRange = useMemo(() => buildReportRange(reportPeriod, reportReference), [reportPeriod, reportReference]);
   const currentDate = new Date(getServerNowMs());
+  const currentDateMs = currentDate.getTime();
+  const reportFromMs = reportRange.from.getTime();
+  const reportToMs = reportRange.to.getTime();
+  const latestPaymentInvoiceCode = payments[0]?.invoiceCode;
   const currentReportRange = buildReportRange(reportPeriod, currentDate);
-  const isCurrentReportPeriod = reportRange.from.getTime() === currentReportRange.from.getTime();
+  const isCurrentReportPeriod = reportFromMs === currentReportRange.from.getTime();
   const reportPickerValue = reportReferenceInputValue(reportPeriod, reportReference);
   const reportPickerMax = reportReferenceInputValue(reportPeriod, currentDate);
 
@@ -219,7 +223,7 @@ export function DashboardPage({
     const loadReport = async () => {
       if (document.visibilityState === 'hidden') return;
       try {
-        const summary = await fetchReportSummary(reportRange.from, reportRange.to);
+        const summary = await fetchReportSummary(new Date(reportFromMs), new Date(reportToMs));
         if (!active) return;
         setReportSummary(summary);
         setReportState('ready');
@@ -235,12 +239,12 @@ export function DashboardPage({
       active = false;
       window.clearInterval(timer);
     };
-  }, [mode, payments.length, payments[0]?.invoiceCode, reportRange.from.getTime(), reportRange.to.getTime()]);
+  }, [latestPaymentInvoiceCode, mode, payments.length, reportFromMs, reportToMs]);
 
   const periodPayments = useMemo(() => payments.filter(payment => {
     const paidAt = new Date(payment.paidAt).getTime();
-    return paidAt >= reportRange.from.getTime() && paidAt < reportRange.to.getTime();
-  }), [payments, reportRange.from, reportRange.to]);
+    return paidAt >= reportFromMs && paidAt < reportToMs;
+  }), [payments, reportFromMs, reportToMs]);
   const paidRevenue = reportSummary?.totals.revenue
     ?? periodPayments.reduce((sum, payment) => sum + payment.total, 0);
   const paidOrders = reportSummary?.totals.orders ?? periodPayments.length;
@@ -251,12 +255,12 @@ export function DashboardPage({
 
   const timelineData = useMemo(() => buildReportTimeline({
     period: reportPeriod,
-    from: reportRange.from,
-    to: reportRange.to,
+    from: new Date(reportFromMs),
+    to: new Date(reportToMs),
     payments: periodPayments,
     summary: reportSummary,
-    now: currentDate,
-  }), [reportPeriod, reportRange.from, reportRange.to, reportSummary, periodPayments, currentDate.getTime()]);
+    now: new Date(currentDateMs),
+  }), [currentDateMs, periodPayments, reportFromMs, reportPeriod, reportSummary, reportToMs]);
   const timelineCopy = REPORT_TIMELINE_COPY[reportPeriod];
   const staffPerformance = useMemo(() => {
     if (!reportSummary) return buildStaffReport(periodPayments);

@@ -1,16 +1,30 @@
 import 'dotenv/config';
 
 const baseUrl = process.env.SMOKE_API_URL || `http://127.0.0.1:${process.env.PORT || 4100}/api`;
-const authorization = process.env.AUTH_USERNAME && process.env.AUTH_PASSWORD
-  ? `Basic ${Buffer.from(`${process.env.AUTH_USERNAME}:${process.env.AUTH_PASSWORD}`).toString('base64')}`
-  : null;
+let sessionCookie = '';
+
+async function authenticateForSmoke() {
+  if (!process.env.AUTH_USERNAME || !process.env.AUTH_PASSWORD) return;
+  const response = await fetch(`${baseUrl}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      username: process.env.AUTH_USERNAME,
+      password: process.env.AUTH_PASSWORD,
+    }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`POST /auth/login: ${response.status} ${body.message || ''}`);
+  sessionCookie = response.headers.get('set-cookie')?.split(';')[0] || '';
+  if (!sessionCookie) throw new Error('Đăng nhập smoke test không trả session cookie.');
+}
 
 async function request(path, options = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
     ...options,
     headers: {
       'content-type': 'application/json',
-      ...(authorization ? { authorization } : {}),
+      ...(sessionCookie ? { cookie: sessionCookie } : {}),
       ...options.headers,
     },
   });
@@ -24,7 +38,7 @@ async function requestResult(path, options = {}) {
     ...options,
     headers: {
       'content-type': 'application/json',
-      ...(authorization ? { authorization } : {}),
+      ...(sessionCookie ? { cookie: sessionCookie } : {}),
       ...options.headers,
     },
   });
@@ -36,7 +50,7 @@ async function expectApiError(path, expectedStatus, expectedCode, options = {}) 
     ...options,
     headers: {
       'content-type': 'application/json',
-      ...(authorization ? { authorization } : {}),
+      ...(sessionCookie ? { cookie: sessionCookie } : {}),
       ...options.headers,
     },
   });
@@ -45,6 +59,15 @@ async function expectApiError(path, expectedStatus, expectedCode, options = {}) 
     throw new Error(`${options.method || 'GET'} ${path}: expected ${expectedStatus}/${expectedCode}, got ${response.status}/${body.error || 'NO_CODE'}`);
   }
   return body;
+}
+
+function nextQuarterHour(afterMs = Date.now()) {
+  const date = new Date(afterMs);
+  date.setSeconds(0, 0);
+  const minutesToAdd = (15 - (date.getMinutes() % 15)) % 15;
+  date.setMinutes(date.getMinutes() + minutesToAdd);
+  if (date.getTime() <= afterMs) date.setMinutes(date.getMinutes() + 15);
+  return date;
 }
 
 let table;
@@ -82,6 +105,7 @@ async function finishAllBatches(tableId) {
   throw new Error('Không thể hoàn tất các phiếu bếp trong thời gian smoke test');
 }
 try {
+  await authenticateForSmoke();
   const health = await request('/health');
   if (!health.ok) throw new Error('API health không sẵn sàng');
   const [catalog, operations] = await Promise.all([request('/catalog'), request('/operations')]);
@@ -92,6 +116,10 @@ try {
   }
   const paymentHistory = await request('/payments');
   if (paymentHistory.payments[0]) {
+    const receipt = await request(`/payments/${encodeURIComponent(paymentHistory.payments[0].invoiceCode)}`);
+    if (receipt.payment.invoiceCode !== paymentHistory.payments[0].invoiceCode || !Array.isArray(receipt.items)) {
+      throw new Error('Chi tiết hóa đơn không khớp lịch sử thanh toán');
+    }
     const retried = await request('/payments', {
       method: 'POST',
       body: JSON.stringify({ payment: paymentHistory.payments[0] }),
@@ -358,8 +386,8 @@ try {
     throw new Error('The table did not return to empty after the daily-stock test order was cancelled');
   }
 
-  const firstReservedAt = new Date(Date.now() + 10 * 60_000);
-  const nextReservedAt = new Date(Date.now() + 45 * 60_000);
+  const firstReservedAt = nextQuarterHour(Date.now() + 60_000);
+  const nextReservedAt = new Date(firstReservedAt.getTime() + 45 * 60_000);
   const reservationPayload = {
     tableId: table.id,
     customerName: 'Khách smoke test',
@@ -384,7 +412,7 @@ try {
       reservedAt: nextReservedAt.toISOString(),
     } }),
   })).reservation;
-  const concurrentReservedAt = new Date(Date.now() + 90 * 60_000).toISOString();
+  const concurrentReservedAt = new Date(firstReservedAt.getTime() + 90 * 60_000).toISOString();
   const concurrentPayload = {
     ...reservationPayload,
     customerName: 'Khách đồng thời A',
@@ -562,6 +590,13 @@ try {
   });
   if (!racePayment.requiresDepartureConfirmation || racePayment.orderClosed) {
     throw new Error('Ý định thanh toán sớm bị mất khi bếp hoàn tất trước lúc gửi thanh toán');
+  }
+  const raceReceipt = await request(`/payments/${encodeURIComponent(racePayment.payment.invoiceCode)}`);
+  if (raceReceipt.items.length !== 1
+    || raceReceipt.payment.cashReceived !== raceReceipt.payment.total
+    || raceReceipt.payment.cashChange !== 0
+    || !raceReceipt.snapshot.restaurantName) {
+    throw new Error('Snapshot hóa đơn hoặc dữ liệu tiền mặt để in lại chưa đầy đủ');
   }
   const raceTable = (await request('/operations')).tables.find(item => item.id === table.id);
   if (raceTable?.status !== 'done' || !raceTable.isPaid) {
