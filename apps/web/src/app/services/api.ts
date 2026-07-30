@@ -389,12 +389,9 @@ export async function confirmTableDeparture(tableId: string): Promise<void> {
 }
 
 export async function fetchPayments(): Promise<PaymentRecord[]> {
-  const from = new Date();
-  from.setHours(0, 0, 0, 0);
-  const to = new Date(from);
-  to.setDate(to.getDate() + 1);
-  const query = new URLSearchParams({ from: from.toISOString(), to: to.toISOString() });
-  const data = await request<{ payments: PaymentRecord[] }>(`/payments?${query}`);
+  // Không truyền khoảng ngày để backend trả tối đa 100 hóa đơn mới nhất cho lịch sử thu ngân.
+  // Báo cáo theo ngày/tuần/tháng dùng endpoint aggregate riêng nên không bị giới hạn bởi danh sách này.
+  const data = await request<{ payments: PaymentRecord[] }>('/payments');
   return data.payments.map(payment => ({
     ...payment,
     tableNumber: Number(payment.tableNumber),

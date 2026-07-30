@@ -1,6 +1,33 @@
 const ORDER_BATCH_STATUSES = new Set(['waiting', 'cooking', 'done']);
 
 /**
+ * So sánh ý định gọi món thay vì các snapshot giá/catalog do server ghi đè.
+ * `cartId` ổn định trong suốt một lần xác nhận nên một PUT bị gửi lại sau khi
+ * response thất lạc có thể nhận lại phiếu cũ mà không tạo món hai lần.
+ */
+export function isSameOrderSubmission(incomingItems, persistedItems) {
+  if (!Array.isArray(incomingItems) || !Array.isArray(persistedItems)) return false;
+  if (incomingItems.length === 0 || incomingItems.length !== persistedItems.length) return false;
+
+  const normalize = items => items.map(item => ({
+    cartId: typeof item?.cartId === 'string' ? item.cartId : '',
+    menuItemId: typeof item?.menuItem?.id === 'string' ? item.menuItem.id : '',
+    quantity: Number(item?.quantity),
+    size: typeof item?.selectedSize?.label === 'string' ? item.selectedSize.label : null,
+    toppings: Array.isArray(item?.selectedToppings)
+      ? item.selectedToppings.map(topping => topping?.id).sort()
+      : [],
+    note: typeof item?.note === 'string' ? item.note : '',
+  })).sort((left, right) => (
+    left.cartId.localeCompare(right.cartId)
+    || left.menuItemId.localeCompare(right.menuItemId)
+    || left.quantity - right.quantity
+  ));
+
+  return JSON.stringify(normalize(incomingItems)) === JSON.stringify(normalize(persistedItems));
+}
+
+/**
  * Tóm tắt trạng thái các phiếu bếp để mọi endpoint dùng chung một quy tắc nghiệp vụ.
  * Dữ liệu lạ được xem là không an toàn, vì vậy không thể hủy, thanh toán hoặc đóng order.
  */

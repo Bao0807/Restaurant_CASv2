@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
-  Banknote, Building2, CalendarDays, ChevronLeft, ChevronRight, CreditCard, QrCode, ReceiptText,
+  Banknote, Building2, ChevronLeft, ChevronRight, CreditCard, QrCode, ReceiptText,
   Save, Settings, ShoppingBag, SlidersHorizontal, WalletCards, Wrench,
 } from 'lucide-react';
 import type { CartItem, KitchenStatus, MenuCategory, MenuItem, PaymentMethodId, PaymentRecord, ReportSummary, Table } from '../data';
@@ -71,24 +71,32 @@ const REPORT_CURRENT_LABELS: Record<ReportPeriod, string> = {
 const REPORT_TIMELINE_COPY: Record<ReportPeriod, {
   revenueTitle: string;
   ordersTitle: string;
-  description: string;
 }> = {
   day: {
     revenueTitle: 'Doanh thu theo giờ',
     ordersTitle: 'Số hóa đơn theo giờ',
-    description: 'Mỗi điểm biểu diễn một giờ trong ngày',
   },
   week: {
     revenueTitle: 'Doanh thu theo ngày',
     ordersTitle: 'Số hóa đơn theo ngày',
-    description: 'Từ Thứ Hai đến Chủ nhật',
   },
   month: {
     revenueTitle: 'Doanh thu theo tuần',
     ordersTitle: 'Số hóa đơn theo tuần',
-    description: 'Tổng hợp theo từng tuần trong tháng',
   },
 };
+
+const visuallyHiddenStyle = {
+  position: 'absolute',
+  width: 1,
+  height: 1,
+  padding: 0,
+  margin: -1,
+  overflow: 'hidden',
+  clip: 'rect(0, 0, 0, 0)',
+  whiteSpace: 'nowrap',
+  border: 0,
+} as const;
 
 function SectionTitle({ title, sub }: { title: string; sub?: string }) {
   return (
@@ -126,20 +134,21 @@ function KpiCard({
   icon: ReactNode;
   label: string;
   value: string;
-  sub: string;
+  sub?: string;
   color: string;
 }) {
   return (
-    <div style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 8, padding: 14, minWidth: 150, flex: '1 1 0' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-        <div style={{ width: 36, height: 36, borderRadius: 8, background: `${color}18`, display: 'flex', alignItems: 'center', justifyContent: 'center', color }}>
+    <div style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 8, padding: 12, minWidth: 150, flex: '1 1 0' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ width: 34, height: 34, flexShrink: 0, borderRadius: 8, background: `${color}18`, display: 'flex', alignItems: 'center', justifyContent: 'center', color }}>
           {icon}
         </div>
-        <img src={BRAND_ASSETS.mark} alt="CAS" style={{ width: 18, height: 18, opacity: 0.45 }} />
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: '20px', fontWeight: 900, color: '#111827', lineHeight: 1.1 }}>{value}</div>
+          <div style={{ fontSize: '12px', color: '#374151', fontWeight: 700, marginTop: 3 }}>{label}</div>
+        </div>
       </div>
-      <div style={{ fontSize: '20px', fontWeight: 900, color: '#111827', lineHeight: 1.1 }}>{value}</div>
-      <div style={{ fontSize: '12px', color: '#374151', fontWeight: 700, marginTop: 5 }}>{label}</div>
-      <div style={{ fontSize: '11px', color: '#9CA3AF', marginTop: 3 }}>{sub}</div>
+      {sub && <div style={{ fontSize: '11px', color: '#9CA3AF', marginTop: 7 }}>{sub}</div>}
     </div>
   );
 }
@@ -323,74 +332,61 @@ export function DashboardPage({
   const resetDraft = () => setDraft(settings);
 
   const widgetVisible = (id: string) => settings.visibleDashboardWidgets.includes(id);
+  const visibleSettingsStatus = settingsStatus === 'loading' || settingsStatus === 'saving' || settingsStatus === 'error';
 
   return (
     <div className={`dashboard-page dashboard-${mode}`} style={{ minHeight: '100%', background: '#F8FAFC' }}>
-      <div style={{ background: '#fff', borderBottom: '1px solid #E5E7EB', padding: '16px 16px 0' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 14 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
-            <div style={{ width: 42, height: 42, borderRadius: 10, background: '#0F172A', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-              <img src={BRAND_ASSETS.mark} alt="CAS" style={{ width: 27, height: 27 }} />
-            </div>
-            <div style={{ minWidth: 0 }}>
-              <h1 style={{ margin: 0, color: '#111827', fontSize: '22px' }}>{mode === 'reports' ? 'Báo cáo vận hành' : 'Quản trị nhà hàng'}</h1>
-              <p style={{ margin: '3px 0 0', color: '#6B7280', fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {settings.restaurantName} · {currentDate.toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' })}
-              </p>
-            </div>
+      <h1 style={visuallyHiddenStyle}>{mode === 'reports' ? 'Báo cáo vận hành' : 'Quản trị nhà hàng'}</h1>
+      {mode === 'admin' && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '7px 14px', background: '#fff', borderBottom: '1px solid #E5E7EB' }}>
+          <div role="group" aria-label="Khu vực quản trị" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(100px, 1fr))', gap: 5, width: 'min(100%, 360px)', padding: 3, borderRadius: 10, background: '#F1F5F9' }}>
+            {([
+              { id: 'management', label: 'Vận hành', icon: <Wrench size={16} /> },
+              { id: 'settings', label: 'Tùy chỉnh', icon: <SlidersHorizontal size={16} /> },
+            ] as const).map(item => {
+              const active = tab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  aria-pressed={active}
+                  data-dashboard-tab={item.id}
+                  onClick={() => setTab(item.id)}
+                  style={{
+                    minHeight: 36,
+                    border: active ? '1px solid #99F6E4' : '1px solid transparent',
+                    borderRadius: 8,
+                    background: active ? '#fff' : 'transparent',
+                    color: active ? '#0F766E' : '#64748B',
+                    padding: '6px 10px',
+                    fontSize: '12px',
+                    fontWeight: active ? 800 : 700,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 7,
+                    boxShadow: active ? '0 2px 7px rgba(15, 23, 42, 0.08)' : 'none',
+                  }}
+                >
+                  {item.icon}
+                  {item.label}
+                </button>
+              );
+            })}
           </div>
-          {mode === 'admin' && (
-            <div role="status" style={{ background: settingsStatus === 'error' ? '#FEF2F2' : '#F0FDFA', color: settingsStatus === 'error' ? '#B91C1C' : '#0F766E', border: `1px solid ${settingsStatus === 'error' ? '#FECACA' : '#99F6E4'}`, borderRadius: 8, padding: '7px 10px', fontSize: '11px', fontWeight: 800 }}>
-              {settingsStatus === 'saving' ? 'Đang lưu' : settingsStatus === 'saved' ? 'Đã lưu' : settingsStatus === 'loading' ? 'Đang tải' : settingsStatus === 'error' ? 'Chưa lưu' : 'Sẵn sàng'}
+          {visibleSettingsStatus && (
+            <div role="status" style={{ flexShrink: 0, background: settingsStatus === 'error' ? '#FEF2F2' : '#F0FDFA', color: settingsStatus === 'error' ? '#B91C1C' : '#0F766E', border: `1px solid ${settingsStatus === 'error' ? '#FECACA' : '#99F6E4'}`, borderRadius: 8, padding: '7px 10px', fontSize: '11px', fontWeight: 800 }}>
+              {settingsStatus === 'saving' ? 'Đang lưu' : settingsStatus === 'loading' ? 'Đang tải' : 'Chưa lưu'}
             </div>
           )}
         </div>
-
-        {mode === 'admin' && <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
-          {([
-            { id: 'management', label: 'Vận hành', icon: <Wrench size={16} /> },
-            { id: 'settings', label: 'Tùy chỉnh', icon: <SlidersHorizontal size={16} /> },
-          ] as const).map(item => {
-            const active = tab === item.id;
-            return (
-              <button
-                key={item.id}
-                data-dashboard-tab={item.id}
-                onClick={() => setTab(item.id)}
-                style={{
-                  border: 'none',
-                  borderBottom: active ? '3px solid #0D9488' : '3px solid transparent',
-                  background: '#fff',
-                  color: active ? '#0F766E' : '#6B7280',
-                  padding: '9px 6px',
-                  fontSize: '13px',
-                  fontWeight: active ? 800 : 600,
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 7,
-                }}
-              >
-                {item.icon}
-                {item.label}
-              </button>
-            );
-          })}
-        </div>}
-      </div>
+      )}
 
       {tab === 'reports' ? (
         <div className="dashboard-reports-page" style={{ padding: '14px 14px 96px', display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div className="report-filter-bar">
             <div className="report-filter-top">
-              <div className="report-range-copy">
-                <span className="report-range-icon" aria-hidden="true"><CalendarDays size={19} /></span>
-                <span>
-                  <strong>Khoảng báo cáo</strong>
-                  <small>{reportRange.label}</small>
-                </span>
-              </div>
               <div className="report-period-selector" role="group" aria-label="Chọn kỳ báo cáo">
                 {REPORT_PERIODS.map(period => (
                   <button
@@ -404,6 +400,9 @@ export function DashboardPage({
                   </button>
                 ))}
               </div>
+              <output aria-live="polite" style={{ color: '#334155', fontSize: 12, fontWeight: 800, textAlign: 'right' }}>
+                {reportRange.label}
+              </output>
             </div>
             <div className="report-date-navigation">
               <button
@@ -455,7 +454,7 @@ export function DashboardPage({
                 icon={<WalletCards size={18} />}
                 label="Doanh thu đã thu"
                 value={formatShort(paidRevenue)}
-                sub={`${paidOrders} giao dịch đã thanh toán`}
+                sub={`${paidOrders} giao dịch`}
                 color="#0D9488"
               />
             )}
@@ -464,7 +463,6 @@ export function DashboardPage({
                 icon={<ReceiptText size={18} />}
                 label="Hóa đơn đã thanh toán"
                 value={String(paidOrders)}
-                sub={`Giao dịch ${reportRange.contextLabel}`}
                 color="#EA580C"
               />
             )}
@@ -472,7 +470,6 @@ export function DashboardPage({
               icon={<ShoppingBag size={18} />}
               label="Số phần đã bán"
               value={String(paidItemCount)}
-              sub={`Món đã thanh toán ${reportRange.contextLabel}`}
               color="#2563EB"
             />
             <KpiCard
@@ -487,7 +484,7 @@ export function DashboardPage({
           <div className="report-insight-grid">
             {widgetVisible('revenue') && (
               <div className="report-card report-chart-card">
-                <SectionTitle title={timelineCopy.revenueTitle} sub={paidOrders ? `${timelineCopy.description} · ${reportRange.label}` : 'Chưa có giao dịch trong kỳ'} />
+                <SectionTitle title={timelineCopy.revenueTitle} sub={paidOrders ? undefined : 'Chưa có giao dịch trong kỳ'} />
                 {reportState === 'ready' ? (
                   <Suspense fallback={<ChartStatus height={184} state="loading" />}><RevenueChart data={timelineData} /></Suspense>
                 ) : <ChartStatus height={184} state={reportState === 'error' ? 'error' : 'loading'} />}
@@ -496,7 +493,7 @@ export function DashboardPage({
 
             {widgetVisible('paymentMix') && (
               <div className="report-card">
-                <SectionTitle title="Phương thức thanh toán" sub={`${paidOrders} giao dịch ${reportRange.contextLabel}`} />
+                <SectionTitle title="Phương thức thanh toán" />
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                   {paymentMix.map(item => (
                     <div key={item.method}>
@@ -525,7 +522,7 @@ export function DashboardPage({
           <div className="report-insight-grid report-secondary-grid">
             {widgetVisible('topItems') && (
               <div style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 8, padding: 16 }}>
-                <SectionTitle title="Món bán chạy" sub={`Tính theo hóa đơn đã thanh toán ${reportRange.contextLabel}`} />
+                <SectionTitle title="Món bán chạy" />
                 {reportState === 'loading' && <div role="status" style={{ color: '#64748B', fontSize: 13, padding: '14px 0' }}>Đang tổng hợp dữ liệu món…</div>}
                 {reportState !== 'loading' && topItems.length === 0 && <div style={{ color: '#9CA3AF', fontSize: 13, padding: '14px 0' }}>Chưa có món đã thanh toán trong kỳ.</div>}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
@@ -547,7 +544,7 @@ export function DashboardPage({
 
             {widgetVisible('orders') && (
               <div style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 8, padding: 16 }}>
-                <SectionTitle title={timelineCopy.ordersTitle} sub={`${timelineCopy.description} · ${reportRange.label}`} />
+                <SectionTitle title={timelineCopy.ordersTitle} />
                 {reportState === 'ready' ? (
                   <Suspense fallback={<ChartStatus height={140} state="loading" />}><OrdersChart data={timelineData} /></Suspense>
                 ) : <ChartStatus height={140} state={reportState === 'error' ? 'error' : 'loading'} />}
@@ -557,7 +554,7 @@ export function DashboardPage({
 
           {widgetVisible('staff') && (
             <div style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 8, padding: 16 }}>
-              <SectionTitle title="Hiệu suất nhân viên" sub={`${staffPerformance.length} nhân viên có giao dịch ${reportRange.contextLabel}`} />
+              <SectionTitle title="Hiệu suất nhân viên" />
               {staffPerformance.length === 0 ? (
                 <div style={{ color: '#9CA3AF', fontSize: 13, padding: '14px 0' }}>Chưa có hóa đơn trong kỳ để tính hiệu suất.</div>
               ) : (
@@ -584,7 +581,7 @@ export function DashboardPage({
           )}
 
           <div style={{ background: '#fff', border: '1px solid #E5E7EB', borderRadius: 8, padding: 16 }}>
-            <SectionTitle title="Danh mục doanh thu" sub="Giá trị món trước giảm giá, phí dịch vụ và thuế" />
+            <SectionTitle title="Danh mục doanh thu" sub="Trước giảm giá, phí và thuế" />
             {reportState === 'loading' && <div role="status" style={{ color: '#64748B', fontSize: 13, padding: '14px 0' }}>Đang tổng hợp danh mục…</div>}
             {reportState !== 'loading' && categoryRevenue.length === 0 && <div style={{ color: '#9CA3AF', fontSize: 13, padding: '14px 0' }}>Chưa có món đã thanh toán trong kỳ.</div>}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>

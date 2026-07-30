@@ -228,15 +228,6 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
       .some(value => value.toLocaleLowerCase('vi-VN').includes(normalizedSearch));
   }), [normalizedSearch, reservations, statusFilter]);
 
-  const serverNow = getServerNowMs();
-  const todayKey = localDateValue(new Date(serverNow));
-  const stats = useMemo(() => ({
-    today: reservations.filter(row => localDateValue(new Date(row.reservedAt)) === todayKey).length,
-    upcoming: reservations.filter(row => row.status === 'booked' && new Date(row.endsAt).getTime() >= serverNow).length,
-    seated: reservations.filter(row => row.status === 'seated').length,
-    attention: reservations.filter(row => row.status === 'cancelled' || row.status === 'no_show').length,
-  }), [reservations, serverNow, todayKey]);
-
   const eligibleTables = useMemo(() => [...tables]
     .sort((left, right) => left.number - right.number), [tables]);
 
@@ -381,27 +372,12 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
 
   return (
     <div className="reservations-page">
-      <header className="reservations-hero">
-        <div className="reservations-heading">
-          <span className="reservations-heading-icon" aria-hidden="true"><CalendarCheck2 size={25} /></span>
-          <div>
-            <h1>Đặt bàn trước</h1>
-            <p>Quản lý lịch khách, khung giờ và check-in tại một nơi</p>
-          </div>
-        </div>
-        <button className="reservation-primary-button" type="button" onClick={() => openEditor()}>
-          <CalendarPlus size={18} /> Tạo lịch mới
-        </button>
-      </header>
-
-      <section className="reservation-kpi-grid" aria-label="Tổng quan lịch đặt bàn">
-        <div><span>Hôm nay</span><strong>{stats.today}</strong><small>lịch trong ngày</small></div>
-        <div><span>Sắp tới</span><strong>{stats.upcoming}</strong><small>đang giữ chỗ</small></div>
-        <div><span>Đã nhận bàn</span><strong>{stats.seated}</strong><small>đang phục vụ</small></div>
-        <div><span>Cần lưu ý</span><strong>{stats.attention}</strong><small>hủy hoặc không đến</small></div>
-      </section>
+      <h1 className="sr-only">Đặt bàn trước</h1>
 
       <section className="reservation-toolbar" aria-label="Lọc lịch đặt bàn">
+        <button className="reservation-primary-button reservation-toolbar-create" type="button" onClick={() => openEditor()}>
+          <CalendarPlus size={18} /> Tạo lịch
+        </button>
         <div className="reservation-scope-selector" role="group" aria-label="Chọn khoảng thời gian">
           {SCOPE_LABELS.map(option => (
             <button key={option.id} type="button" className={scope === option.id ? 'active' : ''} aria-pressed={scope === option.id} onClick={() => setScope(option.id)}>

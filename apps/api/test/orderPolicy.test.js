@@ -3,10 +3,38 @@ import assert from 'node:assert/strict';
 import {
   canCancelOrder,
   canPayOrder,
+  isSameOrderSubmission,
   isOrderComplete,
   paymentRequiresDepartureConfirmation,
   summarizeOrderBatches,
 } from '../src/orderPolicy.js';
+
+const submittedItem = (overrides = {}) => ({
+  cartId: 'cart-1',
+  menuItem: { id: 'm1', name: 'Tên phía client', price: 1 },
+  quantity: 2,
+  selectedSize: { label: 'Vừa', extraPrice: 1 },
+  selectedToppings: [{ id: 't2', label: 'Client 2', price: 1 }, { id: 't1', label: 'Client 1', price: 1 }],
+  note: 'Ít cay',
+  ...overrides,
+});
+
+test('nhận diện request tạo order gửi lại dù snapshot giá và thứ tự topping khác nhau', () => {
+  const persisted = submittedItem({
+    menuItem: { id: 'm1', name: 'Tên chuẩn', price: 65_000, cookMinutes: 12 },
+    selectedSize: { label: 'Vừa', extraPrice: 10_000 },
+    selectedToppings: [{ id: 't1', label: 'Chuẩn 1', price: 5_000 }, { id: 't2', label: 'Chuẩn 2', price: 8_000 }],
+  });
+  assert.equal(isSameOrderSubmission([submittedItem()], [persisted]), true);
+});
+
+test('không coi request đổi món, số lượng hoặc ghi chú là retry idempotent', () => {
+  const persisted = [submittedItem()];
+  assert.equal(isSameOrderSubmission([submittedItem({ quantity: 3 })], persisted), false);
+  assert.equal(isSameOrderSubmission([submittedItem({ menuItem: { id: 'm2' } })], persisted), false);
+  assert.equal(isSameOrderSubmission([submittedItem({ note: 'Không cay' })], persisted), false);
+  assert.equal(isSameOrderSubmission([], persisted), false);
+});
 
 test('chỉ cho hủy order khi toàn bộ phiếu bếp còn chờ', () => {
   assert.equal(canCancelOrder([{ status: 'waiting' }, { status: 'waiting' }]), true);

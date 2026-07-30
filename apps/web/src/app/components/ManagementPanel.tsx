@@ -205,9 +205,9 @@ function TableEditor({ table, tables, areaOptions, onChanged, report, confirmAct
       <div className="management-table-field table-area-field"><span>Khu vực</span><AreaCombobox ariaLabel={`Khu vực của bàn ${table.number}`} options={areaOptions} value={draft.area ?? ''} onChange={changeArea} /></div>
       <div className="management-table-status" title="Trạng thái hiện tại của bàn">
         <strong>{STATUS_CONFIG[table.status].label}</strong>
-        <small>{table.nextReservation
-          ? `${new Date(table.nextReservation.reservedAt).toLocaleString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })} · ${table.nextReservation.customerName}`
-          : table.orderNumber ? 'Theo tiến độ bếp' : 'Sẵn sàng phục vụ'}</small>
+        {table.nextReservation && <small>
+          {new Date(table.nextReservation.reservedAt).toLocaleString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })} · {table.nextReservation.customerName}
+        </small>}
       </div>
       <button className="management-icon-button primary" aria-label={`Lưu bàn ${table.number}`} onClick={() => void persist()} title={table.orderNumber ? 'Lưu khu vực; số bàn và số ghế đang được khóa' : 'Lưu bàn'}><Save size={16} /></button>
       <button className="management-icon-button danger" aria-label={`Xóa bàn ${table.number}`} onClick={() => void remove()} title="Xóa bàn"><Trash2 size={16} /></button>
@@ -376,7 +376,7 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
     }
   };
 
-  /** Cho quản lý giải phóng slot bị giữ bởi order nấu quá lâu. */
+  /** Cho quản lý xử lý thủ công khi trạng thái bếp không tự đồng bộ sau ETA. */
   const resolveStaleOrder = async (batch: KitchenStaleBatch, action: 'requeue' | 'done') => {
     if (kitchenBusyRef.current) return;
     kitchenBusyRef.current = true;
@@ -389,7 +389,7 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
         ? `Đã đưa lượt #${batch.batchNumber} của bàn ${batch.tableNumber} về cuối hàng chờ`
         : `Đã hoàn tất lượt #${batch.batchNumber} của bàn ${batch.tableNumber}`);
     } catch (error) {
-      report(error instanceof Error ? error.message : 'Không thể xử lý phiếu quá hạn', true);
+      report(error instanceof Error ? error.message : 'Không thể xử lý lỗi đồng bộ phiếu bếp', true);
     } finally {
       kitchenBusyRef.current = false;
       setKitchenBusy(false);
@@ -445,7 +445,7 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
       <nav className="management-section-nav" aria-label="Khu vực quản trị">
         <div className="management-section-tabs" role="group" aria-label="Chọn khu vực quản trị">
           {([
-            { id: 'kitchen', label: 'Bếp', detail: staleBatches.length ? `${staleBatches.length} phiếu quá hạn` : `${kitchen.cookingCount} nấu · ${kitchen.waitingCount} chờ`, icon: staleBatches.length ? <AlertTriangle size={18} /> : <ChefHat size={18} /> },
+            { id: 'kitchen', label: 'Bếp', detail: staleBatches.length ? `${staleBatches.length} phiếu cần đồng bộ` : `${kitchen.cookingCount} nấu · ${kitchen.waitingCount} chờ`, icon: staleBatches.length ? <AlertTriangle size={18} /> : <ChefHat size={18} /> },
             { id: 'menu', label: 'Thực đơn', detail: `${menuItems.length} món · ${categories.length} danh mục`, icon: <UtensilsCrossed size={18} /> },
             { id: 'tables', label: 'Bàn', detail: `${tables.length} bàn`, icon: <CirclePlus size={18} /> },
             { id: 'employees', label: 'Nhân viên', detail: `${employees.filter(row => row.active).length} hoạt động`, icon: <UsersRound size={18} /> },
@@ -468,7 +468,7 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
 
       {activeSection === 'kitchen' && staleBatches.length > 0 && (
         <section className="management-stale-alert">
-          <div className="management-title"><AlertTriangle size={21} /><div><strong>{staleBatches.length} phiếu bếp quá hạn</strong><span>Đã quá thời gian dự kiến thêm {kitchen.staleAfterMinutes} phút</span></div></div>
+          <div className="management-title"><AlertTriangle size={21} /><strong>{staleBatches.length} phiếu cần xử lý</strong></div>
           <div className="management-stale-list">
             {staleBatches.map(batch => (
               <div key={batch.batchId} className="management-stale-row">
@@ -488,10 +488,9 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
         aria-labelledby="management-tab-kitchen"
         className="management-card management-primary-card"
       >
-        <div className="management-title"><ChefHat size={20} /><div><strong>Cấu hình bếp</strong><span>{kitchen.cookingCount} đang nấu · {kitchen.waitingCount} đang chờ</span></div><span className={`kitchen-mode-badge ${paused ? 'paused' : automationEnabled ? 'auto' : 'manual'}`}>{paused ? 'Đang tạm dừng' : automationEnabled ? 'Tự động theo thứ tự gọi' : 'Chế độ thủ công'}</span></div>
-        <div className="management-actions"><label>Số phiếu nấu song song<input className={inputClass} type="number" min={1} max={20} value={concurrency} disabled={kitchenBusy} onChange={event => setConcurrency(Number(event.target.value))} /></label><label>Cảnh báo trễ (phút)<input className={inputClass} type="number" min={15} max={1440} value={staleAfterMinutes} disabled={kitchenBusy} onChange={event => setStaleAfterMinutes(Number(event.target.value))} /></label><button type="button" className="management-button" disabled={kitchenBusy} onClick={() => void persistKitchen({ concurrency, staleAfterMinutes })}><Save size={16} /> {kitchenBusy ? 'Đang lưu…' : 'Lưu cấu hình'}</button></div>
+        <div className="management-actions"><label>Số phiếu nấu song song<input className={inputClass} type="number" min={1} max={20} value={concurrency} disabled={kitchenBusy} onChange={event => setConcurrency(Number(event.target.value))} /></label><label>Ngưỡng kiểm tra đồng bộ (phút)<input className={inputClass} type="number" min={15} max={1440} value={staleAfterMinutes} disabled={kitchenBusy} onChange={event => setStaleAfterMinutes(Number(event.target.value))} /></label><button type="button" className="management-button" disabled={kitchenBusy} onClick={() => void persistKitchen({ concurrency, staleAfterMinutes })}><Save size={16} /> {kitchenBusy ? 'Đang lưu…' : 'Lưu cấu hình'}</button></div>
         <div className="kitchen-control-grid">
-          <button type="button" aria-pressed={automationEnabled} className={`kitchen-control ${automationEnabled ? 'active' : ''}`} disabled={kitchenBusy} onClick={() => void persistKitchen({ automationEnabled: !automationEnabled })}><Bot size={18} /><span><strong>Tự động theo thứ tự gọi</strong><small>{automationEnabled ? 'Tự lấy phiếu đến trước' : 'Bật chế độ vận hành tự động'}</small></span></button>
+          <button type="button" aria-pressed={automationEnabled} className={`kitchen-control ${automationEnabled ? 'active' : ''}`} disabled={kitchenBusy} onClick={() => void persistKitchen({ automationEnabled: !automationEnabled })}><Bot size={18} /><span><strong>Tự động theo thứ tự gọi</strong></span></button>
           <button type="button" aria-pressed={paused} className={`kitchen-control ${paused ? 'warning' : ''}`} disabled={kitchenBusy} onClick={() => void persistKitchen({ paused: !paused })}>{paused ? <Play size={18} /> : <Pause size={18} />}<span><strong>{paused ? 'Tiếp tục bếp' : 'Tạm dừng bếp'}</strong><small>Chỉ dừng nhận phiếu; món đang nấu vẫn chạy</small></span></button>
           <button type="button" className="kitchen-control" disabled={!canDispatch} onClick={() => void dispatchNext()}><StepForward size={18} /><span><strong>{kitchenBusy ? 'Đang điều phối…' : 'Lấy phiếu tiếp'}</strong><small>{automationEnabled ? 'Chỉ dùng khi điều phối thủ công' : kitchen.waitingCount === 0 ? 'Không có phiếu đang chờ' : 'Đưa đúng một phiếu đầu hàng chờ vào bếp'}</small></span></button>
         </div>
@@ -503,10 +502,6 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
         aria-labelledby="management-tab-employees"
         className="management-card management-primary-card"
       >
-        <div className="management-title">
-          <UsersRound size={20} />
-          <div><strong>Quản lý nhân viên</strong><span>{employees.filter(row => row.active).length} đang hoạt động · {employees.length} hồ sơ</span></div>
-        </div>
         <select
           className={inputClass}
           value={selectedEmployeeId}
@@ -558,7 +553,6 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
         aria-labelledby="management-tab-tables"
         className="management-card management-primary-card"
       >
-        <div className="management-title"><CirclePlus size={20} /><div><strong>Quản lý bàn & sơ đồ</strong><span>Chọn khu vực; hệ thống tự sắp bàn vào vị trí còn trống</span></div></div>
         <div className="management-row add-row table-add-row">
           <label className="management-table-field table-number-field"><span>Số bàn</span><input aria-label="Số bàn mới" className={inputClass} type="number" min={1} value={newTable.number} onChange={event => setNewTable({ ...newTable, number: Number(event.target.value) })} placeholder="Số bàn" /></label>
           <label className="management-table-field table-seats-field"><span>Số ghế</span><input aria-label="Số ghế bàn mới" className={inputClass} type="number" min={1} value={newTable.seats} onChange={event => setNewTable({ ...newTable, seats: Number(event.target.value) })} placeholder="Số ghế" /></label>
@@ -576,7 +570,6 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
         className="management-section-stack"
       >
       <section className="management-card management-menu-card management-primary-card">
-        <div className="management-title"><UtensilsCrossed size={20} /><div><strong>Thực đơn & thời gian nấu</strong><span>Giá và thời gian áp dụng cho lượt gọi mới</span></div></div>
         <select className={inputClass} value={selectedItemId} onChange={event => { const id = event.target.value; setSelectedItemId(id); if (id === 'new') setDish({ ...emptyDish, categoryId: categories[0]?.id ?? '' }); }}><option value="new">＋ Thêm món mới</option>{menuItems.map(item => <option key={item.id} value={item.id}>{item.name} — {formatVND(item.price)}{!item.available ? ' (ngừng bán)' : ''}</option>)}</select>
         <div className="management-form-grid">
           <label>Tên món<input className={inputClass} value={dish.name ?? ''} onChange={event => setDish({ ...dish, name: event.target.value })} /></label>
@@ -595,7 +588,78 @@ export function ManagementPanel({ tables, categories, menuItems, kitchen, onChan
         <div className="management-actions"><button className="management-button" onClick={() => void persistDish()}><Save size={16} /> Lưu món</button>{dish.id && <button className="management-button secondary" onClick={() => void deactivate()}><Trash2 size={16} /> Ngừng bán</button>}</div>
       </section>
 
-      <section className="management-card compact"><div className="management-title"><CirclePlus size={20} /><div><strong>Thêm danh mục</strong><span>Tạo nhóm món cho thực đơn</span></div></div><div className="management-row add-row"><input className={inputClass} value={newCategory.emoji} onChange={event => setNewCategory({ ...newCategory, emoji: event.target.value })} aria-label="Biểu tượng" /><input className={inputClass} value={newCategory.name} onChange={event => setNewCategory({ ...newCategory, name: event.target.value })} placeholder="Tên danh mục" /><button className="management-button" onClick={() => void addCategory()}>Thêm</button></div></section>
+      <section className="management-card compact" aria-label="Thêm danh mục"><div className="management-row add-row"><input className={inputClass} value={newCategory.emoji} onChange={event => setNewCategory({ ...newCategory, emoji: event.target.value })} aria-label="Biểu tượng danh mục" /><input className={inputClass} value={newCategory.name} onChange={event => setNewCategory({ ...newCategory, name: event.target.value })} placeholder="Tên danh mục" aria-label="Tên danh mục" /><button className="management-button" onClick={() => void addCategory()}>Thêm danh mục</button></div></section>
+
+      <section className="management-card management-menu-inventory" aria-labelledby="management-menu-inventory-title">
+        <div className="management-inventory-heading">
+          <div>
+            <h2 id="management-menu-inventory-title">Số lượng món hôm nay</h2>
+            <p>Chọn một món để xem hoặc chỉnh sửa thông tin.</p>
+          </div>
+          <span>{menuItems.length} món</span>
+        </div>
+
+        {menuItems.length === 0 ? (
+          <p className="management-inventory-empty">Chưa có món trong thực đơn.</p>
+        ) : (
+          <>
+            <div className="management-inventory-columns" aria-hidden="true">
+              <span>Món ăn</span>
+              <span>Giới hạn/ngày</span>
+              <span>Đã dùng</span>
+              <span>Còn lại</span>
+              <span>Trạng thái</span>
+            </div>
+            <div className="management-inventory-list" role="list">
+              {menuItems.map(item => {
+                const dailyUsed = Math.max(0, Number(item.dailyUsed ?? 0));
+                const dailyRemaining = item.dailyLimit == null
+                  ? null
+                  : Math.max(0, Number(item.dailyRemaining ?? item.dailyLimit - dailyUsed));
+                const inventoryState = !item.available
+                  ? { label: 'Ngừng bán', tone: 'inactive' }
+                  : dailyRemaining === 0
+                    ? { label: 'Hết hôm nay', tone: 'sold-out' }
+                    : { label: 'Đang phục vụ', tone: 'available' };
+                const category = categories.find(row => row.id === item.categoryId);
+
+                return (
+                  <div key={item.id} role="listitem" className="management-inventory-row">
+                    <button
+                      type="button"
+                      className={`management-inventory-item${selectedItemId === item.id ? ' selected' : ''}`}
+                      aria-pressed={selectedItemId === item.id}
+                      aria-label={`${item.name}: ${inventoryState.label}, đã dùng ${dailyUsed} phần${dailyRemaining == null ? ', không giới hạn số phần' : `, còn ${dailyRemaining} trên ${item.dailyLimit} phần`}`}
+                      onClick={() => {
+                        setSelectedItemId(item.id);
+                        setDish(item);
+                      }}
+                    >
+                      <span className="management-inventory-identity">
+                        <strong>{item.name}</strong>
+                        <small>{category ? `${category.emoji} ${category.name}` : 'Chưa phân loại'}</small>
+                      </span>
+                      <span className="management-inventory-metric">
+                        <small>Giới hạn/ngày</small>
+                        <strong>{item.dailyLimit == null ? 'Không giới hạn' : `${item.dailyLimit} phần`}</strong>
+                      </span>
+                      <span className="management-inventory-metric">
+                        <small>Đã dùng</small>
+                        <strong>{dailyUsed} phần</strong>
+                      </span>
+                      <span className="management-inventory-metric">
+                        <small>Còn lại</small>
+                        <strong>{dailyRemaining == null ? 'Không giới hạn' : `${dailyRemaining} phần`}</strong>
+                      </span>
+                      <span className={`management-inventory-state ${inventoryState.tone}`}>{inventoryState.label}</span>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </section>
       </div>}
       {confirmation && (
         <ConfirmationDialog

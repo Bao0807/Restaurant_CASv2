@@ -1,5 +1,5 @@
 import { useSyncExternalStore, type CSSProperties } from 'react';
-import { BellRing, Clock3, Flame, TriangleAlert } from 'lucide-react';
+import { BellRing, Clock3, Flame } from 'lucide-react';
 import type { Table } from '../data';
 import { getServerNowMs } from '../services/api';
 
@@ -70,14 +70,13 @@ export function OrderTimer({ table, compact = false }: { table: Table; compact?:
   const expectedMinutes = Math.max(1, table.estimatedCookMinutes ?? 10);
   const expectedMilliseconds = expectedMinutes * 60_000;
   const remainingMilliseconds = expectedMilliseconds - elapsedMilliseconds;
-  const overdue = cooking && remainingMilliseconds < 0;
+  const etaReached = cooking && remainingMilliseconds <= 0;
   const progress = cooking ? Math.min(100, Math.max(0, (elapsedMilliseconds / expectedMilliseconds) * 100)) : 0;
-  const distanceLabel = Math.abs(remainingMilliseconds) < 60_000
-    ? '<1 phút'
-    : `${Math.ceil(Math.abs(remainingMilliseconds) / 60_000)} phút`;
-  const primaryText = overdue
-    ? `Quá ${distanceLabel}`
-    : `Còn ${distanceLabel}`;
+  const distanceLabel = remainingMilliseconds < 60_000
+    ? 'dưới 1 phút'
+    : `${Math.ceil(remainingMilliseconds / 60_000)} phút`;
+  const primaryText = etaReached ? 'Đang hoàn tất…' : `Còn khoảng ${distanceLabel}`;
+  const displayedCookingElapsed = etaReached ? formatElapsed(expectedMilliseconds) : elapsed;
   const timerStyle = { '--order-timer-progress': `${progress}%` } as CSSProperties;
 
   if (!cooking) {
@@ -86,29 +85,33 @@ export function OrderTimer({ table, compact = false }: { table: Table; compact?:
         className={`order-timer order-timer--waiting${compact ? ' order-timer--compact' : ''}`}
         role="timer"
         aria-label={`Bàn đã chờ bếp ${elapsed}${table.queuePosition ? `, thứ ${table.queuePosition} trong hàng chờ` : ''}`}
-        title={`Đã chờ bếp ${elapsed}${table.queuePosition ? ` · thứ ${table.queuePosition} trong hàng chờ` : ''}`}
+        title={`Đã chờ bếp ${elapsed}${table.queuePosition ? ` · Thứ ${table.queuePosition} trong hàng chờ` : ''}`}
       >
         <Clock3 size={compact ? 12 : 14} aria-hidden="true" />
         <span>Đã chờ {elapsed}</span>
-        {table.queuePosition ? <small>Thứ {table.queuePosition}</small> : null}
+        {table.queuePosition ? <small>· Thứ tự {table.queuePosition}</small> : null}
       </span>
     );
   }
 
   return (
     <span
-      className={`order-timer order-timer--cooking${overdue ? ' order-timer--overdue' : ''}${compact ? ' order-timer--compact' : ''}`}
+      className={`order-timer order-timer--cooking${etaReached ? ' order-timer--finishing' : ''}${compact ? ' order-timer--compact' : ''}`}
       style={timerStyle}
       role="timer"
-      aria-label={`${overdue ? `Đã quá thời gian dự kiến ${distanceLabel}` : `${primaryText} để hoàn tất`}. Đã nấu ${elapsed} trên dự kiến ${expectedMinutes} phút.`}
-      title={`${primaryText} · Đã nấu ${elapsed} / dự kiến ${expectedMinutes} phút`}
+      aria-label={etaReached
+        ? 'Đã đủ thời gian nấu. Đang đồng bộ trạng thái hoàn tất với bếp.'
+        : `${primaryText} để hoàn tất. Đã nấu ${displayedCookingElapsed} trên dự kiến ${expectedMinutes} phút.`}
+      title={etaReached
+        ? 'Đã đủ ETA · Đang đồng bộ trạng thái hoàn tất'
+        : `${primaryText} · Đã nấu ${displayedCookingElapsed} / dự kiến ${expectedMinutes} phút`}
     >
       <span className="order-timer__summary">
-        {overdue
-          ? <TriangleAlert size={compact ? 12 : 14} aria-hidden="true" />
+        {etaReached
+          ? <Clock3 size={compact ? 12 : 14} aria-hidden="true" />
           : <Flame size={compact ? 12 : 14} aria-hidden="true" />}
         <strong>{primaryText}</strong>
-        <small>Đã nấu {elapsed} / {expectedMinutes} phút</small>
+        <small>Đã nấu {displayedCookingElapsed} / {expectedMinutes} phút</small>
       </span>
       <span
         className="order-timer__track"
@@ -117,7 +120,9 @@ export function OrderTimer({ table, compact = false }: { table: Table; compact?:
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={Math.round(progress)}
-        aria-valuetext={overdue ? `Đã vượt dự kiến ${distanceLabel}` : `${Math.round(progress)} phần trăm, ${primaryText.toLocaleLowerCase('vi-VN')}`}
+        aria-valuetext={etaReached
+          ? 'Đã đủ thời gian nấu, đang đồng bộ trạng thái hoàn tất'
+          : `${Math.round(progress)} phần trăm, ${primaryText.toLocaleLowerCase('vi-VN')}`}
       >
         <span className="order-timer__progress" />
       </span>

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowLeft, ShoppingCart, Plus, Minus, X, Star, Sparkles, ChevronRight } from 'lucide-react';
+import { ArrowLeft, ShoppingCart, Plus, Minus, X, Star, Sparkles, ChevronRight, Package } from 'lucide-react';
 import {
   STATUS_CONFIG,
   CartItem, MenuCategory, MenuItem, MenuItemSize, Topping, Table,
@@ -95,22 +95,32 @@ function useAccessibleSheet(onClose: () => void) {
 
 function ItemCustomizerModal({
   state,
-  maxQuantity,
+  availableQuantity,
   onClose,
   onAdd,
 }: {
   state: CustomizerState;
-  maxQuantity: number;
+  availableQuantity: number | null;
   onClose: () => void;
   onAdd: (state: CustomizerState) => void;
 }) {
   const { dialogRef, initialFocusRef } = useAccessibleSheet(onClose);
+  const maxQuantity = Math.max(0, Math.min(99, availableQuantity ?? 99));
   const [qty, setQty] = useState(Math.min(state.quantity, Math.max(1, maxQuantity)));
   const [size, setSize] = useState<MenuItemSize | undefined>(state.selectedSize);
   const [toppings, setToppings] = useState<Topping[]>(state.selectedToppings);
   const [note, setNote] = useState(state.note);
 
   const { item } = state;
+  const dailyLimit = item.dailyLimit == null ? null : Math.max(0, Number(item.dailyLimit));
+  const lowStockThreshold = dailyLimit == null ? 0 : Math.max(5, Math.ceil(dailyLimit * 0.15));
+  const isSoldOut = availableQuantity != null && availableQuantity <= 0;
+  const isLowStock = availableQuantity != null && availableQuantity > 0 && availableQuantity <= lowStockThreshold;
+  const stockColors = isSoldOut
+    ? { background: '#FEF2F2', border: '#FECACA', color: '#B91C1C' }
+    : isLowStock
+      ? { background: '#FFFBEB', border: '#FDE68A', color: '#B45309' }
+      : { background: '#ECFDF5', border: '#A7F3D0', color: '#047857' };
   const sizeExtra = size?.extraPrice ?? 0;
   const toppingExtra = toppings.reduce((s, t) => s + t.price, 0);
   const lineTotal = (item.price + sizeExtra + toppingExtra) * qty;
@@ -182,8 +192,29 @@ function ItemCustomizerModal({
           <p style={{ margin: '0 0 14px', color: '#6B7280', fontSize: '13px', lineHeight: 1.5 }}>
             {item.description}
           </p>
-          <div style={{ fontSize: '20px', fontWeight: 700, color: '#F97316', marginBottom: 16 }}>
-            {formatVND(item.price)}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 16 }}>
+            <div style={{ fontSize: '20px', fontWeight: 700, color: '#F97316' }}>
+              {formatVND(item.price)}
+            </div>
+            <div
+              role="status"
+              aria-label={availableQuantity == null
+                ? 'Số lượng món không giới hạn trong ngày'
+                : `Còn ${availableQuantity} trên ${dailyLimit ?? availableQuantity} phần có thể gọi hôm nay`}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                padding: '7px 10px', borderRadius: 999,
+                background: stockColors.background, border: `1px solid ${stockColors.border}`,
+                color: stockColors.color, fontSize: '12px', fontWeight: 750,
+              }}
+            >
+              <Package size={15} aria-hidden="true" />
+              {availableQuantity == null
+                ? 'Không giới hạn số phần'
+                : isSoldOut
+                  ? 'Đã hết món hôm nay'
+                  : `Còn ${availableQuantity}/${dailyLimit ?? availableQuantity} phần hôm nay`}
+            </div>
           </div>
 
           {/* Size selection */}
@@ -330,12 +361,6 @@ function ItemCustomizerModal({
           <div style={{ margin: '-4px 0 12px', textAlign: 'right', color: '#1D4ED8', fontSize: 11, fontWeight: 700 }}>
             Nấu dự kiến: {item.cookMinutes ?? 10} phút × {qty} = {(item.cookMinutes ?? 10) * qty} phút
           </div>
-          {item.dailyLimit != null && (
-            <div style={{ margin: '-5px 0 12px', textAlign: 'right', color: maxQuantity > 0 ? '#047857' : '#B91C1C', fontSize: 11, fontWeight: 800 }}>
-              {maxQuantity > 0 ? `Có thể chọn tối đa ${maxQuantity} phần` : 'Món đã hết trong ngày'}
-            </div>
-          )}
-
           <button
             data-action="save-cart-item"
             onClick={() => onAdd({ item, editCartId: state.editCartId, quantity: qty, selectedSize: size, selectedToppings: toppings, note })}
@@ -792,14 +817,13 @@ export function MenuStep({ table, cart, categories, menuItems, isAddition, isEdi
       {customizer && (
         <ItemCustomizerModal
           state={{ ...customizer, item: menuItems.find(item => item.id === customizer.item.id) ?? customizer.item }}
-          maxQuantity={Math.max(0, Math.min(
-            99,
-            (() => {
-              const latest = menuItems.find(item => item.id === customizer.item.id) ?? customizer.item;
-              const allowance = menuItemDailyAllowance(latest, inventoryCredits[latest.id] ?? 0);
-              return allowance == null ? 99 : allowance - cartQuantityForMenuItem(cart, latest.id);
-            })(),
-          ))}
+          availableQuantity={(() => {
+            const latest = menuItems.find(item => item.id === customizer.item.id) ?? customizer.item;
+            const allowance = menuItemDailyAllowance(latest, inventoryCredits[latest.id] ?? 0);
+            return allowance == null
+              ? null
+              : Math.max(0, allowance - cartQuantityForMenuItem(cart, latest.id));
+          })()}
           onClose={closeMenuOverlay}
           onAdd={handleAdd}
         />

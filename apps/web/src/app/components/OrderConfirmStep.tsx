@@ -1,5 +1,5 @@
 import { ArrowLeft, Pencil, Trash2, X, Minus, Plus, Save, AlertCircle, Clock3 } from 'lucide-react';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import {
   Table, CartItem, MenuItem, cartEstimatedCookMinutes, cartItemCookMinutes,
   cartItemTotal, cartQuantityForMenuItem, cartTotal, formatVND, getCartStockIssues,
@@ -22,6 +22,7 @@ interface OrderConfirmStepProps {
 export function OrderConfirmStep({ table, cart, isAddition, isEditing, menuItems, inventoryCredits, onCartChange, onBack, onEdit, onPlaceOrder }: OrderConfirmStepProps) {
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const submitLockRef = useRef(false);
   const cfg = STATUS_CONFIG[table.status];
   const total = cartTotal(cart);
   const estimatedCookMinutes = cartEstimatedCookMinutes(cart);
@@ -29,13 +30,17 @@ export function OrderConfirmStep({ table, cart, isAddition, isEditing, menuItems
   const stockIssues = getCartStockIssues(cart, menuItems, inventoryCredits);
 
   const handlePlaceOrder = async () => {
-    if (submitting || stockIssues.length > 0) return;
+    // State React chỉ cập nhật ở render kế tiếp; ref khóa ngay trong cùng tick để
+    // double-click/tap không tạo hai phiếu trước khi nút kịp chuyển sang disabled.
+    if (submitLockRef.current || stockIssues.length > 0) return;
+    submitLockRef.current = true;
     setSubmitting(true);
     try {
       await onPlaceOrder();
     } catch {
       // App hiển thị thông báo lỗi và giữ nguyên order để người dùng thử lại.
     } finally {
+      submitLockRef.current = false;
       setSubmitting(false);
     }
   };

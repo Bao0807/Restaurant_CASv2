@@ -30,6 +30,7 @@ import { isKitchenOrderStale, lockKitchenQueue, processKitchenQueue, promoteKitc
 import {
   canCancelOrder,
   canPayOrder,
+  isSameOrderSubmission,
   isOrderComplete,
   paymentRequiresDepartureConfirmation,
 } from './orderPolicy.js';
@@ -796,6 +797,9 @@ app.patch('/api/reservations/:reservationId/status', requireDatabase, asyncRoute
 
 // Snapshot này là nguồn sự thật duy nhất để UI đồng bộ bàn, order và queue.
 app.get('/api/operations', requireDatabase, asyncRoute(async (_req, res) => {
+  // Read-repair trước snapshot: nếu timer nền vừa bị gián đoạn/restart, request
+  // kế tiếp vẫn hoàn tất batch đủ ETA và cấp lại slot FIFO trước khi UI đọc.
+  await processKitchenQueue(getPool());
   const connection = await getPool().getConnection();
   try {
     // Một repeatable-read snapshot tránh ghép trạng thái bàn cũ với queue mới giữa chu kỳ bếp.
@@ -1025,6 +1029,38 @@ app.put('/api/orders/:tableId', requireDatabase, asyncRoute(async (req, res) => 
       throw httpError(409, 'ORDER_ALREADY_PAID', 'Bàn đã thanh toán nên không thể gọi thêm món.');
     }
     if (table.orderId && !append) {
+      const [initialBatches] = await connection.query(
+        `SELECT id AS batchId, batch_number AS batchNumber, items, status,
+          queued_at AS queuedAt, cooking_started_at AS cookingStartedAt,
+          estimated_cook_minutes AS estimatedCookMinutes,
+          DATE_FORMAT(inventory_date, '%Y-%m-%d') AS inventoryDate
+         FROM order_batches
+         WHERE order_id = ? AND table_id = ? AND batch_number = 1 AND is_addition = FALSE
+         LIMIT 1 FOR UPDATE`,
+        [table.orderId, table.id],
+      );
+      const initialBatch = initialBatches[0];
+      const initialItems = parseJsonColumn(initialBatch?.items, []);
+      if (initialBatch && isSameOrderSubmission(validatedItems, initialItems)) {
+        await connection.commit();
+        res.json({
+          ok: true,
+          idempotent: true,
+          orderNumber: Number(table.orderId),
+          batchId: Number(initialBatch.batchId),
+          batchNumber: Number(initialBatch.batchNumber),
+          isAddition: false,
+          status: initialBatch.status,
+          queuedAt: new Date(initialBatch.queuedAt).toISOString(),
+          ...(initialBatch.cookingStartedAt
+            ? { cookingStartedAt: new Date(initialBatch.cookingStartedAt).toISOString() }
+            : {}),
+          estimatedCookMinutes: Number(initialBatch.estimatedCookMinutes),
+          inventoryDate: initialBatch.inventoryDate,
+          items: initialItems,
+        });
+        return;
+      }
       throw httpError(409, 'ORDER_ALREADY_EXISTS', 'Bàn đã có món. Hãy dùng thao tác gọi thêm món.');
     }
 

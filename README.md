@@ -65,7 +65,7 @@ npm run dev:web
 
 | Quality gate gần nhất | Kết quả ngày 21/07/2026 |
 |---|---:|
-| Unit test backend | `30/30` đạt |
+| Unit test backend | `31/31` đạt |
 | Database audit read-only | `33/33` nhóm đạt |
 | TypeScript | Đạt |
 | Production build | Đạt |
@@ -124,7 +124,7 @@ Các kết quả trên có thể tái lập bằng lệnh trong [Scripts và ki�
 - **Đặt bàn:** kiểm tra sức chứa và chồng lịch trong transaction; hỗ trợ `booked`, `seated`, `completed`, `cancelled` và `no_show`.
 - **Order theo lượt:** `active_orders` giữ bill tổng hợp, còn mỗi lần gọi tạo một `order_batch` FIFO riêng để sửa, in và điều phối bếp.
 - **Hạn mức món theo ngày:** giữ số phần khi gửi bếp, cập nhật chênh lệch khi sửa phiếu chờ, hoàn khi hủy order toàn `waiting` và tự dùng bucket mới theo `BUSINESS_TIME_ZONE`.
-- **Bếp:** FIFO, giới hạn số batch nấu song song, tự động/thủ công/tạm dừng, tự hoàn tất theo ETA, cảnh báo quá hạn và chống thao tác từ snapshot cũ bằng `batchId/version`.
+- **Bếp:** FIFO, giới hạn số batch nấu song song, tự động/thủ công/tạm dừng, tự hoàn tất theo ETA, phát hiện lỗi đồng bộ và chống thao tác từ snapshot cũ bằng `batchId/version`.
 - **ETA tin cậy:** backend tính từ catalog MySQL theo `cookMinutes × quantity`; timer giao diện hiệu chỉnh bằng `serverNow`.
 - **Thanh toán:** tiền mặt, thẻ hoặc QR; trả sau đóng bàn ngay, trả trước giữ queue và bàn đến khi nhân viên xác nhận khách rời.
 - **In ấn:** phiếu bếp 80 mm riêng cho từng lượt gọi và hóa đơn A4 tổng hợp cố định.
@@ -261,7 +261,7 @@ Chỉnh `apps/api/.env` trước khi chạy. Không commit `.env`; các file nà
 | `AUTH_USERNAME` | `admin` | Tài khoản POS |
 | `AUTH_PASSWORD` | bắt buộc đổi | Mật khẩu dài và ngẫu nhiên |
 | `KITCHEN_CONCURRENCY` | `2` | Công suất bếp khởi tạo |
-| `KITCHEN_STALE_MINUTES` | `120` | Khoảng gia hạn sau ETA trước khi cảnh báo batch quá hạn |
+| `KITCHEN_STALE_MINUTES` | `120` | Ngưỡng chẩn đoán batch không tự đồng bộ sau ETA |
 | `BUSINESS_TIME_ZONE` | `Asia/Ho_Chi_Minh` | Múi giờ xác định ngày kinh doanh và thời điểm đặt lại số phần món |
 | `DB_HOST` | `127.0.0.1` | Máy chủ MySQL |
 | `DB_PORT` | `3306` | Cổng MySQL |
@@ -421,7 +421,7 @@ Development cho phép `localhost`, `127.x`, IPv6 loopback, `10.x`, `192.168.x` v
 14. Trạng thái order không được ép qua CRUD bàn; mọi chuyển trạng thái phải đi qua action queue để không vượt công suất bếp.
 15. Hoàn tất/đưa lại hàng chờ phải gửi đúng `expectedBatchId`; retry, bấm kép hoặc client dùng snapshot cũ không thể tác động nhầm phiếu kế tiếp.
 16. Cấu hình bếp được cập nhật từng phần bằng `PATCH` kèm `expectedVersion`; backend khóa singleton và trả `409` nếu máy POS đang dùng phiên bản cũ, tránh ghi đè công suất/chế độ vừa được máy khác thay đổi.
-17. Mỗi snapshot trả `serverNow`; frontend ước lượng độ lệch theo điểm giữa thời gian gửi–nhận request và dùng đồng hồ server đã hiệu chỉnh cho timer. Batch chỉ bị cảnh báo stale sau `ETA + KITCHEN_STALE_MINUTES`, không cảnh báo ngay khi vừa hết ETA.
+17. Mỗi snapshot trả `serverNow`; frontend dùng đồng hồ server đã hiệu chỉnh cho timer và yêu cầu đồng bộ ngay tại ETA. API cũng catch-up queue trước khi trả `/api/operations`, nên giao diện không tạo trạng thái “quá nấu”; ngưỡng `KITCHEN_STALE_MINUTES` chỉ dùng chẩn đoán sự cố không tự đồng bộ.
 
 ### Đặt bàn trước
 
@@ -485,7 +485,7 @@ Mọi endpoint `/api/*`, trừ health, đều yêu cầu Basic Auth trong produc
 | `PUT/DELETE` | `/api/categories/:categoryId` | Sửa hoặc ngừng dùng danh mục |
 | `POST` | `/api/menu-items` | Tạo món |
 | `PUT/DELETE` | `/api/menu-items/:itemId` | Sửa/ngừng bán món và cấu hình `dailyLimit` (`null` = không giới hạn, `0..1000000` = hạn mức/ngày) |
-| `GET` | `/api/operations` | Snapshot nhất quán gồm `serverNow`, bàn/`nextReservation`, order, batch, cấu hình bếp, trạng thái thanh toán và `menuAvailability[]` để đồng bộ `dailyUsed/dailyRemaining` giữa các máy POS |
+| `GET` | `/api/operations` | Catch-up batch đủ ETA/FIFO rồi trả snapshot nhất quán gồm `serverNow`, bàn/`nextReservation`, order, batch, cấu hình bếp, thanh toán và `menuAvailability[]` |
 | `PUT` | `/api/orders/:tableId` | Tạo lượt đầu hoặc gọi thêm với body `{ items, append }`; giữ số phần theo ngày trong transaction |
 | `PUT` | `/api/orders/:tableId/batches/:batchId` | Sửa đúng một phiếu bếp còn chờ, không đổi FIFO và cập nhật chênh lệch số phần |
 | `POST` | `/api/orders/:tableId/requeue` | Đưa đúng `expectedBatchId` đang nấu về cuối queue |
@@ -530,14 +530,14 @@ npm audit --audit-level=high
 
 Phạm vi unit test hiện tại:
 
-- `30/30` test nghiệp vụ đang đạt.
+- `31/31` test nghiệp vụ đang đạt.
 - Canonicalization catalog và chống giả giá/topping.
 - Validation category, menu, quantity, VAT và thời gian nấu.
 - Hạn mức món theo ngày: xác định ngày kinh doanh, gộp số lượng cùng món, giữ đúng phần cuối, từ chối vượt mức, điều chỉnh khi sửa phiếu chờ và hoàn khi hủy.
 - ETA theo số lượng và lấy dòng lâu nhất.
 - Queue batch đủ slot, pause, manual và automatic.
 - Tự hoàn tất tất cả batch chạy đủ ETA và đồng bộ lại trạng thái bàn.
-- Cảnh báo batch stale chỉ sau ETA cộng khoảng gia hạn cấu hình.
+- Tự catch-up batch đủ ETA kể cả khi bếp đang tạm dừng; cảnh báo chẩn đoán chỉ dùng khi trạng thái không tự đồng bộ.
 - Công thức payment và thời gian server.
 - Validation nhân viên, vai trò, ca làm và mã nhân viên.
 - Chuẩn hóa lịch đặt bàn, số điện thoại, thời lượng, sức chứa, phát hiện overlap và các chuyển trạng thái hợp lệ/không hợp lệ.

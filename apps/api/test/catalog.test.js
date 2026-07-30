@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { canonicalizeOrderItems, estimateCookMinutes, normalizeCategory, normalizeMenuItem } from '../src/catalog.js';
-import { completeExpiredKitchenBatches, isKitchenOrderStale, promoteKitchenQueue } from '../src/kitchenQueue.js';
+import { completeExpiredKitchenBatches, isKitchenOrderStale, processKitchenQueue, promoteKitchenQueue } from '../src/kitchenQueue.js';
 
 const catalogRow = {
   id: 'm1', name: 'Phở bò', description: 'Món thử', price: 65_000, image: '',
@@ -94,8 +94,35 @@ test('tự hoàn tất mọi batch đã chạy đủ ETA và đồng bộ trạn
 
   const completed = await completeExpiredKitchenBatches(connection);
   assert.deepEqual(completed.map(batch => batch.batchId), [21, 22]);
+  assert.match(calls[0].sql, /TIMESTAMPADD\(MINUTE, estimated_cook_minutes, cooking_started_at\) <= CURRENT_TIMESTAMP\(3\)/);
   assert.deepEqual(calls[1].params, [21, 22]);
   assert.match(calls[2].sql, /SUM\(status = 'cooking'\)/);
+});
+
+test('chu kỳ bếp vẫn tự hoàn tất batch đủ ETA khi bếp tạm dừng', async () => {
+  const calls = [];
+  const connection = {
+    async beginTransaction() { calls.push('begin'); },
+    async commit() { calls.push('commit'); },
+    async rollback() { calls.push('rollback'); },
+    release() { calls.push('release'); },
+    async query(sql) {
+      calls.push(sql);
+      if (sql.includes('FROM kitchen_queue_state')) {
+        return [[{ concurrency: 2, staleAfterMinutes: 120, automationEnabled: 1, paused: 1, version: 1 }]];
+      }
+      if (sql.includes('SELECT id AS batchId')) return [[{ batchId: 31, tableId: 't3' }]];
+      if (sql.includes('UPDATE order_batches')) return [{ affectedRows: 1 }];
+      if (sql.includes('UPDATE restaurant_tables')) return [{ affectedRows: 1 }];
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+  };
+  const pool = { async getConnection() { return connection; } };
+
+  assert.deepEqual(await processKitchenQueue(pool), []);
+  assert.equal(calls.includes('rollback'), false);
+  assert.equal(calls.filter(call => typeof call === 'string' && call.includes("SET status = 'done'")).length, 1);
+  assert.deepEqual(calls.slice(-2), ['commit', 'release']);
 });
 
 test('queue không tự lấy món khi tạm dừng hoặc chuyển sang thủ công', async () => {
