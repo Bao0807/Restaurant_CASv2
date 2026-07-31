@@ -286,7 +286,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   --operations-motion: 180ms ease;
   width: min(100%,1560px); min-width: 0; min-height: 100%; margin-inline: auto;
   padding: clamp(8px,1.2vw,16px) clamp(12px,2vw,28px) 110px;
-  display: grid; gap: 10px; background: var(--operations-canvas); color: var(--operations-text);
+  display: grid; align-content: start; grid-auto-rows: max-content; gap: 10px;
+  background: var(--operations-canvas); color: var(--operations-text);
 }
 .table-operations-page .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;

@@ -19,4 +19,18 @@ test('quản lý đăng nhập bằng session cookie và nhìn thấy đúng đi
   const session = cookies.find(cookie => cookie.name === 'cas_session');
   expect(session?.httpOnly).toBe(true);
   expect(session?.sameSite).toBe('Strict');
+
+  const toolbar = page.locator('.table-operations-toolbar');
+  const filters = page.locator('.table-filter-row');
+  const initialToolbarBox = await toolbar.boundingBox();
+  const initialFilterBox = await filters.boundingBox();
+
+  const cookingFilter = page.locator('.table-filter-chip.filter-cooking');
+  await cookingFilter.click();
+  await expect(cookingFilter).toHaveAttribute('aria-pressed', 'true');
+
+  const filteredToolbarBox = await toolbar.boundingBox();
+  const filteredFilterBox = await filters.boundingBox();
+  expect(filteredToolbarBox?.height).toBe(initialToolbarBox?.height);
+  expect(filteredFilterBox?.height).toBe(initialFilterBox?.height);
 });
