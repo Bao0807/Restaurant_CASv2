@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import {
+  useEffect, useMemo, useRef, useState,
+  type KeyboardEvent as ReactKeyboardEvent, type ReactNode,
+} from 'react';
 import {
   ArrowRight, X, CreditCard, Banknote, QrCode, CheckCircle, Users,
   Printer, ReceiptText, BadgeCheck, History, Search, ChevronDown, ChevronUp,
-  SlidersHorizontal,
+  SlidersHorizontal, LogOut,
 } from 'lucide-react';
 import {
   Table, CartItem, Employee, PaymentMethodId, PaymentReceiptDetails, PaymentRecord, PaymentResult,
@@ -20,6 +23,7 @@ import {
 import { OrderTimer } from './OrderTimer';
 import { fetchEmployees, fetchPaymentReceipt, getServerNowMs } from '../services/api';
 import { PaymentHistoryPanel } from './payment/PaymentHistoryPanel';
+import { ConfirmationDialog } from './ConfirmationDialog';
 import '../../styles/payment.css';
 
 interface PaymentPageProps {
@@ -28,6 +32,7 @@ interface PaymentPageProps {
   payments: PaymentRecord[];
   settings: RestaurantSettings;
   onProcessPayment: (payment: PaymentRecord, items: CartItem[]) => Promise<PaymentResult>;
+  onConfirmDeparture: (tableId: string) => Promise<void>;
 }
 
 const PAYMENT_HISTORY_KEY = 'casPaymentTableId';
@@ -192,7 +197,7 @@ function InvoicePreviewContent({
           <span>{data.invoiceCode} · {formatVND(data.total)}</span>
           {supportingText && <small>{supportingText}</small>}
         </div>
-        <div className="payment-print-format" aria-label="Khổ in hóa đơn">
+        <div className="payment-print-format" role="group" aria-label="Khổ in hóa đơn">
           <button
             type="button"
             className={format === 'a4' ? 'active' : ''}
@@ -687,11 +692,16 @@ function BillPanel({
                 <div className="payment-method-label">
                   Phương thức thanh toán
                 </div>
-                <div className="payment-method-options">
+                <div
+                  className="payment-method-options"
+                  role="group"
+                  aria-label="Phương thức thanh toán"
+                >
                   {enabledMethods.map(item => {
                     const selected = selectedMethod === item.id;
                     return (
                       <button
+                        type="button"
                         key={item.id}
                         onClick={() => setMethod(item.id)}
                         aria-pressed={selected}
@@ -726,7 +736,11 @@ function BillPanel({
                       />
                       <span>đ</span>
                     </div>
-                    <div className="payment-cash-suggestions" aria-label="Số tiền khách đưa thường dùng">
+                    <div
+                      className="payment-cash-suggestions"
+                      role="group"
+                      aria-label="Số tiền khách đưa thường dùng"
+                    >
                       {cashSuggestions.map(value => (
                         <button type="button" key={value} onClick={() => setCashReceivedInput(String(value))}>
                           {formatVND(value)}
@@ -776,7 +790,14 @@ function BillPanel({
   );
 }
 
-export function PaymentPage({ tables, tableOrders, payments, settings, onProcessPayment }: PaymentPageProps) {
+export function PaymentPage({
+  tables,
+  tableOrders,
+  payments,
+  settings,
+  onProcessPayment,
+  onConfirmDeparture,
+}: PaymentPageProps) {
   const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
   const [paymentView, setPaymentView] = useState<PaymentView>(() => paymentViewFromHistory());
   const [queueSearch, setQueueSearch] = useState('');
@@ -789,12 +810,15 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
   const [historyReceiptLoading, setHistoryReceiptLoading] = useState<string | null>(null);
   const [historyReceiptError, setHistoryReceiptError] = useState<string | null>(null);
   const [historyPrintFormat, setHistoryPrintFormat] = useState<InvoicePrintFormat>(initialPrintFormat);
-  const paymentTabsRef = useRef<HTMLElement>(null);
+  const [departureTableId, setDepartureTableId] = useState<string | null>(null);
+  const [departureBusy, setDepartureBusy] = useState(false);
+  const paymentTabsRef = useRef<HTMLDivElement>(null);
   const tablesRef = useRef(tables);
   const ordersRef = useRef(tableOrders);
   tablesRef.current = tables;
   ordersRef.current = tableOrders;
   const selectedTable = tables.find(table => table.id === selectedTableId) ?? null;
+  const departureTable = tables.find(table => table.id === departureTableId) ?? null;
 
   useEffect(() => {
     const restoreFromHistory = () => {
@@ -832,6 +856,20 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
     window.requestAnimationFrame(() => paymentTabsRef.current?.scrollIntoView({ block: 'start' }));
   };
 
+  const handlePaymentTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    let nextView: PaymentView | null = null;
+    if (event.key === 'ArrowLeft' || event.key === 'Home') nextView = 'queue';
+    if (event.key === 'ArrowRight' || event.key === 'End') nextView = 'history';
+    if (!nextView) return;
+    event.preventDefault();
+    switchPaymentView(nextView);
+    window.requestAnimationFrame(() => {
+      paymentTabsRef.current
+        ?.querySelector<HTMLButtonElement>(`[data-payment-view="${nextView}"]`)
+        ?.focus();
+    });
+  };
+
   const orderedTables = tables.filter(table => tableOrders[table.id] && tableOrders[table.id].length > 0);
   const unpaidTables = orderedTables
     .filter(table => !table.isPaid)
@@ -857,10 +895,10 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
   const unpaidTotal = unpaidTables.reduce((sum, table) => (
     sum + payableTotal(tableOrders[table.id] || [], settings)
   ), 0);
-  const paymentMethodPreview = METHODS
-    .filter(method => settings.activePaymentMethods.includes(method.id))
-    .map(method => method.label)
-    .join(' · ');
+  const visibleUnpaidTotal = visibleUnpaidTables.reduce((sum, table) => (
+    sum + payableTotal(tableOrders[table.id] || [], settings)
+  ), 0);
+  const queueIsFiltered = queueFilter !== 'all' || normalizedQueueSearch.length > 0;
   const filteredPayments = useMemo(() => {
     const search = historySearch.trim().toLocaleLowerCase('vi-VN');
     return [...payments]
@@ -898,49 +936,116 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
     }
   };
 
+  const confirmDeparture = async () => {
+    if (!departureTableId || departureBusy) return;
+    setDepartureBusy(true);
+    try {
+      await onConfirmDeparture(departureTableId);
+      setDepartureTableId(null);
+    } catch {
+      // App đã hiển thị lỗi; giữ dialog mở để nhân viên có thể thử lại hoặc quay lại.
+    } finally {
+      setDepartureBusy(false);
+    }
+  };
+
   return (
     <div className="payment-page">
       <h1 style={{ position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clip: 'rect(0, 0, 0, 0)', whiteSpace: 'nowrap', border: 0 }}>Thanh toán</h1>
 
       <div className="payment-page-content">
-        <nav ref={paymentTabsRef} className="payment-view-tabs" aria-label="Nội dung thanh toán">
-          <button
-            type="button"
-            className={paymentView === 'queue' ? 'active' : ''}
-            onClick={() => switchPaymentView('queue')}
-            aria-current={paymentView === 'queue' ? 'page' : undefined}
-          >
-            <CreditCard size={17} aria-hidden="true" />
-            <span>Thanh toán</span>
-            <strong>{unpaidTables.length}</strong>
-          </button>
-          <button
-            type="button"
-            className={paymentView === 'history' ? 'active' : ''}
-            onClick={() => switchPaymentView('history')}
-            aria-current={paymentView === 'history' ? 'page' : undefined}
-          >
-            <History size={17} aria-hidden="true" />
-            <span>Lịch sử đơn</span>
-            <strong>{payments.length}</strong>
-          </button>
-        </nav>
+        <div className="payment-page-toolbar">
+          <div ref={paymentTabsRef} className="payment-view-tabs" role="tablist" aria-label="Nội dung thanh toán">
+            <button
+              type="button"
+              id="payment-queue-tab"
+              role="tab"
+              data-payment-view="queue"
+              className={paymentView === 'queue' ? 'active' : ''}
+              onClick={() => switchPaymentView('queue')}
+              onKeyDown={handlePaymentTabKeyDown}
+              aria-controls="payment-queue-panel"
+              aria-selected={paymentView === 'queue'}
+              tabIndex={paymentView === 'queue' ? 0 : -1}
+            >
+              <CreditCard size={17} aria-hidden="true" />
+              <span>Thanh toán</span>
+              <strong>{unpaidTables.length}</strong>
+            </button>
+            <button
+              type="button"
+              id="payment-history-tab"
+              role="tab"
+              data-payment-view="history"
+              className={paymentView === 'history' ? 'active' : ''}
+              onClick={() => switchPaymentView('history')}
+              onKeyDown={handlePaymentTabKeyDown}
+              aria-controls="payment-history-panel"
+              aria-selected={paymentView === 'history'}
+              tabIndex={paymentView === 'history' ? 0 : -1}
+            >
+              <History size={17} aria-hidden="true" />
+              <span>Lịch sử đơn</span>
+              <strong>{payments.length}</strong>
+            </button>
+          </div>
 
-        {paymentView === 'queue' && (
-          <div className="payment-live-content">
-          {unpaidTables.length > 0 && (
-          <section className="payment-unpaid-section" aria-labelledby="payment-unpaid-title">
-            <header className="payment-section-header">
-              <div>
+          {paymentView === 'queue' && (
+            <header className="payment-view-summary">
+              <div className="payment-view-summary-copy">
                 <h2 id="payment-unpaid-title">Chưa thanh toán</h2>
-                <p>{visibleUnpaidTables.length}/{unpaidTables.length} bàn đang hiển thị · bàn đã xong được ưu tiên trước</p>
+                <p aria-live="polite">
+                  {visibleUnpaidTables.length}/{unpaidTables.length} bàn đang hiển thị
+                </p>
               </div>
-              <div className="payment-unpaid-total" aria-label={`Tổng chưa thu ${formatVND(unpaidTotal)}`}>
-                <span>Tổng chưa thu</span>
-                <strong>{formatVND(unpaidTotal)}</strong>
+              <div className="payment-unpaid-totals" aria-live="polite">
+                {queueIsFiltered && (
+                  <div
+                    className="payment-total-metric is-filtered"
+                    aria-label={`Tổng các bàn đang hiển thị ${formatVND(visibleUnpaidTotal)}`}
+                  >
+                    <span>Đang hiển thị</span>
+                    <strong>{formatVND(visibleUnpaidTotal)}</strong>
+                  </div>
+                )}
+                <div
+                  className="payment-total-metric"
+                  aria-label={`Tổng tất cả chưa thu ${formatVND(unpaidTotal)}`}
+                >
+                  <span>Tổng tất cả chưa thu</span>
+                  <strong>{formatVND(unpaidTotal)}</strong>
+                </div>
               </div>
             </header>
+          )}
 
+          {paymentView === 'history' && (
+            <header className="payment-view-summary">
+              <div className="payment-view-summary-copy">
+                <h2 id="payment-history-title">Lịch sử đơn đã thanh toán</h2>
+                <p>Tối đa 100 hóa đơn gần nhất được đồng bộ từ hệ thống</p>
+              </div>
+              <div
+                className="payment-total-metric"
+                aria-live="polite"
+                aria-label={`${filteredPayments.length} hóa đơn, tổng giá trị ${formatVND(filteredPaymentTotal)}`}
+              >
+                <span>{filteredPayments.length} hóa đơn</span>
+                <strong>{formatVND(filteredPaymentTotal)}</strong>
+              </div>
+            </header>
+          )}
+        </div>
+
+        {paymentView === 'queue' && (
+          <div
+            id="payment-queue-panel"
+            className="payment-live-content"
+            role="tabpanel"
+            aria-labelledby="payment-queue-tab"
+          >
+          {unpaidTables.length > 0 && (
+          <section className="payment-unpaid-section" aria-labelledby="payment-unpaid-title">
             <div className="payment-queue-controls">
               <label className="payment-queue-search">
                 <Search size={17} aria-hidden="true" />
@@ -951,12 +1056,16 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
                   placeholder="Tìm số bàn, khu vực hoặc món"
                 />
               </label>
-              <div className="payment-queue-filters" aria-label="Lọc mức sẵn sàng thanh toán">
+              <div
+                className="payment-queue-filters"
+                role="group"
+                aria-label="Lọc bàn theo khả năng thanh toán"
+              >
                 <SlidersHorizontal size={16} aria-hidden="true" />
                 {([
                   ['all', 'Tất cả', unpaidTables.length],
-                  ['ready', 'Sẵn sàng thu', unpaidTables.filter(table => table.status === 'done').length],
-                  ['early', 'Trả trước', unpaidTables.filter(table => table.status !== 'done').length],
+                  ['ready', 'Món đã xong', unpaidTables.filter(table => table.status === 'done').length],
+                  ['early', 'Có thể trả trước', unpaidTables.filter(table => table.status !== 'done').length],
                 ] as Array<[PaymentQueueFilter, string, number]>).map(([id, label, count]) => (
                   <button
                     type="button"
@@ -974,14 +1083,8 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
             <div className="payment-table-list">
               {visibleUnpaidTables.map(table => {
                 const order = tableOrders[table.id] || [];
-                const cfg = STATUS_CONFIG[table.status];
                 const total = payableTotal(order, settings);
                 const readyToClose = table.status === 'done';
-                const rowStyle = {
-                  '--payment-row-border': cfg.border,
-                  '--payment-row-status-bg': cfg.bg,
-                  '--payment-row-status-text': cfg.text,
-                } as CSSProperties;
                 return (
                   <button
                     key={table.id}
@@ -989,15 +1092,14 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
                     className={`payment-table-row${readyToClose ? ' ready-to-close' : ' early-payment'}`}
                     onClick={() => openPayment(table.id)}
                     aria-label={`Thanh toán bàn ${table.number}, ${formatVND(total)}${readyToClose ? ', món đã xong' : ', thanh toán trước khi món hoàn tất'}`}
-                    style={rowStyle}
                   >
                     <span className="payment-table-number">{table.number}</span>
 
                     <span className="payment-table-copy">
                       <span className="payment-table-title">
                         <strong>Bàn {table.number}</strong>
-                        <span className="payment-table-status">
-                          {readyToClose ? 'Sẵn sàng thu' : cfg.label}
+                        <span className={`payment-table-status ${readyToClose ? 'is-ready' : 'is-early'}`}>
+                          {readyToClose ? 'Món đã xong' : 'Có thể trả trước'}
                         </span>
                       </span>
                       <span className="payment-table-meta">
@@ -1013,20 +1115,20 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
                       </span>
                       {!readyToClose && (
                         <span className="payment-table-guidance">
-                          Có thể trả trước · bàn vẫn được giữ cho khách
+                          Bàn vẫn được giữ cho khách sau khi thanh toán
                         </span>
                       )}
                     </span>
 
-                    <span className="payment-table-amount">
-                      <strong>{formatVND(total)}</strong>
-                      <small>{paymentMethodPreview || 'Chọn phương thức ở bước tiếp theo'}</small>
-                    </span>
-
-                    <span className="payment-table-cta" aria-hidden="true">
-                      <CreditCard size={16} />
-                      <strong>Thanh toán</strong>
-                      <ArrowRight size={16} />
+                    <span className="payment-table-action-rail">
+                      <span className="payment-table-amount">
+                        <strong>{formatVND(total)}</strong>
+                      </span>
+                      <span className="payment-table-cta" aria-hidden="true">
+                        <CreditCard size={16} />
+                        <strong>Thanh toán</strong>
+                        <ArrowRight size={16} />
+                      </span>
                     </span>
                   </button>
                 );
@@ -1048,35 +1150,34 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
               type="button"
               className="payment-paid-toggle"
               aria-expanded={showPaidServing}
+              aria-controls="payment-paid-serving-list"
               onClick={() => setShowPaidServing(value => !value)}
             >
               <span>
                 <BadgeCheck size={18} aria-hidden="true" />
                 <span>
-                  <strong id="payment-paid-title">Đã trả trước</strong>
-                  <small>{paidServingTables.length} bàn vẫn đang phục vụ</small>
+                  <strong id="payment-paid-title">Đã thanh toán · đang phục vụ</strong>
+                  <small>{paidServingTables.length} bàn đã thu tiền, chưa giải phóng</small>
                 </span>
               </span>
               {showPaidServing ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
             </button>
-            {showPaidServing && <div className="payment-paid-list">
+            {showPaidServing && (
+              <div id="payment-paid-serving-list" className="payment-paid-list" role="list">
               {paidServingTables.map(table => {
-                const cfg = STATUS_CONFIG[table.status];
                 const order = tableOrders[table.id] || [];
                 const paidTotal = table.paidTotal ?? payableTotal(order, settings);
-                const rowStyle = {
-                  '--payment-row-border': cfg.border,
-                  '--payment-row-status-bg': cfg.bg,
-                  '--payment-row-status-text': cfg.text,
-                } as CSSProperties;
                 return (
-                  <div className="payment-paid-row" key={table.id} style={rowStyle}>
+                  <div
+                    className={`payment-paid-row${table.status === 'done' ? ' is-departure-ready' : ''}`}
+                    key={table.id}
+                    role="listitem"
+                  >
                     <span className="payment-table-number">{table.number}</span>
                     <span className="payment-paid-copy">
                       <span className="payment-table-title">
                         <strong>Bàn {table.number}</strong>
                         <span className="payment-paid-badge"><BadgeCheck size={13} /> Đã thanh toán</span>
-                        <span className="payment-table-status">{cfg.label}</span>
                       </span>
                       <span className="payment-table-meta">
                         <span><Users size={12} aria-hidden="true" /> {table.seats} chỗ</span>
@@ -1084,21 +1185,38 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
                         <OrderTimer table={table} compact />
                       </span>
                       <span className="payment-paid-guidance">
-                        {table.status === 'done' ? 'Món đã xong · chờ nhân viên xác nhận khách rời tại bàn' : 'Bếp vẫn đang chuẩn bị món'}
+                        {table.status === 'done'
+                          ? 'Món đã xong · có thể xác nhận khách rời'
+                          : 'Bếp vẫn đang chuẩn bị món · bàn tiếp tục được giữ'}
                       </span>
                     </span>
-                    <span className="payment-paid-amount">
-                      <strong>{formatVND(paidTotal)}</strong>
-                      <small>
-                        Đã thu
-                        {table.paidAt ? ` lúc ${new Date(table.paidAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}` : ''}
-                        {table.paymentId ? ` · ${table.paymentId}` : ''}
-                      </small>
+                    <span className="payment-paid-action">
+                      <span className="payment-paid-amount">
+                        <span>Đã thu</span>
+                        <strong>{formatVND(paidTotal)}</strong>
+                        <small title={table.paymentId || undefined}>
+                          {table.paidAt
+                            ? `Lúc ${new Date(table.paidAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}`
+                            : 'Đã thanh toán'}
+                          {table.paymentId ? ` · ${table.paymentId}` : ''}
+                        </small>
+                      </span>
+                      {table.status === 'done' && (
+                        <button
+                          type="button"
+                          className="payment-paid-departure"
+                          onClick={() => setDepartureTableId(table.id)}
+                        >
+                          <LogOut size={15} aria-hidden="true" />
+                          Xác nhận khách rời
+                        </button>
+                      )}
                     </span>
                   </div>
                 );
               })}
-            </div>}
+              </div>
+            )}
           </section>
         )}
 
@@ -1115,28 +1233,33 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
         )}
 
         {paymentView === 'history' && (
-          <PaymentHistoryPanel
-            payments={payments}
-            filteredPayments={filteredPayments}
-            visiblePayments={visiblePayments}
-            filteredPaymentTotal={filteredPaymentTotal}
-            historyLimit={PAYMENT_HISTORY_LIMIT}
-            search={historySearch}
-            method={historyMethod}
-            showAll={showAllHistory}
-            receiptLoading={historyReceiptLoading}
-            receiptError={historyReceiptError}
-            onSearchChange={value => {
-              setHistorySearch(value);
-              setShowAllHistory(false);
-            }}
-            onMethodChange={value => {
-              setHistoryMethod(value);
-              setShowAllHistory(false);
-            }}
-            onToggleShowAll={() => setShowAllHistory(value => !value)}
-            onOpenReceipt={payment => void openHistoryReceipt(payment)}
-          />
+          <div
+            id="payment-history-panel"
+            role="tabpanel"
+            aria-labelledby="payment-history-tab"
+          >
+            <PaymentHistoryPanel
+              payments={payments}
+              filteredPayments={filteredPayments}
+              visiblePayments={visiblePayments}
+              historyLimit={PAYMENT_HISTORY_LIMIT}
+              search={historySearch}
+              method={historyMethod}
+              showAll={showAllHistory}
+              receiptLoading={historyReceiptLoading}
+              receiptError={historyReceiptError}
+              onSearchChange={value => {
+                setHistorySearch(value);
+                setShowAllHistory(false);
+              }}
+              onMethodChange={value => {
+                setHistoryMethod(value);
+                setShowAllHistory(false);
+              }}
+              onToggleShowAll={() => setShowAllHistory(value => !value)}
+              onOpenReceipt={payment => void openHistoryReceipt(payment)}
+            />
+          </div>
         )}
       </div>
 
@@ -1158,6 +1281,18 @@ export function PaymentPage({ tables, tableOrders, payments, settings, onProcess
             setStoredPrintFormat(format);
           }}
           onClose={() => setHistoryInvoiceData(null)}
+        />
+      )}
+      {departureTable && (
+        <ConfirmationDialog
+          title={`Xác nhận khách rời Bàn ${departureTable.number}?`}
+          message={`Thao tác này sẽ đóng lượt phục vụ và đưa Bàn ${departureTable.number} về trạng thái Trống.`}
+          confirmLabel="Xác nhận khách rời"
+          busy={departureBusy}
+          onCancel={() => {
+            if (!departureBusy) setDepartureTableId(null);
+          }}
+          onConfirm={() => void confirmDeparture()}
         />
       )}
     </div>

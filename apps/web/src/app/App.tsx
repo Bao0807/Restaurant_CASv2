@@ -692,6 +692,7 @@ export default function App() {
               payments={completedPayments}
               settings={restaurantSettings}
               onProcessPayment={handleProcessPayment}
+              onConfirmDeparture={handleConfirmDeparture}
             />
           </div>
         )}

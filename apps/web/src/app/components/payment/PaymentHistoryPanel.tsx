@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, History, Printer, ReceiptText, Search } from 'lucide-react';
+import { ChevronDown, ChevronUp, Printer, ReceiptText, Search } from 'lucide-react';
 import { type PaymentMethodId, type PaymentRecord, formatVND } from '../../data';
 import { PAYMENT_METHOD_LABELS } from '../../config/restaurant';
 
@@ -20,7 +20,6 @@ interface PaymentHistoryPanelProps {
   payments: PaymentRecord[];
   filteredPayments: PaymentRecord[];
   visiblePayments: PaymentRecord[];
-  filteredPaymentTotal: number;
   historyLimit: number;
   search: string;
   method: 'all' | PaymentMethodId;
@@ -37,7 +36,6 @@ export function PaymentHistoryPanel({
   payments,
   filteredPayments,
   visiblePayments,
-  filteredPaymentTotal,
   historyLimit,
   search,
   method,
@@ -51,22 +49,6 @@ export function PaymentHistoryPanel({
 }: PaymentHistoryPanelProps) {
   return (
     <section className="payment-history-section" aria-labelledby="payment-history-title">
-      <header className="payment-history-header">
-        <div className="payment-history-heading">
-          <span className="payment-history-heading-icon" aria-hidden="true">
-            <History size={20} />
-          </span>
-          <div>
-            <h2 id="payment-history-title">Lịch sử đơn đã thanh toán</h2>
-            <p>Tối đa 100 hóa đơn gần nhất được đồng bộ từ hệ thống</p>
-          </div>
-        </div>
-        <div className="payment-history-summary" aria-live="polite">
-          <span>{filteredPayments.length} hóa đơn</span>
-          <strong>{formatVND(filteredPaymentTotal)}</strong>
-        </div>
-      </header>
-
       <div className="payment-history-controls">
         <label className="payment-history-search">
           <Search size={16} aria-hidden="true" />

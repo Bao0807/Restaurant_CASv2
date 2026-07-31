@@ -21,7 +21,7 @@ Hệ thống POS và điều phối vận hành nhà hàng: đặt bàn, gọi m
 
 ## Bắt đầu nhanh
 
-Yêu cầu: Node.js `>=20.19`, npm `11.x` (repository khóa metadata ở `npm@11.13.0`) và MySQL `8.x`.
+Yêu cầu: Node.js `>=24.15.0`, npm `11.x` (repository khóa metadata ở `npm@11.13.0`) và MySQL `8.x`.
 
 ```powershell
 npm install
@@ -63,11 +63,11 @@ npm run dev:web
 | Biểu đồ | Recharts, lazy-loaded | Báo cáo doanh thu và hóa đơn theo giờ/ngày/tuần |
 | Giao diện | CSS responsive, Lucide | Desktop, tablet, mobile, phiếu bếp 80 mm và hóa đơn A4/80 mm |
 
-| Quality gate gần nhất | Kết quả ngày 30/07/2026 |
+| Quality gate gần nhất | Kết quả ngày 31/07/2026 |
 |---|---:|
 | Unit test backend | `38/38` đạt |
 | Unit/a11y test frontend | `4/4` đạt |
-| Browser E2E Chromium | `1/1` đạt |
+| Browser E2E Chromium | `2/2` đạt |
 | Database audit read-only | `33/33` nhóm đạt |
 | ESLint | Đạt, không warning |
 | TypeScript | Đạt |
@@ -114,7 +114,7 @@ Các kết quả trên có thể tái lập bằng lệnh trong [Scripts và ki�
 
 ### Thanh toán
 
-![Danh sách bàn chờ thanh toán và bàn đã trả trước](docs/screenshots/10-payment-desktop.png)
+![Hàng chờ thanh toán và các bàn đã thanh toán nhưng chưa giải phóng](docs/screenshots/10-payment-desktop.png)
 
 ### Đặt bàn
 
@@ -250,7 +250,7 @@ Restaurant_CASv2/
 
 ### Yêu cầu
 
-- Node.js `>= 20.19`
+- Node.js `>= 24.15.0`
 - npm `11.x`; phiên bản khai báo trong repository là `11.13.0`
 - MySQL `8.x`
 - Windows, macOS hoặc Linux
@@ -550,7 +550,7 @@ Mọi endpoint `/api/*`, trừ health, login và logout, đều yêu cầu sessi
 | `npm run lint` | ESLint cho backend JavaScript và frontend TypeScript/React |
 | `npm run typecheck` | TypeScript strict check |
 | `npm test` | Unit test backend và frontend/a11y |
-| `npm run test:e2e` | Chromium E2E cho đăng nhập, session cookie và điều hướng RBAC |
+| `npm run test:e2e` | Chromium E2E cho đăng nhập/session, điều hướng RBAC và hàng chờ thanh toán |
 | `npm run screenshots:update` | Chụp lại ảnh desktop/mobile trong `docs/screenshots` từ giao diện thật |
 | `npm run test:smoke` | Test end-to-end qua API đang chạy; có ghi dữ liệu test |
 | `npm run build` | Build frontend production |
@@ -572,6 +572,7 @@ Phạm vi unit test hiện tại:
 - `38/38` test backend và `4/4` test frontend/a11y đang đạt.
 - Auth test bao phủ session cookie `HttpOnly/SameSite`, thời hạn phiên, cấu hình nhiều tài khoản và RBAC.
 - Frontend test kiểm tra điều hướng theo vai trò và accessibility tự động của màn đăng nhập.
+- Browser E2E kiểm tra semantics tab/filter, vùng chạm, responsive/overflow và xác nhận khách rời tại hàng chờ thanh toán.
 - Canonicalization catalog và chống giả giá/topping.
 - Validation category, menu, quantity, VAT và thời gian nấu.
 - Hạn mức món theo ngày: xác định ngày kinh doanh, gộp số lượng cùng món, giữ đúng phần cuối, từ chối vượt mức, điều chỉnh khi sửa phiếu chờ và hoàn khi hủy.

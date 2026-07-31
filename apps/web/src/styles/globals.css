@@ -707,20 +707,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   overflow: hidden; border: 1px solid #dbe4ee; border-radius: 15px;
   background: #fff; box-shadow: 0 6px 20px rgba(15,23,42,.045);
 }
-.payment-history-header {
-  min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 14px;
-  padding: 13px 14px; border-bottom: 1px solid #e2e8f0; background: linear-gradient(135deg,#f8fafc,#f0fdfa);
-}
-.payment-history-heading { min-width: 0; display: flex; align-items: center; gap: 10px; }
-.payment-history-heading-icon {
-  width: 38px; height: 38px; flex: 0 0 38px; display: grid; place-items: center;
-  border: 1px solid #99f6e4; border-radius: 10px; background: #ccfbf1; color: #0f766e;
-}
-.payment-history-heading h2 { margin: 0; color: #0f172a; font-size: 14px; }
-.payment-history-heading p { margin: 3px 0 0; color: #64748b; font-size: 10px; font-weight: 650; }
-.payment-history-summary { flex: 0 0 auto; display: grid; justify-items: end; gap: 2px; }
-.payment-history-summary span { color: #64748b; font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
-.payment-history-summary strong { color: #0f766e; font-size: 16px; font-variant-numeric: tabular-nums; }
 .payment-history-controls {
   display: grid; grid-template-columns: minmax(240px,1fr) minmax(170px,230px); gap: 9px;
   padding: 10px 12px; border-bottom: 1px solid #eef2f7; background: #fff;
@@ -1189,8 +1175,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .payment-table-amount strong { font-size: 14px; }
   .payment-table-amount small { display: none; }
   .payment-history-section { border-radius: 13px; }
-  .payment-history-header { align-items: flex-start; padding: 11px; }
-  .payment-history-summary strong { font-size: 14px; }
   .payment-history-controls { grid-template-columns: minmax(0,1fr); padding: 9px 10px; }
   .payment-history-row { grid-template-columns: 44px minmax(0,1fr); gap: 9px; padding: 10px; }
   .payment-history-table-number { width: 42px; height: 46px; }
