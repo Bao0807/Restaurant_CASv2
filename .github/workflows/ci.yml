@@ -85,13 +85,38 @@ jobs:
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
 
+      - name: Start web
+        run: |
+          if ! curl --fail --silent http://127.0.0.1:4100/api/health > /dev/null; then
+            echo "API stopped before Browser E2E."
+            cat api.log
+            exit 1
+          fi
+          npm run dev:web -- --host 127.0.0.1 > web.log 2>&1 &
+          echo $! > web.pid
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:5173 > /dev/null; then
+              exit 0
+            fi
+            if ! kill -0 "$(cat web.pid)" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          cat web.log
+          exit 1
+
       - name: Browser E2E
+        env:
+          PLAYWRIGHT_EXTERNAL_SERVERS: 'true'
         run: npm run test:e2e
 
-      - name: Upload API log on failure
+      - name: Upload server logs on failure
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: api-log
-          path: api.log
+          name: server-logs
+          path: |
+            api.log
+            web.log
           if-no-files-found: ignore
