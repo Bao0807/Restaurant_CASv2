@@ -32,7 +32,7 @@ export default defineConfig({
           timeout: 30_000,
         },
         {
-          command: 'npm run dev:web -- --host 127.0.0.1',
+          command: 'npm run dev:web',
           url: 'http://127.0.0.1:5173',
           reuseExistingServer: true,
           timeout: 30_000,

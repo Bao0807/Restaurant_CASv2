@@ -92,7 +92,7 @@ jobs:
             cat api.log
             exit 1
           fi
-          npm run dev:web -- --host 127.0.0.1 > web.log 2>&1 &
+          npm run dev:web > web.log 2>&1 &
           echo $! > web.pid
           for attempt in $(seq 1 60); do
             if curl --fail --silent http://127.0.0.1:5173 > /dev/null; then
