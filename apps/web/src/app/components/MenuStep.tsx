@@ -650,7 +650,7 @@ export function MenuStep({ table, cart, categories, menuItems, isAddition, isEdi
     <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
       {/* Header */}
       <div style={{ padding: '12px 16px', background: '#fff', borderBottom: '1px solid #F3F4F6', display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
-        <button aria-label="Quay lại chọn bàn" onClick={onBack} style={{ background: '#F3F4F6', border: 'none', borderRadius: 10, width: 44, height: 44, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+        <button aria-label="Thoát gọi món và quay lại chọn bàn" onClick={onBack} style={{ background: '#F3F4F6', border: 'none', borderRadius: 10, width: 44, height: 44, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
           <ArrowLeft size={20} color="#374151" />
         </button>
         <div style={{ flex: 1, minWidth: 0 }}>

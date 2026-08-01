@@ -344,6 +344,7 @@ function BillPanel({
   const [printFormat, setPrintFormat] = useState<InvoicePrintFormat>(initialPrintFormat);
   const paymentCodes = useRef(makePaymentCodes());
   const keepTableOpenRef = useRef(table.status !== 'done');
+  const localPaymentCommittedRef = useRef(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const processingRef = useRef(processing);
   const onCloseRef = useRef(onClose);
@@ -403,11 +404,12 @@ function BillPanel({
   useEffect(() => {
     paymentCodes.current = makePaymentCodes();
     keepTableOpenRef.current = table.status !== 'done';
+    localPaymentCommittedRef.current = false;
     setInvoiceData(null);
     setPaymentError(null);
     setCashReceivedInput('');
     setDepartureRequired(false);
-  }, [table.id, table.status]);
+  }, [table.id]);
 
   const subtotal = cartTotal(order);
   const totals = calculateInvoiceTotals(subtotal, settings);
@@ -426,7 +428,10 @@ function BillPanel({
     Math.ceil(totals.total / 50_000) * 50_000,
     Math.ceil(totals.total / 100_000) * 100_000,
   ])].filter(value => value > 0 && value <= 2_000_000_000).slice(0, 4);
-  const paymentUnavailable = !invoiceData && !processing && (table.isPaid || order.length === 0);
+  const paymentUnavailable = !invoiceData
+    && !processing
+    && !localPaymentCommittedRef.current
+    && (table.isPaid || order.length === 0);
 
   useEffect(() => {
     if (paymentUnavailable) {
@@ -521,6 +526,9 @@ function BillPanel({
     setPaymentError(null);
     try {
       const saved = await onConfirm(payment, order);
+      // A following isPaid/empty-order snapshot belongs to this local payment,
+      // so it must not be reported as a conflict from another device.
+      localPaymentCommittedRef.current = true;
       const paidAt = new Date(saved.paidAt);
       setInvoiceData({
         ...invoice,

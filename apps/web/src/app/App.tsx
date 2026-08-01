@@ -28,7 +28,7 @@ import {
 } from './services/api';
 import { BottomNav } from './components/BottomNav';
 import { TableSelectStep } from './components/TableSelectStep';
-import { canDeleteWaitingOrder } from './components/TableOptionsModal';
+import { canDeleteWaitingOrder, getTableOptionsHistoryTableId } from './components/TableOptionsModal';
 import { LoginPage } from './components/LoginPage';
 import {
   AppBootError, AppBootLoading, AppLoadingStatus, AppToast, AppTopBar, OrderBreadcrumb,
@@ -347,7 +347,7 @@ export default function App() {
       selectedTableId: tableId,
       orderMode: hasExistingOrder ? 'addition' : 'new',
       editingBatchId: null,
-    });
+    }, getTableOptionsHistoryTableId() === tableId ? 'replace' : 'push');
   };
 
   const handleEditWaitingOrder = (tableId: string, batchId: number) => {
@@ -372,15 +372,25 @@ export default function App() {
       selectedTableId: tableId,
       orderMode: 'edit',
       editingBatchId: batchId,
-    });
+    }, getTableOptionsHistoryTableId() === tableId ? 'replace' : 'push');
   };
 
-  const handleBrowserBack = () => {
-    if (isAppNavigationState(window.history.state) && orderStep !== 'tables') {
-      window.history.back();
-      return;
-    }
-    navigate({ orderStep: 'tables', selectedTableId: null, orderMode: 'new', editingBatchId: null });
+  /** Exit is an explicit app action, not browser Back: always land on table operations. */
+  const handleExitOrder = () => {
+    setCart([]);
+    navigate({
+      view: 'order',
+      orderStep: 'tables',
+      selectedTableId: null,
+      orderMode: 'new',
+      editingBatchId: null,
+      casPaymentTableId: null,
+    }, 'replace');
+  };
+
+  /** Return exactly one order-workflow step without consulting browser history. */
+  const handleReturnToMenu = () => {
+    navigate({ orderStep: 'menu' }, 'replace');
   };
 
   const handleFinishOrder = () => {
@@ -451,7 +461,6 @@ export default function App() {
   const handleProcessPayment = async (payment: PaymentRecord, _items: CartItem[]): Promise<PaymentResult> => {
     try {
       const savedPayment = await recordPayment(payment);
-      await refreshOperationsSnapshot();
       recordCompletedPayment(savedPayment);
       showToast(
         savedPayment.requiresDepartureConfirmation
@@ -459,6 +468,11 @@ export default function App() {
           : `Thanh toán ${formatVND(savedPayment.total)} thành công`,
         'success',
       );
+      // Let the payment dialog commit its paid/invoice state before the refreshed
+      // operations snapshot removes the order or marks the table as paid.
+      window.setTimeout(() => {
+        void refreshOperationsSnapshot().catch(() => undefined);
+      }, 0);
       return savedPayment;
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Không thể ghi nhận thanh toán', 'error');
@@ -649,7 +663,7 @@ export default function App() {
                 isEditing={orderMode === 'edit'}
                 inventoryCredits={inventoryCredits}
                 onCartChange={setCart}
-                onBack={handleBrowserBack}
+                onBack={handleExitOrder}
                 onConfirm={() => navigate({ orderStep: 'confirm' })}
               />
             )}
@@ -662,8 +676,8 @@ export default function App() {
                 menuItems={menuItems}
                 inventoryCredits={inventoryCredits}
                 onCartChange={setCart}
-                onBack={handleBrowserBack}
-                onEdit={handleBrowserBack}
+                onBack={handleReturnToMenu}
+                onEdit={handleReturnToMenu}
                 onPlaceOrder={handlePlaceOrder}
               />
             )}
