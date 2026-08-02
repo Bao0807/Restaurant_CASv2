@@ -82,6 +82,7 @@ const schemaStatements = [
   `CREATE TABLE IF NOT EXISTS restaurant_settings (
     id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
     settings JSON NOT NULL,
+    version BIGINT UNSIGNED NOT NULL DEFAULT 1,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT chk_settings_singleton CHECK (id = 1)
@@ -356,6 +357,34 @@ const defaultEmployees = [
 ];
 
 /** Bổ sung liên kết nhân viên cho database cũ mà không làm thay đổi các hóa đơn lịch sử. */
+/** Add optimistic concurrency to the singleton settings row for existing databases. */
+async function ensureRestaurantSettingsVersion(connection) {
+  const [columns] = await connection.query(
+    `SELECT column_name AS columnName, column_type AS columnType, is_nullable AS isNullable,
+       column_default AS columnDefault
+     FROM information_schema.columns
+     WHERE table_schema = ? AND table_name = 'restaurant_settings' AND column_name = 'version'`,
+    [databaseName],
+  );
+  const version = columns[0];
+  if (!version) {
+    await connection.query(
+      'ALTER TABLE restaurant_settings ADD COLUMN version BIGINT UNSIGNED NOT NULL DEFAULT 1 AFTER settings',
+    );
+    return;
+  }
+  if (
+    String(version.columnType).toLowerCase() !== 'bigint unsigned'
+    || version.isNullable !== 'NO'
+    || Number(version.columnDefault) !== 1
+  ) {
+    await connection.query('UPDATE restaurant_settings SET version = 1 WHERE version IS NULL OR version < 1');
+    await connection.query(
+      'ALTER TABLE restaurant_settings MODIFY version BIGINT UNSIGNED NOT NULL DEFAULT 1',
+    );
+  }
+}
+
 async function ensureEmployeePaymentColumn(connection) {
   const [columns] = await connection.query(
     `SELECT column_name AS columnName FROM information_schema.columns
@@ -1322,7 +1351,7 @@ async function ensureKitchenQueueColumns(connection) {
 async function verifyDatabaseSchema(connection) {
   const probes = [
     'SELECT id, occurred_at, request_id, actor_username, actor_role, action, entity_type, entity_id, metadata FROM audit_events LIMIT 0',
-    'SELECT id, settings FROM restaurant_settings LIMIT 0',
+    'SELECT id, settings, version FROM restaurant_settings LIMIT 0',
     'SELECT id, table_number, seats, status, area, position_x, position_y FROM restaurant_tables LIMIT 0',
     'SELECT id, reservation_code, table_id, table_number, customer_name, customer_phone, phone_normalized, party_size, reserved_at, ends_at, duration_minutes, status, seated_table_id, version FROM reservations LIMIT 0',
     'SELECT id, category_id, cook_minutes, daily_limit, available FROM menu_items LIMIT 0',
@@ -1481,6 +1510,7 @@ export async function initDatabase({ migrate = autoMigrate } = {}) {
       if (!lockAcquired) throw new Error('Không thể lấy advisory lock để migrate database sau 30 giây.');
 
       for (const statement of schemaStatements) await migrationConnection.query(statement);
+      await ensureRestaurantSettingsVersion(migrationConnection);
       await ensureEmployeePaymentColumn(migrationConnection);
       await ensureEarlyPaymentLifecycle(migrationConnection);
       await ensurePaymentItemCategoryColumns(migrationConnection);

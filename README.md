@@ -381,7 +381,7 @@ erDiagram
 | `menu_categories` | Danh mục món | PK `id`, thứ tự và trạng thái active |
 | `menu_items` | Giá, ETA, size, topping và hạn mức số phần/ngày | FK category, index category/available; `daily_limit` nullable, `NULL` nghĩa là không giới hạn |
 | `menu_item_daily_usage` | Số phần đã giữ của từng món theo ngày kinh doanh | PK `(menu_item_id, business_date)`, FK món `ON DELETE CASCADE`, index `(business_date, menu_item_id)` |
-| `restaurant_settings` | Thương hiệu và hóa đơn | JSON, một hàng `id=1` |
+| `restaurant_settings` | Thương hiệu và hóa đơn | JSON, một hàng `id=1`; `version` optimistic chống hai quản lý ghi đè nhau |
 | `employees` | Hồ sơ, vai trò, số điện thoại và ca làm | unique `employee_code`, soft deactivate |
 | `payment_transactions` | Header hóa đơn đã trả, snapshot nhân viên/khách và trạng thái phục vụ sau thanh toán | unique `invoice_code`, `service_status` chỉ nhận `awaiting_departure/closed`, `departure_confirmed_at`, optional FK đặt bàn, index `paid_at/staff_id` và `(service_status, table_id)` |
 | `active_order_payments` | Liên kết tạm hóa đơn trả trước với order vẫn đang phục vụ | PK/FK `order_id`, unique/FK `transaction_id`; một order và một hóa đơn chỉ có tối đa một liên kết |
@@ -399,7 +399,7 @@ erDiagram
 
 ### Kết quả rà soát database
 
-Ngày 30/07/2026, database MySQL `8.0.46` đang chạy có thêm bảng `audit_events`; `npm run db:audit` đạt `33/33` nhóm ở chế độ `READ ONLY`: không có bản ghi mồ côi, batch gắn sai bàn, order lệch tổng hợp, lịch mở chồng nhau, hóa đơn trả trước mất liên kết hoặc ledger món thấp hơn số phần đang hoạt động.
+Ngày 01/08/2026, database MySQL `8.0.46` đạt toàn bộ `32` nhóm kiểm tra bắt buộc ở chế độ `READ ONLY`: không có bản ghi mồ côi, batch gắn sai bàn, order lệch tổng hợp, lịch mở chồng nhau, hóa đơn trả trước mất liên kết hoặc ledger món thấp hơn số phần đang hoạt động. Audit còn cảnh báo hai lịch `booked` đã quá giờ; nhân viên có thể xử lý chúng trong phạm vi **Cần xử lý** của màn Đặt bàn.
 
 Các giới hạn cấu trúc đã biết nhưng **không gây corruption trong dữ liệu hiện tại**:
 
@@ -465,6 +465,7 @@ Development cho phép `localhost`, `127.x`, IPv6 loopback, `10.x`, `192.168.x` v
 5. Check-in chuyển lịch sang `seated`, mở đúng bàn để gọi món và liên kết `reservation_id` với active order. Không thể hoàn tất lịch `seated` khi bàn vẫn còn order mở.
 6. Thanh toán luôn lưu snapshot mã đặt bàn, tên khách và số khách vào hóa đơn. Nếu trả sau khi món đã xong, lịch `seated` hoàn tất ngay; nếu trả trước, lịch vẫn giữ `seated` cho đến khi món xong và nhân viên xác nhận khách đã rời.
 7. Lịch tương lai chỉ hiển thị trên thẻ bàn bằng `nextReservation`. Bàn chỉ được giữ khi khách đã `seated` hoặc lịch `booked` còn không quá 15 phút; lịch buổi tối không khóa bàn từ đầu ngày.
+8. Phạm vi **Cần xử lý** liệt kê lịch `booked` đã qua giờ kết thúc để nhân viên xác nhận `no_show` hoặc hủy; hệ thống không tự đóng lịch và không tự thay đổi dữ liệu khách.
 
 ### Thanh toán
 
@@ -476,7 +477,7 @@ Development cho phép `localhost`, `127.x`, IPv6 loopback, `10.x`, `192.168.x` v
 6. **Trả sau:** nếu mọi batch đã `done` và không yêu cầu giữ bàn, giao dịch nhận `service_status=closed`; active order bị xóa, lịch `seated` liên quan chuyển `completed` và bàn về `empty` trong cùng transaction. Đây là luồng cũ và vẫn được giữ nguyên.
 7. **Trả trước:** khi còn batch `waiting/cooking`, hoặc client đã mở luồng trả trước với `keepTableOpen=true`, giao dịch nhận `service_status=awaiting_departure` và được liên kết với active order trong `active_order_payments`. Bàn tiếp tục ở trạng thái bếp thực tế, queue vẫn chạy, UI hiển thị **Đã thanh toán** và backend khóa gọi thêm, sửa hoặc hủy order.
 8. Khi tất cả batch của bàn trả trước đã `done`, nhân viên gọi `POST /api/orders/:tableId/confirm-departure`. Backend xác thực trạng thái, đổi giao dịch sang `closed`, ghi `departure_confirmed_at`, hoàn tất lịch `seated`, xóa active order và đưa bàn về `empty`. Gọi lại endpoint an toàn theo cơ chế idempotent.
-9. Response thanh toán trả `requiresDepartureConfirmation` và `orderClosed` để UI phân biệt hai nhánh. Chỉ sau khi transaction thanh toán commit thành công frontend mới cho in hóa đơn A4 hoặc 80 mm và mở lại bản chụp hóa đơn từ lịch sử.
+9. Response thanh toán trả `requiresDepartureConfirmation` và `orderClosed` để UI phân biệt hai nhánh. Chỉ sau khi transaction thanh toán commit thành công frontend mới tải snapshot chính thức từ `GET /api/payments/:invoiceCode`, cho in hóa đơn A4 hoặc 80 mm và giữ bản local làm fallback nếu lần tải chi tiết tạm thời thất bại.
 
 ### Báo cáo
 
@@ -506,7 +507,7 @@ Mọi endpoint `/api/*`, trừ health, login và logout, đều yêu cầu sessi
 | `POST` | `/api/auth/login` | Xác thực và cấp session cookie |
 | `POST` | `/api/auth/logout` | Thu hồi cookie trên trình duyệt |
 | `GET` | `/api/auth/session` | Kiểm tra phiên và trả username/role |
-| `GET/PUT` | `/api/settings` | Đọc/lưu cấu hình nhà hàng |
+| `GET/PUT` | `/api/settings` | Đọc/lưu cấu hình nhà hàng; PUT bắt buộc `expectedVersion`, bản cũ nhận `409 SETTINGS_CHANGED` |
 | `GET/POST` | `/api/employees` | Danh sách hoặc tạo nhân viên |
 | `PUT/DELETE` | `/api/employees/:employeeId` | Sửa hoặc ngừng hoạt động nhân viên |
 | `GET` | `/api/reservations?from=&to=&status=&q=&tableId=` | Tìm/lọc lịch đặt bàn trong khoảng thời gian |

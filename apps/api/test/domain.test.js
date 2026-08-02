@@ -102,6 +102,26 @@ test('từ chối quantity và VAT ngoài giới hạn', () => {
   );
 });
 
+test('từ chối ký tự thay thế do dữ liệu UTF-8 bị giải mã lỗi', () => {
+  assert.throws(
+    () => sanitizeSettings({
+      ...defaultSettings,
+      restaurantName: 'Nh\uFFFD h\uFFFDng CAS',
+    }, defaultSettings),
+    error => error.code === 'VALIDATION_ERROR'
+      && error.field === 'restaurantName'
+      && error.message.includes('lỗi mã hóa'),
+  );
+  assert.throws(
+    () => normalizeEmployee({
+      code: 'NV05', name: 'Nh\uFFFDn viên', role: 'server', active: true,
+    }),
+    error => error.code === 'VALIDATION_ERROR'
+      && error.field === 'name'
+      && error.message.includes('lỗi mã hóa'),
+  );
+});
+
 test('chuẩn hóa hồ sơ nhân viên, ca làm và mã viết hoa', () => {
   assert.deepEqual(normalizeEmployee({
     code: 'nv_05', name: '  Nguyễn Văn A  ', role: 'server', phone: '0901 234 567',

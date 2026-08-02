@@ -109,6 +109,7 @@ async function auditStructure() {
   const requiredColumnDefinitions = [
     { table: 'audit_events', column: 'request_id', type: 'varchar(128)', nullable: 'NO' },
     { table: 'audit_events', column: 'actor_role', type: 'varchar(20)', nullable: 'NO' },
+    { table: 'restaurant_settings', column: 'version', type: 'bigint unsigned', nullable: 'NO', defaultValue: 1 },
     { table: 'restaurant_tables', column: 'area', type: 'varchar(80)', nullable: 'NO' },
     { table: 'restaurant_tables', column: 'position_x', type: 'int unsigned', nullable: 'YES' },
     { table: 'restaurant_tables', column: 'position_y', type: 'int unsigned', nullable: 'YES' },
@@ -745,9 +746,9 @@ async function auditSingletonSettings(existingTables) {
   if (!existingTables.has('restaurant_settings')) return;
   await checkViolationRows(
     'Cấu hình nhà hàng có đúng singleton id=1 và JSON object',
-    `SELECT id, JSON_TYPE(settings) AS settingsType
+    `SELECT id, version, JSON_TYPE(settings) AS settingsType
      FROM restaurant_settings
-     WHERE id <> 1 OR JSON_TYPE(settings) <> 'OBJECT'
+     WHERE id <> 1 OR version < 1 OR JSON_TYPE(settings) <> 'OBJECT'
        OR (SELECT COUNT(*) FROM restaurant_settings) <> 1`,
   );
 }

@@ -517,6 +517,7 @@ export default function App() {
   };
 
   const handleSaveSettings = async (next: RestaurantSettings) => {
+    const previous = restaurantSettings;
     setRestaurantSettings(next);
     setSettingsStatus('saving');
 
@@ -528,8 +529,13 @@ export default function App() {
       setTimeout(() => setSettingsStatus('idle'), 1800);
     } catch (error) {
       console.warn('Không thể lưu cấu hình.', error);
+      try {
+        setRestaurantSettings(await fetchRestaurantSettings());
+      } catch {
+        setRestaurantSettings(previous);
+      }
       setSettingsStatus('error');
-      showToast('Thay đổi chưa được lưu. Vui lòng kiểm tra kết nối.', 'error');
+      showToast(error instanceof Error ? error.message : 'Thay đổi chưa được lưu. Vui lòng kiểm tra kết nối.', 'error');
     }
   };
 
@@ -639,6 +645,7 @@ export default function App() {
             {orderStep === 'tables' && (
               <div className="cas-page-scroll">
                 <TableSelectStep
+                  role={authenticatedRole}
                   tables={tables}
                   tableOrders={tableOrders}
                   waitingBatchesByTable={waitingBatchesByTable}

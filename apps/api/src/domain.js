@@ -16,6 +16,9 @@ function requiredString(value, field, maxLength) {
   if (typeof value !== 'string' || value.trim().length === 0 || value.length > maxLength) {
     throw invalid(`${field} không hợp lệ`, field);
   }
+  if (value.includes('\uFFFD')) {
+    throw invalid(`${field} chứa ký tự lỗi mã hóa`, field);
+  }
   return value.trim();
 }
 
@@ -23,6 +26,9 @@ function optionalString(value, field, maxLength) {
   if (value == null || value === '') return '';
   if (typeof value !== 'string' || value.length > maxLength) {
     throw invalid(`${field} không hợp lệ`, field);
+  }
+  if (value.includes('\uFFFD')) {
+    throw invalid(`${field} chứa ký tự lỗi mã hóa`, field);
   }
   return value.trim();
 }

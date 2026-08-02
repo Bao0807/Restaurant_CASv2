@@ -19,6 +19,7 @@ import {
   formatVND,
   STATUS_CONFIG,
   type CartItem,
+  type EmployeeRole,
   type Table,
   type TableStatus,
 } from '../data';
@@ -28,6 +29,7 @@ import { OrderTimer } from './OrderTimer';
 import { ConfirmationDialog } from './ConfirmationDialog';
 
 interface TableOptionsModalProps {
+  role: EmployeeRole;
   table: Table;
   order?: CartItem[];
   waitingBatches?: EditableOrderBatch[];
@@ -96,6 +98,7 @@ function deleteBlockedReason(table: Table): string {
 
 /** Modal thao tác trực tiếp từ màn Vận hành bàn. */
 export function TableOptionsModal({
+  role,
   table,
   order,
   waitingBatches = [],
@@ -108,6 +111,9 @@ export function TableOptionsModal({
   onCheckInReservation,
   onPay,
 }: TableOptionsModalProps) {
+  const canManageOrders = role === 'manager' || role === 'cashier' || role === 'server';
+  const canTakePayment = role === 'manager' || role === 'cashier';
+  const canUpdateKitchenStatus = role === 'manager' || role === 'server' || role === 'chef';
   const titleId = useId();
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -287,7 +293,7 @@ export function TableOptionsModal({
           )}
 
           <div className="table-options-actions">
-            {bookedReservation && (
+            {canManageOrders && bookedReservation && (
               <button
                 type="button"
                 onClick={() => {
@@ -322,7 +328,7 @@ export function TableOptionsModal({
               </button>
             )}
 
-            {!table.isPaid && (table.status === 'empty' || hasOrder || checkedInReservation)
+            {canManageOrders && !table.isPaid && (table.status === 'empty' || hasOrder || checkedInReservation)
               && (table.status !== 'reserved' || checkedInReservation) && (
               <button
                 type="button"
@@ -340,7 +346,7 @@ export function TableOptionsModal({
               </button>
             )}
 
-            {hasOrder && !table.isPaid && (
+            {canTakePayment && hasOrder && !table.isPaid && (
               <button
                 type="button"
                 onClick={onPay}
@@ -357,7 +363,7 @@ export function TableOptionsModal({
               </button>
             )}
 
-            {!table.isPaid && waitingBatches.length > 0 && (
+            {canManageOrders && !table.isPaid && waitingBatches.length > 0 && (
               <section className="table-options-edit-section" aria-label="Các phiếu đang chờ có thể sửa">
                 {waitingBatches.length > 1 && (
                   <div className="table-options-section-label">Chọn phiếu đang chờ cần sửa</div>
@@ -382,7 +388,7 @@ export function TableOptionsModal({
               </section>
             )}
 
-            {isCooking && (
+            {canUpdateKitchenStatus && isCooking && (
               <button
                 type="button"
                 onClick={() => {
@@ -416,7 +422,7 @@ export function TableOptionsModal({
               </div>
             )}
 
-            {table.isPaid && table.status === 'done' && (
+            {canManageOrders && table.isPaid && table.status === 'done' && (
               <button
                 type="button"
                 onClick={() => setShowDepartureConfirmation(true)}
@@ -432,7 +438,7 @@ export function TableOptionsModal({
               </button>
             )}
 
-            {hasOrder && !table.isPaid && (
+            {canManageOrders && hasOrder && !table.isPaid && (
               <button
                 type="button"
                 onClick={() => {

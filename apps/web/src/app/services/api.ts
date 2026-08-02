@@ -113,16 +113,16 @@ export async function logoutApiSession(): Promise<void> {
 }
 
 export async function fetchRestaurantSettings(): Promise<RestaurantSettings> {
-  const data = await request<{ settings: RestaurantSettings }>('/settings');
-  return normalizeSettings(data.settings);
+  const data = await request<{ settings: RestaurantSettings; version: number }>('/settings');
+  return normalizeSettings({ ...data.settings, version: data.version });
 }
 
 export async function saveRestaurantSettings(settings: RestaurantSettings): Promise<RestaurantSettings> {
-  const data = await request<{ settings: RestaurantSettings }>('/settings', {
+  const data = await request<{ settings: RestaurantSettings; version: number }>('/settings', {
     method: 'PUT',
-    body: JSON.stringify({ settings }),
+    body: JSON.stringify({ settings, expectedVersion: settings.version }),
   });
-  return normalizeSettings(data.settings);
+  return normalizeSettings({ ...data.settings, version: data.version });
 }
 
 export async function fetchEmployees(activeOnly = false): Promise<Employee[]> {

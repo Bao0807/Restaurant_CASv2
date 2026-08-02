@@ -68,6 +68,12 @@ const REPORT_CURRENT_LABELS: Record<ReportPeriod, string> = {
   month: 'Tháng này',
 };
 
+const REPORT_RANGE_DATE_FORMATTER = new Intl.DateTimeFormat('vi-VN', {
+  day: '2-digit',
+  month: '2-digit',
+  year: 'numeric',
+});
+
 const REPORT_TIMELINE_COPY: Record<ReportPeriod, {
   revenueTitle: string;
   ordersTitle: string;
@@ -197,6 +203,7 @@ export function DashboardPage({
   const currentDateMs = currentDate.getTime();
   const reportFromMs = reportRange.from.getTime();
   const reportToMs = reportRange.to.getTime();
+  const reportRangeDetail = `Từ ${REPORT_RANGE_DATE_FORMATTER.format(reportRange.from)} đến ${REPORT_RANGE_DATE_FORMATTER.format(new Date(reportToMs - 1))}`;
   const latestPaymentInvoiceCode = payments[0]?.invoiceCode;
   const currentReportRange = buildReportRange(reportPeriod, currentDate);
   const isCurrentReportPeriod = reportFromMs === currentReportRange.from.getTime();
@@ -390,25 +397,25 @@ export function DashboardPage({
       {tab === 'reports' ? (
         <div className="dashboard-reports-page" style={{ padding: '14px 14px 96px', display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div className="report-filter-bar">
-            <div className="report-filter-top">
-              <div className="report-period-selector" role="group" aria-label="Chọn kỳ báo cáo">
-                {REPORT_PERIODS.map(period => (
-                  <button
-                    key={period.id}
-                    type="button"
-                    className={reportPeriod === period.id ? 'active' : ''}
-                    aria-pressed={reportPeriod === period.id}
-                    onClick={() => setReportPeriod(period.id)}
-                  >
-                    {period.label}
-                  </button>
-                ))}
-              </div>
-              <output aria-live="polite" style={{ color: '#334155', fontSize: 12, fontWeight: 800, textAlign: 'right' }}>
-                {reportRange.label}
-              </output>
+            <div className="report-period-selector" role="group" aria-label="Chọn kỳ báo cáo">
+              {REPORT_PERIODS.map(period => (
+                <button
+                  key={period.id}
+                  type="button"
+                  className={reportPeriod === period.id ? 'active' : ''}
+                  aria-pressed={reportPeriod === period.id}
+                  onClick={() => setReportPeriod(period.id)}
+                >
+                  {period.label}
+                </button>
+              ))}
             </div>
-            <div className="report-date-navigation">
+            <div className={`report-date-navigation${reportPeriod === 'day' ? '' : ' has-range'}`}>
+              {reportPeriod !== 'day' && (
+                <output className="report-range-detail" aria-live="polite">
+                  {reportRangeDetail}
+                </output>
+              )}
               <button
                 type="button"
                 className="report-period-step"
@@ -419,7 +426,7 @@ export function DashboardPage({
                 <ChevronLeft size={19} />
               </button>
               <label className="report-date-picker">
-                <span>{REPORT_PICKER_LABELS[reportPeriod]}</span>
+                <span className="sr-only">{REPORT_PICKER_LABELS[reportPeriod]}</span>
                 <input
                   type={reportPeriod === 'month' ? 'month' : 'date'}
                   value={reportPickerValue}

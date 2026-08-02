@@ -40,7 +40,7 @@
   top: 0;
   z-index: 5;
   display: grid;
-  grid-template-columns: auto auto auto minmax(210px, 1fr) minmax(160px, auto) 46px;
+  grid-template-columns: auto auto auto minmax(210px, 1fr) minmax(160px, auto) auto 46px;
   gap: 9px;
   align-items: center;
   margin: 0 0 12px;
@@ -90,6 +90,30 @@
   font: inherit;
   font-size: 12px;
   font-weight: 700;
+}
+.reservation-overdue-button {
+  min-height: 44px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid #fdba74;
+  border-radius: 11px;
+  color: #9a3412;
+  background: #fff7ed;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 850;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.reservation-overdue-button:hover { border-color: #fb923c; background: #ffedd5; }
+.reservation-overdue-button.active {
+  border-color: #c2410c;
+  color: #fff;
+  background: #c2410c;
+  box-shadow: 0 5px 14px rgba(194, 65, 12, .2);
 }
 .reservation-refresh-button {
   width: 46px;
@@ -272,13 +296,14 @@
 @keyframes reservation-spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 1050px) {
-  .reservation-toolbar { grid-template-columns: auto auto minmax(0, 1fr) minmax(150px, 200px) 46px; }
+  .reservation-toolbar { grid-template-columns: auto auto minmax(0, 1fr) minmax(150px, 200px) auto 46px; }
   .reservation-toolbar-create { grid-column: 1; grid-row: 1; }
   .reservation-scope-selector { grid-column: 2; grid-row: 1; }
   .reservation-range-label { grid-column: 3 / 5; grid-row: 1; justify-self: end; }
   .reservation-search { grid-column: 1 / 4; grid-row: 2; }
   .reservation-status-filter { grid-column: 4; grid-row: 2; }
-  .reservation-refresh-button { grid-column: 5; grid-row: 1; }
+  .reservation-overdue-button { grid-column: 5; grid-row: 2; }
+  .reservation-refresh-button { grid-column: 6; grid-row: 2; }
   .reservation-list { grid-template-columns: minmax(0, 1fr); }
 }
 
@@ -289,8 +314,9 @@
   .reservation-scope-selector button { min-height: 44px; }
   .reservation-range-label { grid-column: 1; grid-row: 3; justify-self: start; }
   .reservation-refresh-button { grid-column: 2; grid-row: 1; }
-  .reservation-search { grid-column: 1 / -1; grid-row: 4; }
-  .reservation-status-filter { grid-column: 1 / -1; grid-row: 5; }
+  .reservation-overdue-button { grid-column: 1 / -1; grid-row: 4; justify-self: stretch; }
+  .reservation-search { grid-column: 1 / -1; grid-row: 5; }
+  .reservation-status-filter { grid-column: 1 / -1; grid-row: 6; }
   .reservation-card { grid-template-columns: 125px minmax(0, 1fr); }
   .reservation-card-time { padding-inline: 10px; }
   .reservation-card-time strong { font-size: 14px; }

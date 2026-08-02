@@ -20,7 +20,7 @@ import {
 import { ConfirmationDialog } from './ConfirmationDialog';
 import '../../styles/reservations.css';
 
-type ReservationScope = 'today' | 'week' | 'month';
+type ReservationScope = 'today' | 'week' | 'month' | 'overdue';
 type StatusFilter = 'all' | ReservationStatus;
 
 interface ReservationsPageProps {
@@ -96,13 +96,17 @@ function rangeForScope(scope: ReservationScope): { from: Date; to: Date; label: 
   const from = new Date(getServerNowMs());
   from.setHours(0, 0, 0, 0);
   const to = new Date(from);
-  if (scope === 'month') {
+  if (scope === 'overdue') {
+    from.setTime(0);
+    to.setTime(getServerNowMs());
+  } else if (scope === 'month') {
     from.setDate(1);
     to.setTime(from.getTime());
     to.setMonth(to.getMonth() + 1);
   } else {
     to.setDate(to.getDate() + (scope === 'today' ? 1 : 7));
   }
+  if (scope === 'overdue') return { from, to, label: 'Lịch đã quá giờ nhưng chưa đóng' };
   const inclusiveTo = new Date(to);
   inclusiveTo.setDate(inclusiveTo.getDate() - 1);
   const short = (date: Date) => date.toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit' });
@@ -199,7 +203,11 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
   const loadReservations = useCallback(async (showLoader = false) => {
     if (showLoader) setLoading(true);
     try {
-      const rows = await fetchReservations({ from: range.from, to: range.to });
+      const rows = await fetchReservations({
+        from: range.from,
+        to: range.to,
+        ...(scope === 'overdue' ? { status: 'booked' as const } : {}),
+      });
       setReservations(rows);
       setLoadError(null);
     } catch (error) {
@@ -207,7 +215,7 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
     } finally {
       if (showLoader) setLoading(false);
     }
-  }, [range]);
+  }, [range, scope]);
 
   useEffect(() => {
     void loadReservations(true);
@@ -279,11 +287,15 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
 
   const normalizedSearch = search.trim().toLocaleLowerCase('vi-VN');
   const visibleReservations = useMemo(() => reservations.filter(reservation => {
+    if (scope === 'overdue' && (
+      reservation.status !== 'booked'
+      || new Date(reservation.endsAt).getTime() > getServerNowMs()
+    )) return false;
     if (statusFilter !== 'all' && reservation.status !== statusFilter) return false;
     if (!normalizedSearch) return true;
     return [reservation.code, reservation.customerName, reservation.customerPhone, `bàn ${reservation.tableNumber}`]
       .some(value => value.toLocaleLowerCase('vi-VN').includes(normalizedSearch));
-  }), [normalizedSearch, reservations, statusFilter]);
+  }), [normalizedSearch, reservations, scope, statusFilter]);
 
   const eligibleTables = useMemo(() => [...tables]
     .sort((left, right) => left.number - right.number), [tables]);
@@ -462,6 +474,15 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
         <select className="reservation-status-filter" aria-label="Lọc trạng thái" value={statusFilter} onChange={event => setStatusFilter(event.target.value as StatusFilter)}>
           {STATUS_FILTERS.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
         </select>
+        <button
+          className={`reservation-overdue-button${scope === 'overdue' ? ' active' : ''}`}
+          type="button"
+          aria-pressed={scope === 'overdue'}
+          onClick={() => setScope(currentScope => currentScope === 'overdue' ? 'week' : 'overdue')}
+        >
+          <UserX size={16} />
+          <span>Cần xử lý</span>
+        </button>
         <button className="reservation-refresh-button" type="button" aria-label="Làm mới lịch đặt bàn" title="Làm mới" disabled={loading} onClick={() => void loadReservations(true)}>
           <RefreshCw size={17} className={loading ? 'spin' : ''} />
         </button>
@@ -486,11 +507,12 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
           const reservedAt = new Date(reservation.reservedAt).getTime();
           const canCheckIn = now >= reservedAt - 60 * 60_000 && now < new Date(reservation.endsAt).getTime();
           const canMarkNoShow = now >= reservedAt + 15 * 60_000;
+          const overdue = reservation.status === 'booked' && now >= new Date(reservation.endsAt).getTime();
           const linkedTable = tables.find(table => table.id === reservation.tableId);
           const hasActiveOrder = Boolean(linkedTable?.orderNumber);
           const isPaid = Boolean(linkedTable?.isPaid);
           return (
-            <article className={`reservation-card status-${meta.className}`} key={reservation.id}>
+            <article className={`reservation-card status-${meta.className}${overdue ? ' is-overdue' : ''}`} key={reservation.id}>
               <div className="reservation-card-time">
                 <strong>{formatReservationTimeRange(reservation.reservedAt, reservation.endsAt)}</strong>
                 <span>{formatReservationDate(reservation.reservedAt)}</span>
@@ -503,6 +525,7 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
                     <h2>{reservation.customerName}</h2>
                   </div>
                   <span className={`reservation-status ${meta.className}`}>{meta.label}</span>
+                  {overdue && <span className="reservation-status no-show">Quá giờ · cần xử lý</span>}
                 </div>
                 <div className="reservation-details">
                   <span><MapPin size={15} /> Bàn {reservation.tableNumber}</span>
@@ -513,7 +536,7 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
                 <div className="reservation-card-actions">
                   {reservation.status === 'booked' && (
                     <>
-                      <button type="button" className="reservation-action edit" disabled={busy || anotherActionBusy} onClick={() => openEditor(reservation)}><Pencil size={16} /> Sửa</button>
+                      {!overdue && <button type="button" className="reservation-action edit" disabled={busy || anotherActionBusy} onClick={() => openEditor(reservation)}><Pencil size={16} /> Sửa</button>}
                       <button type="button" className="reservation-action check-in" disabled={busy || anotherActionBusy || !canCheckIn} title={canCheckIn ? 'Nhận bàn và mở gọi món' : 'Có thể nhận bàn sớm tối đa 60 phút'} onClick={() => setTransition({ reservation, status: 'seated' })}><LogIn size={16} /> Nhận bàn</button>
                       <button type="button" className="reservation-action subtle-danger" disabled={busy || anotherActionBusy} onClick={() => setTransition({ reservation, status: 'cancelled' })}><Ban size={16} /> Hủy</button>
                       <button type="button" className="reservation-action subtle-danger" disabled={busy || anotherActionBusy || !canMarkNoShow} title={canMarkNoShow ? 'Đóng lịch do khách không đến' : 'Chỉ đánh dấu sau giờ hẹn 15 phút'} onClick={() => setTransition({ reservation, status: 'no_show' })}><UserX size={16} /> Không đến</button>

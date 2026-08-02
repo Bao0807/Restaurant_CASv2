@@ -1025,18 +1025,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 .dashboard-reports-page { width: min(100%, 1500px); margin: 0 auto; padding: clamp(12px,2vw,26px) !important; }
 .report-filter-bar {
-  display: flex; flex-direction: column; gap: 12px;
+  display: grid; grid-template-columns: auto minmax(0,1fr); align-items: center; gap: 14px;
   padding: 12px 14px; border: 1px solid #dbe4ee; border-radius: 16px;
   background: linear-gradient(135deg,#fff,#f0fdfa); box-shadow: 0 10px 26px rgba(15,23,42,.06);
-}
-.report-filter-top { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
-.report-range-copy { min-width: 0; display: flex; align-items: center; gap: 10px; }
-.report-range-copy > span:last-child { min-width: 0; display: grid; gap: 2px; }
-.report-range-copy strong { color: #0f172a; font-size: 13px; }
-.report-range-copy small { color: #64748b; font-size: 11px; }
-.report-range-icon {
-  width: 40px; height: 40px; flex: 0 0 40px; display: grid; place-items: center;
-  border-radius: 11px; background: #ccfbf1; color: #0f766e;
 }
 .report-period-selector { display: grid; grid-template-columns: repeat(3,minmax(64px,1fr)); gap: 5px; padding: 4px; border-radius: 12px; background: #e8eef5; }
 .report-period-selector button {
@@ -1046,7 +1037,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .report-period-selector button.active { border-color: #99f6e4; background: #fff; color: #0f766e; box-shadow: 0 3px 12px rgba(15,23,42,.09); }
 .report-date-navigation {
   display: grid; grid-template-columns: 44px minmax(190px,260px) 44px minmax(92px,max-content);
-  justify-content: end; align-items: end; gap: 7px; padding-top: 11px; border-top: 1px solid #dbe4ee;
+  justify-content: end; align-items: center; gap: 7px;
+}
+.report-date-navigation.has-range { grid-template-columns: minmax(230px,max-content) 44px minmax(190px,260px) 44px minmax(92px,max-content); }
+.report-range-detail {
+  min-height: 44px; display: flex; align-items: center; justify-content: center; padding: 0 13px;
+  border: 1px solid #99f6e4; border-radius: 10px; background: #f0fdfa;
+  color: #115e59; font-size: 12px; font-weight: 800; white-space: nowrap;
 }
 .report-period-step, .report-current-period {
   min-height: 44px; border: 1px solid #cbd5e1; border-radius: 10px; background: #fff;
@@ -1121,6 +1118,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 }
 
 @media (max-width: 899px) {
+  .report-filter-bar { grid-template-columns: minmax(0,1fr); }
+  .report-date-navigation,
+  .report-date-navigation.has-range { grid-template-columns: 44px minmax(190px,1fr) 44px minmax(92px,max-content); justify-content: stretch; }
+  .report-range-detail { grid-column: 1 / -1; justify-self: end; }
   .table-operations-toolbar { grid-template-columns: minmax(220px,1fr) minmax(150px,210px); }
   .table-display-controls { grid-column: 1 / -1; justify-self: end; }
   .management-section-stack { grid-template-columns: minmax(0,1fr); }
@@ -1223,10 +1224,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .management-inventory-state { margin-top: 2px; }
   .management-stale-row { grid-template-columns: 1fr 1fr; }
   .kitchen-control-grid { grid-template-columns: 1fr; }
-  .report-filter-top { align-items: stretch; flex-direction: column; }
   .report-period-selector { grid-template-columns: repeat(3,minmax(0,1fr)); }
   .report-period-selector button { min-height: 44px; padding-inline: 8px; }
-  .report-date-navigation { grid-template-columns: 44px minmax(0,1fr) 44px; justify-content: stretch; }
+  .report-date-navigation,
+  .report-date-navigation.has-range { grid-template-columns: 44px minmax(0,1fr) 44px; justify-content: stretch; }
+  .report-range-detail { width: 100%; justify-self: stretch; }
   .report-current-period { grid-column: 1 / -1; }
   .report-kpi-grid { grid-template-columns: minmax(0,1fr); }
   .dashboard-settings-page [style*="grid-template-columns"] { grid-template-columns: 1fr !important; }

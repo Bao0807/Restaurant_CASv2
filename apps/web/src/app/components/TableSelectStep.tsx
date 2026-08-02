@@ -3,7 +3,7 @@ import {
   ArrowRight, BadgeCheck, BellRing, CalendarClock, Circle, Clock, Flame, Hourglass,
   ClipboardList, LayoutGrid, Map as MapIcon, Maximize2, Minimize2, Search, Users, X,
 } from 'lucide-react';
-import type { CartItem, KitchenStatus, Table, TableStatus } from '../data';
+import type { CartItem, EmployeeRole, KitchenStatus, Table, TableStatus } from '../data';
 import type { EditableOrderBatch } from '../services/api';
 import { getServerNowMs } from '../services/api';
 import { formatReservationTimeRange, STATUS_CONFIG } from '../data';
@@ -11,6 +11,7 @@ import { OrderTimer } from './OrderTimer';
 import { getTableOptionsHistoryTableId, TableOptionsModal } from './TableOptionsModal';
 
 interface TableSelectStepProps {
+  role: EmployeeRole;
   tables: Table[];
   tableOrders: Record<string, CartItem[]>;
   waitingBatchesByTable: Record<string, EditableOrderBatch[]>;
@@ -285,34 +286,38 @@ function ProgressInfo({
 }
 
 function TableAction({
+  canStartOrder,
   hasOrder,
   onOpen,
   onQuickOrder,
   table,
 }: {
+  canStartOrder: boolean;
   hasOrder: boolean;
   onOpen: () => void;
   onQuickOrder: () => void;
   table: Table;
 }) {
   const isEmpty = table.status === 'empty';
-  const label = isEmpty ? 'Gọi món' : hasOrder ? 'Xem đơn' : 'Chi tiết';
+  const quickOrder = isEmpty && canStartOrder;
+  const label = quickOrder ? 'Gọi món' : hasOrder ? 'Xem đơn' : 'Chi tiết';
 
   return (
     <button
       type="button"
-      className={`operations-table-action${isEmpty ? ' is-primary' : hasOrder ? ' is-view-order' : ''}`}
+      className={`operations-table-action${quickOrder ? ' is-primary' : hasOrder ? ' is-view-order' : ''}`}
       aria-label={`${label} cho bàn ${table.number}`}
-      onClick={isEmpty ? onQuickOrder : onOpen}
+      onClick={quickOrder ? onQuickOrder : onOpen}
     >
-      {isEmpty ? <ClipboardList size={15} aria-hidden="true" /> : null}
+      {quickOrder ? <ClipboardList size={15} aria-hidden="true" /> : null}
       <span>{label}</span>
-      {!isEmpty ? <ArrowRight size={14} aria-hidden="true" /> : null}
+      {!quickOrder ? <ArrowRight size={14} aria-hidden="true" /> : null}
     </button>
   );
 }
 
 function TableCard({
+  canStartOrder,
   table,
   order,
   floor = false,
@@ -320,6 +325,7 @@ function TableCard({
   onOpen,
   onQuickOrder,
 }: {
+  canStartOrder: boolean;
   table: Table;
   order?: CartItem[];
   floor?: boolean;
@@ -434,6 +440,7 @@ function TableCard({
       <footer className="operations-table-card-footer">
         <StatusBadge status={table.status} />
         <TableAction
+          canStartOrder={canStartOrder}
           hasOrder={hasOrder}
           onOpen={onOpen}
           onQuickOrder={onQuickOrder}
@@ -445,6 +452,7 @@ function TableCard({
 }
 
 export function TableSelectStep({
+  role,
   tables,
   tableOrders,
   waitingBatchesByTable,
@@ -457,6 +465,7 @@ export function TableSelectStep({
   onCheckInReservation,
   onPay,
 }: TableSelectStepProps) {
+  const canManageOrders = role === 'manager' || role === 'cashier' || role === 'server';
   const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<TableFilter>('all');
@@ -585,6 +594,7 @@ export function TableSelectStep({
         <div className="operations-table-grid">
           {visibleTables.map(table => (
             <TableCard
+              canStartOrder={canManageOrders}
               key={table.id}
               table={table}
               order={tableOrders[table.id]}
@@ -627,6 +637,7 @@ export function TableSelectStep({
                           }}
                         >
                           <TableCard
+                            canStartOrder={canManageOrders}
                             table={table}
                             order={tableOrders[table.id]}
                             floor
@@ -647,6 +658,7 @@ export function TableSelectStep({
 
       {selectedTable && (
         <TableOptionsModal
+          role={role}
           table={selectedTable}
           order={tableOrders[selectedTable.id]}
           waitingBatches={waitingBatchesByTable[selectedTable.id]}

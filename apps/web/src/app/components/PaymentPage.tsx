@@ -345,6 +345,10 @@ function BillPanel({
   const paymentCodes = useRef(makePaymentCodes());
   const keepTableOpenRef = useRef(table.status !== 'done');
   const localPaymentCommittedRef = useRef(false);
+  const tableEntryRef = useRef({ id: table.id, status: table.status });
+  if (tableEntryRef.current.id !== table.id) {
+    tableEntryRef.current = { id: table.id, status: table.status };
+  }
   const dialogRef = useRef<HTMLDivElement>(null);
   const processingRef = useRef(processing);
   const onCloseRef = useRef(onClose);
@@ -403,7 +407,7 @@ function BillPanel({
 
   useEffect(() => {
     paymentCodes.current = makePaymentCodes();
-    keepTableOpenRef.current = table.status !== 'done';
+    keepTableOpenRef.current = tableEntryRef.current.status !== 'done';
     localPaymentCommittedRef.current = false;
     setInvoiceData(null);
     setPaymentError(null);
@@ -530,7 +534,7 @@ function BillPanel({
       // so it must not be reported as a conflict from another device.
       localPaymentCommittedRef.current = true;
       const paidAt = new Date(saved.paidAt);
-      setInvoiceData({
+      const fallbackInvoice: PrintableInvoiceData = {
         ...invoice,
         invoiceCode: saved.invoiceCode,
         transactionCode: saved.transactionCode,
@@ -548,9 +552,17 @@ function BillPanel({
         guestCount: saved.guestCount ?? invoice.guestCount,
         staffName: saved.staffName,
         cashierName: saved.cashierName,
-      });
+      };
+      setInvoiceData(fallbackInvoice);
       setDepartureRequired(saved.requiresDepartureConfirmation);
       paymentCodes.current = makePaymentCodes();
+      try {
+        const details = await fetchPaymentReceipt(saved.invoiceCode);
+        setInvoiceData(historicalInvoice(details, settings));
+      } catch {
+        // The payment is already committed. Keep the server-total fallback visible;
+        // history can load the canonical receipt again when connectivity recovers.
+      }
     } catch (error) {
       setPaymentError(error instanceof Error ? error.message : 'Không thể xử lý thanh toán.');
     } finally {

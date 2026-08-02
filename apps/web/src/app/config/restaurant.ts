@@ -25,6 +25,7 @@ export const PAYMENT_METHOD_LABELS: Record<PaymentMethodId, string> = {
 };
 
 export interface RestaurantSettings {
+  version: number;
   restaurantName: string;
   legalName: string;
   tagline: string;
@@ -54,6 +55,7 @@ export const DASHBOARD_WIDGETS = [
 ];
 
 export const DEFAULT_RESTAURANT_SETTINGS: RestaurantSettings = {
+  version: 1,
   restaurantName: 'Nhà hàng CAS',
   legalName: 'CAS Restaurant',
   tagline: 'Phục vụ tận tâm',
@@ -83,6 +85,9 @@ export function normalizeSettings(settings: Partial<RestaurantSettings> | null |
 
   return {
     ...merged,
+    version: Number.isSafeInteger(Number(merged.version)) && Number(merged.version) >= 1
+      ? Number(merged.version)
+      : 1,
     guestCount: Number.isFinite(Number(merged.guestCount)) ? Number(merged.guestCount) : DEFAULT_RESTAURANT_SETTINGS.guestCount,
     vatRate: Number.isFinite(Number(merged.vatRate)) ? Number(merged.vatRate) : DEFAULT_RESTAURANT_SETTINGS.vatRate,
     serviceFeeRate: Number.isFinite(Number(merged.serviceFeeRate)) ? Number(merged.serviceFeeRate) : DEFAULT_RESTAURANT_SETTINGS.serviceFeeRate,

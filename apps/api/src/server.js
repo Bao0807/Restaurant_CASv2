@@ -438,23 +438,44 @@ app.use('/api', auth.requireAuth);
 app.use('/api', auditSuccessfulMutation);
 
 app.get('/api/settings', requireDatabase, asyncRoute(async (_req, res) => {
-  const [rows] = await getPool().query('SELECT settings FROM restaurant_settings WHERE id = 1 LIMIT 1');
+  const [rows] = await getPool().query('SELECT settings, version FROM restaurant_settings WHERE id = 1 LIMIT 1');
   const settings = parseJsonColumn(rows[0]?.settings, defaultSettings);
-  res.json({ settings: sanitizeSettings(settings, defaultSettings) });
+  res.json({ settings: sanitizeSettings(settings, defaultSettings), version: Number(rows[0]?.version ?? 1) });
 }));
 
 app.put('/api/settings', requireDatabase, managerOnly, asyncRoute(async (req, res) => {
-  const [rows] = await getPool().query('SELECT settings FROM restaurant_settings WHERE id = 1 LIMIT 1');
-  const current = sanitizeSettings(parseJsonColumn(rows[0]?.settings, defaultSettings), defaultSettings);
-  const settings = sanitizeSettings(req.body?.settings, current);
-
-  await getPool().query(
-    `INSERT INTO restaurant_settings (id, settings)
-     VALUES (1, ?)
-     ON DUPLICATE KEY UPDATE settings = VALUES(settings), updated_at = CURRENT_TIMESTAMP`,
-    [JSON.stringify(settings)],
-  );
-  res.json({ settings });
+  const expectedVersion = parseExpectedVersion(req.body?.expectedVersion);
+  const connection = await getPool().getConnection();
+  try {
+    await connection.beginTransaction();
+    const [rows] = await connection.query(
+      'SELECT settings, version FROM restaurant_settings WHERE id = 1 FOR UPDATE',
+    );
+    const row = rows[0];
+    if (!row) throw httpError(503, 'SETTINGS_NOT_CONFIGURED', 'Cấu hình nhà hàng chưa sẵn sàng.');
+    const currentVersion = Number(row.version);
+    if (currentVersion !== expectedVersion) {
+      throw httpError(409, 'SETTINGS_CHANGED', 'Cấu hình đã được thay đổi trên thiết bị khác. Hãy tải lại trước khi lưu.');
+    }
+    const current = sanitizeSettings(parseJsonColumn(row.settings, defaultSettings), defaultSettings);
+    const settings = sanitizeSettings(req.body?.settings, current);
+    const [result] = await connection.query(
+      `UPDATE restaurant_settings
+       SET settings = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
+       WHERE id = 1 AND version = ?`,
+      [JSON.stringify(settings), expectedVersion],
+    );
+    if (result.affectedRows !== 1) {
+      throw httpError(409, 'SETTINGS_CHANGED', 'Cấu hình đã được thay đổi trên thiết bị khác. Hãy tải lại trước khi lưu.');
+    }
+    await connection.commit();
+    res.json({ settings, version: currentVersion + 1 });
+  } catch (error) {
+    await connection.rollback().catch(() => {});
+    throw error;
+  } finally {
+    connection.release();
+  }
 }));
 
 /** Danh sách nhân sự dùng chung cho quản trị, phân công phục vụ và báo cáo. */
