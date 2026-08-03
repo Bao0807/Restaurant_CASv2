@@ -7,6 +7,7 @@ const useExternalServers = process.env.PLAYWRIGHT_EXTERNAL_SERVERS === 'true';
 
 export default defineConfig({
   testDir: './e2e',
+  globalSetup: useExternalServers ? undefined : './e2e/local-servers.ts',
   timeout: 30_000,
   fullyParallel: false,
   retries: process.env.CI ? 1 : 0,
@@ -22,20 +23,4 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
     },
   ],
-  webServer: useExternalServers
-    ? undefined
-    : [
-        {
-          command: 'npm run start:api',
-          url: 'http://127.0.0.1:4100/api/health',
-          reuseExistingServer: true,
-          timeout: 30_000,
-        },
-        {
-          command: 'npm run dev:web',
-          url: 'http://127.0.0.1:5173',
-          reuseExistingServer: true,
-          timeout: 30_000,
-        },
-      ],
 });

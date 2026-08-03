@@ -21,6 +21,7 @@ import {
   recordPayment,
   saveOrder,
   saveRestaurantSettings,
+  serveReadyOrderBatches,
   updateTableStatus,
   updateReservationStatus,
   updateWaitingOrderBatch,
@@ -89,7 +90,6 @@ export default function App() {
   }, []);
   const { operationsSyncStatus, lastOperationsSyncAt, refreshOperationsSnapshot } = useOperationsSync({
     active: authStatus === 'authenticated' && bootstrapStatus === 'ready',
-    tables,
     applyOperations,
     onUnauthorized: handleSessionExpired,
   });
@@ -456,6 +456,21 @@ export default function App() {
     }
   };
 
+  const handleMarkServed = async (tableId: string) => {
+    try {
+      const expectedBatchIds = tables.find(table => table.id === tableId)?.readyBatchIds ?? [];
+      if (expectedBatchIds.length === 0) {
+        throw new Error('Danh sách món sẵn sàng đã thay đổi. Hãy tải lại trạng thái bàn.');
+      }
+      await serveReadyOrderBatches(tableId, expectedBatchIds);
+      await refreshOperationsSnapshot();
+      showToast(`Đã xác nhận phục vụ ${expectedBatchIds.length} lượt món`, 'success');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Không thể xác nhận đã phục vụ món', 'error');
+      throw error;
+    }
+  };
+
   /* ─── Payment ─── */
   /** Ghi nhận thanh toán; bàn trả trước chỉ đóng sau khi khách rời. */
   const handleProcessPayment = async (payment: PaymentRecord, _items: CartItem[]): Promise<PaymentResult> => {
@@ -607,7 +622,8 @@ export default function App() {
   };
 
   const servingTableCount = tables.filter(table => (
-    table.status === 'waiting' || table.status === 'cooking' || table.status === 'done'
+    table.status === 'waiting' || table.status === 'cooking'
+    || table.status === 'done' || table.status === 'served'
   )).length;
 
   if (authStatus === 'required') {
@@ -654,6 +670,7 @@ export default function App() {
                   onEditOrder={handleEditWaitingOrder}
                   onDeleteOrder={handleDeleteOrder}
                   onMarkDone={handleMarkDone}
+                  onMarkServed={handleMarkServed}
                   onConfirmDeparture={handleConfirmDeparture}
                   onCheckInReservation={handleCheckInTableReservation}
                   onPay={handleOpenTablePayment}

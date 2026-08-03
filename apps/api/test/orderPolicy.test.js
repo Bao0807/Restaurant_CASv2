@@ -45,29 +45,31 @@ test('chỉ cho hủy order khi toàn bộ phiếu bếp còn chờ', () => {
 
 test('cho thanh toán trước khi bếp hoàn tất nhưng từ chối batch không hợp lệ', () => {
   assert.equal(canPayOrder([{ status: 'waiting' }]), true);
-  assert.equal(canPayOrder([{ status: 'cooking' }, { status: 'done' }]), true);
+  assert.equal(canPayOrder([{ status: 'cooking' }, { status: 'done' }, { status: 'served' }]), true);
   assert.equal(canPayOrder([{ status: 'done' }, { status: 'unknown' }]), false);
   assert.equal(canPayOrder([]), false);
 });
 
-test('chỉ đóng order khi toàn bộ phiếu bếp đã xong', () => {
-  assert.equal(isOrderComplete([{ status: 'done' }, { status: 'done' }]), true);
-  assert.equal(isOrderComplete([{ status: 'done' }, { status: 'waiting' }]), false);
+test('chỉ đóng order khi toàn bộ phiếu đã được mang ra phục vụ', () => {
+  assert.equal(isOrderComplete([{ status: 'served' }, { status: 'served' }]), true);
+  assert.equal(isOrderComplete([{ status: 'done' }, { status: 'served' }]), false);
+  assert.equal(isOrderComplete([{ status: 'served' }, { status: 'waiting' }]), false);
   assert.equal(isOrderComplete([{ status: 'cooking' }]), false);
-  assert.equal(isOrderComplete([{ status: 'done' }, { status: 'unknown' }]), false);
+  assert.equal(isOrderComplete([{ status: 'served' }, { status: 'unknown' }]), false);
   assert.equal(isOrderComplete([]), false);
 });
 
 test('giữ bàn theo đúng thời điểm nhân viên bắt đầu thanh toán sớm', () => {
   assert.equal(paymentRequiresDepartureConfirmation([{ status: 'waiting' }]), true);
   assert.equal(paymentRequiresDepartureConfirmation([{ status: 'cooking' }]), true);
-  assert.equal(paymentRequiresDepartureConfirmation([{ status: 'done' }]), false);
-  assert.equal(paymentRequiresDepartureConfirmation([{ status: 'done' }], true), true);
+  assert.equal(paymentRequiresDepartureConfirmation([{ status: 'done' }]), true);
+  assert.equal(paymentRequiresDepartureConfirmation([{ status: 'served' }]), false);
+  assert.equal(paymentRequiresDepartureConfirmation([{ status: 'served' }], true), true);
 });
 
 test('tóm tắt batch không tin cậy trạng thái ngoài miền dữ liệu', () => {
   assert.deepEqual(
-    summarizeOrderBatches([{ status: 'waiting' }, { status: 'cooking' }, { status: 'done' }, { status: 'other' }]),
-    { total: 4, waiting: 1, cooking: 1, done: 1, invalid: 1 },
+    summarizeOrderBatches([{ status: 'waiting' }, { status: 'cooking' }, { status: 'done' }, { status: 'served' }, { status: 'other' }]),
+    { total: 5, waiting: 1, cooking: 1, done: 1, served: 1, invalid: 1 },
   );
 });

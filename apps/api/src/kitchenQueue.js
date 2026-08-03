@@ -41,7 +41,8 @@ export async function lockKitchenQueue(connection) {
 
 /**
  * Đồng bộ trạng thái bàn từ các lượt gọi còn tồn tại.
- * cooking được ưu tiên hơn waiting; chỉ khi mọi lượt hoàn tất bàn mới là done.
+ * cooking được ưu tiên hơn waiting, sau đó là món đã sẵn sàng để phục vụ.
+ * Chỉ khi mọi lượt đã được mang ra bàn thì trạng thái bàn mới là served.
  */
 export async function syncTableStatuses(connection, tableIds) {
   const uniqueTableIds = [...new Set(tableIds.filter(Boolean))];
@@ -51,10 +52,11 @@ export async function syncTableStatuses(connection, tableIds) {
     `UPDATE restaurant_tables t
      INNER JOIN (
        SELECT table_id,
-         CASE
-           WHEN SUM(status = 'cooking') > 0 THEN 'cooking'
-           WHEN SUM(status = 'waiting') > 0 THEN 'waiting'
-           ELSE 'done'
+          CASE
+            WHEN SUM(status = 'cooking') > 0 THEN 'cooking'
+            WHEN SUM(status = 'waiting') > 0 THEN 'waiting'
+            WHEN SUM(status = 'done') > 0 THEN 'done'
+            ELSE 'served'
          END AS nextStatus
        FROM order_batches
        WHERE table_id IN (${placeholders})
@@ -63,34 +65,6 @@ export async function syncTableStatuses(connection, tableIds) {
      SET t.status = batches.nextStatus`,
     uniqueTableIds,
   );
-}
-
-/**
- * Hoàn tất các lượt đang nấu đã chạy đủ ETA.
- * Dùng thời gian UTC của MySQL để nhiều API instance không phụ thuộc đồng hồ máy client.
- */
-export async function completeExpiredKitchenBatches(connection) {
-  const [expired] = await connection.query(
-    `SELECT id AS batchId, table_id AS tableId
-     FROM order_batches
-     WHERE status = 'cooking'
-       AND cooking_started_at IS NOT NULL
-       AND TIMESTAMPADD(MINUTE, estimated_cook_minutes, cooking_started_at) <= CURRENT_TIMESTAMP(3)
-     ORDER BY cooking_started_at ASC, id ASC
-     FOR UPDATE`,
-  );
-  if (expired.length === 0) return [];
-
-  const batchIds = expired.map(batch => batch.batchId);
-  const placeholders = batchIds.map(() => '?').join(', ');
-  await connection.query(
-    `UPDATE order_batches
-     SET status = 'done', completed_at = CURRENT_TIMESTAMP(3)
-     WHERE id IN (${placeholders}) AND status = 'cooking'`,
-    batchIds,
-  );
-  await syncTableStatuses(connection, expired.map(batch => batch.tableId));
-  return expired;
 }
 
 /**
@@ -144,9 +118,8 @@ export async function processKitchenQueue(pool, options) {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
-    // Luôn hoàn tất món đã đủ ETA, kể cả khi bếp đang pause/manual.
+    // ETA chỉ dùng để cảnh báo. Món chỉ chuyển cooking -> done khi bếp xác nhận.
     await lockKitchenQueue(connection);
-    await completeExpiredKitchenBatches(connection);
     const promoted = await promoteKitchenQueue(connection, options);
     await connection.commit();
     return promoted;

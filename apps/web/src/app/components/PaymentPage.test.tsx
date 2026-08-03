@@ -23,7 +23,8 @@ const table: Table = {
   id: 'table-1',
   number: 1,
   seats: 4,
-  status: 'done',
+  status: 'served',
+  servedBatchCount: 1,
 };
 
 const order: CartItem[] = [{

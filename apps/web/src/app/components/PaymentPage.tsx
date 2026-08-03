@@ -57,17 +57,23 @@ function paymentViewFromHistory(state: unknown = window.history.state): PaymentV
 
 const METHODS: { id: PaymentMethodId; label: string; icon: ReactNode; desc: string }[] = [
   { id: 'cash', label: 'Tiền mặt', icon: <Banknote size={22} />, desc: 'Khách trả tiền mặt' },
-  { id: 'card', label: 'Thẻ', icon: <CreditCard size={22} />, desc: 'Ghi nhận thanh toán bằng thẻ' },
-  { id: 'qr', label: 'QR Code', icon: <QrCode size={22} />, desc: 'Ghi nhận thanh toán QR' },
+  { id: 'card', label: 'Thẻ', icon: <CreditCard size={22} />, desc: 'Ghi nhận nội bộ · chưa xác minh cổng thẻ' },
+  { id: 'qr', label: 'QR Code', icon: <QrCode size={22} />, desc: 'Ghi nhận nội bộ · chưa đối soát cổng QR' },
 ];
 
 const PAYMENT_STATUS_PRIORITY: Record<Table['status'], number> = {
-  done: 0,
-  cooking: 1,
-  waiting: 2,
-  reserved: 3,
-  empty: 4,
+  served: 0,
+  done: 1,
+  cooking: 2,
+  waiting: 3,
+  reserved: 4,
+  empty: 5,
 };
+
+function printablePaymentMethod(method: PaymentMethodId): string {
+  const label = PAYMENT_METHOD_LABELS[method];
+  return method === 'cash' ? label : `${label} · ghi nhận nội bộ`;
+}
 
 function unitPrice(item: CartItem): number {
   return item.menuItem.price
@@ -163,7 +169,7 @@ function historicalInvoice(
     vat: payment.vat,
     vatRate: Number(snapshot.vatRate ?? vatRate),
     total: payment.total,
-    paymentMethod: PAYMENT_METHOD_LABELS[payment.method],
+    paymentMethod: printablePaymentMethod(payment.method),
     paymentStatus: 'Đã thanh toán',
     ...(payment.cashReceived != null ? { cashReceived: payment.cashReceived } : {}),
     ...(payment.cashChange != null ? { cashChange: payment.cashChange } : {}),
@@ -343,7 +349,7 @@ function BillPanel({
   const [departureRequired, setDepartureRequired] = useState(false);
   const [printFormat, setPrintFormat] = useState<InvoicePrintFormat>(initialPrintFormat);
   const paymentCodes = useRef(makePaymentCodes());
-  const keepTableOpenRef = useRef(table.status !== 'done');
+  const keepTableOpenRef = useRef(table.status !== 'served');
   const localPaymentCommittedRef = useRef(false);
   const tableEntryRef = useRef({ id: table.id, status: table.status });
   if (tableEntryRef.current.id !== table.id) {
@@ -407,7 +413,7 @@ function BillPanel({
 
   useEffect(() => {
     paymentCodes.current = makePaymentCodes();
-    keepTableOpenRef.current = tableEntryRef.current.status !== 'done';
+    keepTableOpenRef.current = tableEntryRef.current.status !== 'served';
     localPaymentCommittedRef.current = false;
     setInvoiceData(null);
     setPaymentError(null);
@@ -489,7 +495,7 @@ function BillPanel({
       vat: totals.vat,
       vatRate: settings.vatRate,
       total: totals.total,
-      paymentMethod: PAYMENT_METHOD_LABELS[paymentMethod],
+      paymentMethod: printablePaymentMethod(paymentMethod),
       paymentStatus: 'Đã thanh toán',
       ...(paymentMethod === 'cash' && cashReceived != null ? {
         cashReceived,
@@ -545,7 +551,7 @@ function BillPanel({
         serviceFee: saved.serviceFee,
         vat: saved.vat,
         total: saved.total,
-        paymentMethod: PAYMENT_METHOD_LABELS[saved.method],
+        paymentMethod: printablePaymentMethod(saved.method),
         ...(saved.cashReceived != null ? { cashReceived: saved.cashReceived } : {}),
         ...(saved.cashChange != null ? { cashChange: saved.cashChange } : {}),
         customerName: saved.customerName || invoice.customerName,
@@ -899,8 +905,8 @@ export function PaymentPage({
     ));
   const normalizedQueueSearch = queueSearch.trim().toLocaleLowerCase('vi-VN');
   const visibleUnpaidTables = unpaidTables.filter(table => {
-    if (queueFilter === 'ready' && table.status !== 'done') return false;
-    if (queueFilter === 'early' && table.status === 'done') return false;
+    if (queueFilter === 'ready' && table.status !== 'served') return false;
+    if (queueFilter === 'early' && table.status === 'served') return false;
     if (!normalizedQueueSearch) return true;
     const order = tableOrders[table.id] || [];
     return [
@@ -1084,8 +1090,8 @@ export function PaymentPage({
                 <SlidersHorizontal size={16} aria-hidden="true" />
                 {([
                   ['all', 'Tất cả', unpaidTables.length],
-                  ['ready', 'Món đã xong', unpaidTables.filter(table => table.status === 'done').length],
-                  ['early', 'Có thể trả trước', unpaidTables.filter(table => table.status !== 'done').length],
+                  ['ready', 'Đã phục vụ', unpaidTables.filter(table => table.status === 'served').length],
+                  ['early', 'Có thể trả trước', unpaidTables.filter(table => table.status !== 'served').length],
                 ] as Array<[PaymentQueueFilter, string, number]>).map(([id, label, count]) => (
                   <button
                     type="button"
@@ -1104,14 +1110,14 @@ export function PaymentPage({
               {visibleUnpaidTables.map(table => {
                 const order = tableOrders[table.id] || [];
                 const total = payableTotal(order, settings);
-                const readyToClose = table.status === 'done';
+                const readyToClose = table.status === 'served';
                 return (
                   <button
                     key={table.id}
                     type="button"
                     className={`payment-table-row${readyToClose ? ' ready-to-close' : ' early-payment'}`}
                     onClick={() => openPayment(table.id)}
-                    aria-label={`Thanh toán bàn ${table.number}, ${formatVND(total)}${readyToClose ? ', món đã xong' : ', thanh toán trước khi món hoàn tất'}`}
+                    aria-label={`Thanh toán bàn ${table.number}, ${formatVND(total)}${readyToClose ? ', món đã được phục vụ' : ', thanh toán trước khi phục vụ hoàn tất'}`}
                   >
                     <span className="payment-table-number">{table.number}</span>
 
@@ -1119,7 +1125,7 @@ export function PaymentPage({
                       <span className="payment-table-title">
                         <strong>Bàn {table.number}</strong>
                         <span className={`payment-table-status ${readyToClose ? 'is-ready' : 'is-early'}`}>
-                          {readyToClose ? 'Món đã xong' : 'Có thể trả trước'}
+                          {readyToClose ? 'Đã phục vụ' : 'Có thể trả trước'}
                         </span>
                       </span>
                       <span className="payment-table-meta">
@@ -1189,7 +1195,7 @@ export function PaymentPage({
                 const paidTotal = table.paidTotal ?? payableTotal(order, settings);
                 return (
                   <div
-                    className={`payment-paid-row${table.status === 'done' ? ' is-departure-ready' : ''}`}
+                    className={`payment-paid-row${table.status === 'served' ? ' is-departure-ready' : ''}`}
                     key={table.id}
                     role="listitem"
                   >
@@ -1205,9 +1211,11 @@ export function PaymentPage({
                         <OrderTimer table={table} compact />
                       </span>
                       <span className="payment-paid-guidance">
-                        {table.status === 'done'
-                          ? 'Món đã xong · có thể xác nhận khách rời'
-                          : 'Bếp vẫn đang chuẩn bị món · bàn tiếp tục được giữ'}
+                        {table.status === 'served'
+                          ? 'Món đã được phục vụ · có thể xác nhận khách rời'
+                          : table.status === 'done'
+                            ? 'Bếp đã xong · chờ xác nhận mang món ra bàn'
+                            : 'Bếp vẫn đang chuẩn bị món · bàn tiếp tục được giữ'}
                       </span>
                     </span>
                     <span className="payment-paid-action">
@@ -1221,7 +1229,7 @@ export function PaymentPage({
                           {table.paymentId ? ` · ${table.paymentId}` : ''}
                         </small>
                       </span>
-                      {table.status === 'done' && (
+                      {table.status === 'served' && (
                         <button
                           type="button"
                           className="payment-paid-departure"

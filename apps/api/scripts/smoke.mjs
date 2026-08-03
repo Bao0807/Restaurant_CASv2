@@ -104,6 +104,33 @@ async function finishAllBatches(tableId) {
   }
   throw new Error('Không thể hoàn tất các phiếu bếp trong thời gian smoke test');
 }
+
+async function serveAllReadyBatches(tableId) {
+  const snapshot = await request('/operations');
+  const current = snapshot.tables.find(item => item.id === tableId);
+  if (current?.status === 'served') return current;
+  if (current?.status !== 'done' || !Array.isArray(current.readyBatchIds) || current.readyBatchIds.length === 0) {
+    throw new Error('Bàn chưa có lượt món sẵn sàng để xác nhận phục vụ');
+  }
+  const expectedBatchIds = current.readyBatchIds;
+  const served = await request(`/orders/${tableId}/serve-ready`, {
+    method: 'POST',
+    body: JSON.stringify({ expectedBatchIds }),
+  });
+  if (served.status !== 'served' || served.idempotent) {
+    throw new Error('Xác nhận phục vụ lần đầu trả sai trạng thái');
+  }
+  const retried = await request(`/orders/${tableId}/serve-ready`, {
+    method: 'POST',
+    body: JSON.stringify({ expectedBatchIds }),
+  });
+  if (!retried.idempotent || retried.status !== 'served') {
+    throw new Error('Retry xác nhận phục vụ chưa idempotent hoặc thiếu trạng thái bàn');
+  }
+  const updated = (await request('/operations')).tables.find(item => item.id === tableId);
+  if (updated?.status !== 'served') throw new Error('Xác nhận phục vụ chưa chuyển bàn sang served');
+  return updated;
+}
 try {
   await authenticateForSmoke();
   const health = await request('/health');
@@ -151,7 +178,7 @@ try {
   }
   const activeTable = operations.tables.find(item => item.orderNumber);
   if (activeTable) {
-    const forcedStatus = ['waiting', 'cooking', 'done'].find(status => status !== activeTable.status);
+    const forcedStatus = ['waiting', 'cooking', 'done', 'served'].find(status => status !== activeTable.status);
     await expectApiError(`/tables/${activeTable.id}`, 409, 'ORDER_STATUS_ACTION_REQUIRED', {
       method: 'PUT',
       body: JSON.stringify({ table: { ...activeTable, status: forcedStatus } }),
@@ -559,6 +586,12 @@ try {
   if (readyToLeave?.status !== 'done' || !readyToLeave.isPaid) {
     throw new Error('Bếp chưa hoàn tất order đã thanh toán sớm hoặc làm mất cờ đã thanh toán');
   }
+  await expectApiError(`/orders/${table.id}/serve-ready`, 409, 'ORDER_READY_BATCHES_CHANGED', {
+    method: 'POST',
+    body: JSON.stringify({ expectedBatchIds: [...readyToLeave.readyBatchIds, 9_000_000_000] }),
+  });
+  await expectApiError(`/orders/${table.id}/confirm-departure`, 409, 'ORDER_NOT_READY_FOR_DEPARTURE', { method: 'POST' });
+  await serveAllReadyBatches(table.id);
   const departure = await request(`/orders/${table.id}/confirm-departure`, { method: 'POST' });
   if (!departure.orderClosed || departure.status !== 'empty') throw new Error('Xác nhận khách rời chưa đóng bàn');
   const retriedDeparture = await request(`/orders/${table.id}/confirm-departure`, { method: 'POST' });
@@ -602,14 +635,16 @@ try {
   if (raceTable?.status !== 'done' || !raceTable.isPaid) {
     throw new Error('Bàn thanh toán sớm không giữ trạng thái đã xong và đã thanh toán');
   }
+  await serveAllReadyBatches(table.id);
   await request(`/orders/${table.id}/confirm-departure`, { method: 'POST' });
 
-  // Luồng cũ vẫn giữ nguyên: nếu bắt đầu thanh toán sau khi món đã xong thì đóng bàn ngay.
+  // Nếu bắt đầu thanh toán sau khi món đã được phục vụ thì đóng bàn ngay.
   await request(`/orders/${table.id}`, {
     method: 'PUT',
     body: JSON.stringify({ items: [{ cartId: 'smoke-late-cart', menuItem, quantity: 1, selectedToppings: [] }] }),
   });
   await finishAllBatches(table.id);
+  await serveAllReadyBatches(table.id);
   const lateSuffix = Date.now();
   const latePayment = await request('/payments', {
     method: 'POST',
@@ -621,7 +656,7 @@ try {
     } }),
   });
   if (latePayment.requiresDepartureConfirmation || !latePayment.orderClosed) {
-    throw new Error('Thanh toán sau khi món hoàn tất không đóng bàn theo luồng cũ');
+    throw new Error('Thanh toán sau khi món đã phục vụ không đóng bàn');
   }
   const afterLatePayment = (await request('/operations')).tables.find(item => item.id === table.id);
   if (afterLatePayment?.status !== 'empty' || afterLatePayment.orderNumber || afterLatePayment.isPaid) {

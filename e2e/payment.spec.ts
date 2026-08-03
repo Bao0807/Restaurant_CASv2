@@ -108,7 +108,7 @@ test('tab Thanh toán giữ đúng nhãn, filter và layout POS', async ({ page 
 
   const filters = page.getByRole('group', { name: /Lọc.*thanh toán/i });
   const allFilter = filters.getByRole('button', { name: /^Tất cả(?:\s+\d+)?$/ });
-  const completedFilter = filters.getByRole('button', { name: /^Món đã xong(?:\s+\d+)?$/ });
+  const completedFilter = filters.getByRole('button', { name: /^Đã phục vụ(?:\s+\d+)?$/ });
   const earlyFilter = filters.getByRole('button', { name: /^Có thể trả trước(?:\s+\d+)?$/ });
 
   await expect(filters).toBeVisible();

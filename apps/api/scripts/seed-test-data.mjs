@@ -209,7 +209,9 @@ async function createDemoOrder(connection, tableId, batches, reservationId = nul
 
   const nextStatus = batches.some(batch => batch.status === 'cooking')
     ? 'cooking'
-    : batches.some(batch => batch.status === 'waiting') ? 'waiting' : 'done';
+    : batches.some(batch => batch.status === 'waiting')
+      ? 'waiting'
+      : batches.some(batch => batch.status === 'done') ? 'done' : 'served';
   await connection.query('UPDATE restaurant_tables SET status = ? WHERE id = ?', [nextStatus, tableId]);
 }
 
@@ -536,10 +538,10 @@ async function seed() {
     pool.query("SELECT COUNT(*) AS total FROM payment_transactions WHERE JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.demoSeed')) = ?", [DEMO_SEED_MARKER]),
     pool.query("SELECT COUNT(*) AS total FROM employees WHERE id LIKE 'demo-employee-%' AND active = TRUE"),
     pool.query(`SELECT COUNT(*) AS total FROM reservations WHERE reservation_code IN (${DEMO_RESERVATION_CODES.map(() => '?').join(', ')})`, DEMO_RESERVATION_CODES),
-    pool.query("SELECT SUM(status = 'cooking') AS cooking, SUM(status = 'waiting') AS waiting, SUM(status = 'done') AS done FROM order_batches WHERE table_id LIKE 'demo-table-%'"),
+    pool.query("SELECT SUM(status = 'cooking') AS cooking, SUM(status = 'waiting') AS waiting, SUM(status = 'done') AS done, SUM(status = 'served') AS served FROM order_batches WHERE table_id LIKE 'demo-table-%'"),
   ]);
   console.log(
-    `Seed test completed: tables=${tableCount[0].total}, reservations=${reservationCount[0].total}, activeOrders=${orderCount[0].total}, batches=${batchCount[0].total}, cooking=${queueCounts[0].cooking}, waiting=${queueCounts[0].waiting}, done=${queueCounts[0].done}, payments=${paymentCount[0].total}, employees=${employeeCount[0].total}`,
+    `Seed test completed: tables=${tableCount[0].total}, reservations=${reservationCount[0].total}, activeOrders=${orderCount[0].total}, batches=${batchCount[0].total}, cooking=${queueCounts[0].cooking}, waiting=${queueCounts[0].waiting}, done=${queueCounts[0].done}, served=${queueCounts[0].served}, payments=${paymentCount[0].total}, employees=${employeeCount[0].total}`,
   );
 }
 

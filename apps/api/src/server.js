@@ -112,6 +112,21 @@ function boundedInteger(value, field, min, max) {
   return normalized;
 }
 
+function boundedIntegerArray(value, field, min, max) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 500) {
+    const error = httpError(400, 'VALIDATION_ERROR', `${field} không hợp lệ.`);
+    error.field = field;
+    throw error;
+  }
+  const normalized = value.map((entry, index) => boundedInteger(entry, `${field}.${index}`, min, max));
+  if (new Set(normalized).size !== normalized.length) {
+    const error = httpError(400, 'VALIDATION_ERROR', `${field} không được chứa mã trùng nhau.`);
+    error.field = field;
+    throw error;
+  }
+  return normalized.sort((left, right) => left - right);
+}
+
 const DEFAULT_TABLE_AREA = 'Khu vực chung';
 
 function normalizeTableArea(value, fallback = DEFAULT_TABLE_AREA) {
@@ -882,7 +897,8 @@ app.get('/api/operations', requireDatabase, asyncRoute(async (_req, res) => {
       `SELECT id AS batchId, order_id AS orderId, table_id AS tableId,
         batch_number AS batchNumber, items, status, is_addition AS isAddition,
         queued_at AS queuedAt, cooking_started_at AS cookingStartedAt,
-        completed_at AS completedAt, estimated_cook_minutes AS estimatedCookMinutes,
+        completed_at AS completedAt, served_at AS servedAt,
+        estimated_cook_minutes AS estimatedCookMinutes,
         DATE_FORMAT(inventory_date, '%Y-%m-%d') AS inventoryDate
        FROM order_batches
        ORDER BY queued_at, id`,
@@ -980,6 +996,7 @@ app.get('/api/operations', requireDatabase, asyncRoute(async (_req, res) => {
       const cookingBatches = batches.filter(batch => batch.status === 'cooking');
       const waitingBatches = batches.filter(batch => batch.status === 'waiting');
       const doneBatches = batches.filter(batch => batch.status === 'done');
+      const servedBatches = batches.filter(batch => batch.status === 'served');
       const nextReservationRow = reservationsByTable.get(row.id)?.[0];
       if (waitingBatches.length > 0) {
         waitingBatchesByTable[row.id] = waitingBatches
@@ -1041,6 +1058,8 @@ app.get('/api/operations', requireDatabase, asyncRoute(async (_req, res) => {
         waitingBatchCount: waitingBatches.length,
         cookingBatchCount: cookingBatches.length,
         doneBatchCount: doneBatches.length,
+        readyBatchIds: doneBatches.map(batch => Number(batch.batchId)).sort((left, right) => left - right),
+        servedBatchCount: servedBatches.length,
         latestBatchNumber: batches.length ? Math.max(...batches.map(batch => Number(batch.batchNumber))) : 0,
       };
     });
@@ -1462,7 +1481,7 @@ app.put('/api/tables/:tableId', requireDatabase, managerOnly, asyncRoute(async (
   if (status === 'reserved') {
     throw httpError(400, 'USE_RESERVATIONS', 'Hãy tạo lịch trong mục Đặt bàn thay vì giữ bàn thủ công.');
   }
-  const allowedStatuses = new Set(['empty', 'waiting', 'cooking', 'done']);
+  const allowedStatuses = new Set(['empty', 'waiting', 'cooking', 'done', 'served']);
   if (!allowedStatuses.has(status)) throw httpError(400, 'VALIDATION_ERROR', 'Trạng thái bàn không hợp lệ.');
   const connection = await getPool().getConnection();
   try {
@@ -1490,10 +1509,10 @@ app.put('/api/tables/:tableId', requireDatabase, managerOnly, asyncRoute(async (
     if (seats < largestParty) {
       throw httpError(409, 'TABLE_CAPACITY_RESERVED', `Bàn đang có lịch ${largestParty} khách nên không thể giảm còn ${seats} chỗ.`);
     }
-    if (hasOrder && !['waiting', 'cooking', 'done'].includes(status)) {
+    if (hasOrder && !['waiting', 'cooking', 'done', 'served'].includes(status)) {
       throw httpError(409, 'TABLE_HAS_ORDER', 'Bàn đang phục vụ nên không thể chuyển sang trạng thái này.');
     }
-    if (!hasOrder && ['waiting', 'cooking', 'done'].includes(status)) {
+    if (!hasOrder && ['waiting', 'cooking', 'done', 'served'].includes(status)) {
       throw httpError(409, 'ORDER_NOT_FOUND', 'Bàn cần có món trước khi chọn trạng thái phục vụ.');
     }
     if (hasOrder && status !== rows[0].status) {
@@ -1702,8 +1721,90 @@ app.patch('/api/tables/:tableId/status', requireDatabase, serviceOrKitchenStaff,
   }
 }));
 
+/** Xác nhận các lượt bếp đã xong thực sự được mang ra bàn. */
+app.post('/api/orders/:tableId/serve-ready', requireDatabase, frontOfHouse, asyncRoute(async (req, res) => {
+  const expectedBatchIds = boundedIntegerArray(
+    req.body?.expectedBatchIds,
+    'expectedBatchIds',
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  const connection = await getPool().getConnection();
+  try {
+    await connection.beginTransaction();
+    await lockKitchenQueue(connection);
+    const [tables] = await connection.query(
+      `SELECT t.id, t.status, o.id AS orderId
+       FROM restaurant_tables t
+       LEFT JOIN active_orders o ON o.table_id = t.id
+       WHERE t.id = ? FOR UPDATE`,
+      [req.params.tableId],
+    );
+    const table = tables[0];
+    if (!table) throw httpError(404, 'TABLE_NOT_FOUND', 'Không tìm thấy bàn.');
+    if (!table.orderId) throw httpError(409, 'ORDER_NOT_FOUND', 'Bàn chưa có món đang phục vụ.');
+
+    const [batches] = await connection.query(
+      `SELECT id, status FROM order_batches
+       WHERE order_id = ? ORDER BY id FOR UPDATE`,
+      [table.orderId],
+    );
+    const currentReadyIds = batches
+      .filter(batch => batch.status === 'done')
+      .map(batch => Number(batch.id))
+      .sort((left, right) => left - right);
+    const expectedKey = expectedBatchIds.join(',');
+    const currentKey = currentReadyIds.join(',');
+
+    if (currentKey !== expectedKey) {
+      const statusById = new Map(batches.map(batch => [Number(batch.id), batch.status]));
+      const idempotentRetry = currentReadyIds.length === 0
+        && expectedBatchIds.every(batchId => statusById.get(batchId) === 'served');
+      if (!idempotentRetry) {
+        throw httpError(
+          409,
+          'ORDER_READY_BATCHES_CHANGED',
+          'Danh sách món sẵn sàng đã thay đổi. Hãy tải lại trạng thái bàn trước khi xác nhận phục vụ.',
+        );
+      }
+      await connection.commit();
+      res.json({
+        ok: true,
+        status: table.status,
+        idempotent: true,
+        servedBatchIds: expectedBatchIds,
+      });
+      return;
+    }
+
+    const placeholders = expectedBatchIds.map(() => '?').join(', ');
+    const [updated] = await connection.query(
+      `UPDATE order_batches
+       SET status = 'served', served_at = CURRENT_TIMESTAMP(3)
+       WHERE order_id = ? AND status = 'done' AND id IN (${placeholders})`,
+      [table.orderId, ...expectedBatchIds],
+    );
+    if (updated.affectedRows !== expectedBatchIds.length) {
+      throw httpError(409, 'ORDER_READY_BATCHES_CHANGED', 'Món sẵn sàng đã được xử lý trên thiết bị khác.');
+    }
+    await syncTableStatuses(connection, [table.id]);
+    const [updatedTables] = await connection.query('SELECT status FROM restaurant_tables WHERE id = ?', [table.id]);
+    await connection.commit();
+    res.json({
+      ok: true,
+      status: updatedTables[0].status,
+      servedBatchIds: expectedBatchIds,
+    });
+  } catch (error) {
+    await connection.rollback().catch(() => {});
+    throw error;
+  } finally {
+    connection.release();
+  }
+}));
+
 /**
- * Đóng một order đã thanh toán sớm sau khi bếp hoàn tất và nhân viên xác nhận khách đã rời bàn.
+ * Đóng một order đã thanh toán sớm sau khi món đã được phục vụ và nhân viên xác nhận khách rời bàn.
  * Xóa order, hoàn tất lịch đặt bàn và trả bàn về trống trong cùng một transaction.
  */
 app.post('/api/orders/:tableId/confirm-departure', requireDatabase, frontOfHouse, asyncRoute(async (req, res) => {
@@ -1761,7 +1862,7 @@ app.post('/api/orders/:tableId/confirm-departure', requireDatabase, frontOfHouse
       throw httpError(
         409,
         'ORDER_NOT_READY_FOR_DEPARTURE',
-        'Bếp chưa hoàn tất tất cả lượt gọi nên chưa thể đóng bàn.',
+        'Chưa xác nhận đã phục vụ tất cả lượt gọi nên chưa thể đóng bàn.',
       );
     }
 
@@ -1995,7 +2096,7 @@ app.get('/api/payments/:invoiceCode', requireDatabase, paymentStaff, asyncRoute(
   });
 }));
 
-// Thanh toán luôn chốt hóa đơn; chỉ đóng order ngay khi toàn bộ phiếu bếp đã xong.
+// Thanh toán luôn chốt hóa đơn; chỉ đóng order ngay khi toàn bộ lượt đã được phục vụ.
 app.post('/api/payments', requireDatabase, paymentStaff, asyncRoute(async (req, res) => {
   const draft = req.body?.payment;
   const tableId = typeof draft?.tableId === 'string' ? draft.tableId : '';
@@ -2298,7 +2399,7 @@ const retryTimer = setInterval(() => {
 retryTimer.unref();
 
 /**
- * Đồng hồ bếp phía server: tự hoàn tất batch đủ ETA và cấp slot FIFO kế tiếp.
+ * Đồng hồ bếp phía server chỉ cấp slot FIFO; ETA không tự xác nhận món đã hoàn tất.
  * Guard trong RAM chỉ chống chồng vòng tại một process; khóa MySQL vẫn bảo vệ nhiều instance.
  */
 const kitchenCycleTimer = setInterval(async () => {

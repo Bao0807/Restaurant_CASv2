@@ -100,10 +100,10 @@ export function OrderTimer({ table, compact = false }: { table: Table; compact?:
       style={timerStyle}
       role="timer"
       aria-label={etaReached
-        ? 'Đã đủ thời gian nấu. Đang đồng bộ trạng thái hoàn tất với bếp.'
+        ? 'Đã quá thời gian dự kiến. Đang chờ bếp xác nhận món hoàn tất.'
         : `${primaryText} để hoàn tất. Đã nấu ${displayedCookingElapsed} trên dự kiến ${expectedMinutes} phút.`}
       title={etaReached
-        ? 'Đã đủ ETA · Đang đồng bộ trạng thái hoàn tất'
+        ? 'Đã quá ETA · Chờ bếp xác nhận hoàn tất'
         : `${primaryText} · Đã nấu ${displayedCookingElapsed} / dự kiến ${expectedMinutes} phút`}
     >
       <span className="order-timer__summary">

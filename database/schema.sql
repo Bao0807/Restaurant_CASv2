@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS restaurant_tables (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT chk_restaurant_table_number CHECK (table_number BETWEEN 1 AND 999),
   CONSTRAINT chk_restaurant_table_seats CHECK (seats BETWEEN 1 AND 100),
-  CONSTRAINT chk_restaurant_table_status CHECK (status IN ('empty', 'waiting', 'cooking', 'done')),
+  CONSTRAINT chk_restaurant_table_status CHECK (status IN ('empty', 'waiting', 'cooking', 'done', 'served')),
   CONSTRAINT chk_restaurant_table_area CHECK (CHAR_LENGTH(TRIM(area)) BETWEEN 1 AND 80),
   CONSTRAINT chk_restaurant_table_position CHECK (
     (position_x IS NULL AND position_y IS NULL)
@@ -172,13 +172,21 @@ CREATE TABLE IF NOT EXISTS order_batches (
   queued_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   cooking_started_at DATETIME(3) NULL,
   completed_at DATETIME(3) NULL,
+  served_at DATETIME(3) NULL,
   estimated_cook_minutes INT UNSIGNED NOT NULL DEFAULT 10,
   inventory_date DATE NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT fk_order_batch_order_table FOREIGN KEY (order_id, table_id) REFERENCES active_orders(id, table_id) ON DELETE CASCADE,
   CONSTRAINT uq_order_batch_number UNIQUE (order_id, batch_number),
-  CONSTRAINT chk_order_batch_status CHECK (status IN ('waiting', 'cooking', 'done')),
+  CONSTRAINT chk_order_batch_status CHECK (status IN ('waiting', 'cooking', 'done', 'served')),
+  CONSTRAINT chk_order_batch_lifecycle CHECK (
+    (status = 'waiting' AND cooking_started_at IS NULL AND completed_at IS NULL AND served_at IS NULL)
+    OR (status = 'cooking' AND cooking_started_at IS NOT NULL AND completed_at IS NULL AND served_at IS NULL)
+    OR (status = 'done' AND cooking_started_at IS NOT NULL AND completed_at IS NOT NULL AND served_at IS NULL)
+    OR (status = 'served' AND cooking_started_at IS NOT NULL AND completed_at IS NOT NULL
+      AND served_at IS NOT NULL AND served_at >= completed_at)
+  ),
   CONSTRAINT chk_order_batch_eta CHECK (estimated_cook_minutes BETWEEN 1 AND 23760),
   INDEX idx_order_batch_queue (status, queued_at, id),
   INDEX idx_order_batch_table (table_id, status)

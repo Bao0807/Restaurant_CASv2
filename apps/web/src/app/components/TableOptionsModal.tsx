@@ -38,6 +38,7 @@ interface TableOptionsModalProps {
   onEditOrder: (batchId: number) => void;
   onDeleteOrder: () => Promise<void>;
   onMarkDone: () => Promise<void>;
+  onMarkServed: () => Promise<void>;
   onConfirmDeparture: () => Promise<void>;
   onCheckInReservation: () => Promise<void>;
   onPay: () => void;
@@ -93,6 +94,9 @@ function deleteBlockedReason(table: Table): string {
   if ((table.doneBatchCount ?? 0) > 0 || table.status === 'done') {
     return 'Không thể hủy vì đã có phiếu nấu xong';
   }
+  if ((table.servedBatchCount ?? 0) > 0 || table.status === 'served') {
+    return 'Không thể hủy vì đã có món được phục vụ';
+  }
   return 'Chỉ có thể hủy khi toàn bộ phiếu còn đang chờ';
 }
 
@@ -107,6 +111,7 @@ export function TableOptionsModal({
   onEditOrder,
   onDeleteOrder,
   onMarkDone,
+  onMarkServed,
   onConfirmDeparture,
   onCheckInReservation,
   onPay,
@@ -122,6 +127,7 @@ export function TableOptionsModal({
   const [showDeleteConfirmation, setShowDeleteConfirmation] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [markDoneBusy, setMarkDoneBusy] = useState(false);
+  const [markServedBusy, setMarkServedBusy] = useState(false);
   const [departureBusy, setDepartureBusy] = useState(false);
   const [checkInBusy, setCheckInBusy] = useState(false);
   const [showDepartureConfirmation, setShowDepartureConfirmation] = useState(false);
@@ -415,14 +421,45 @@ export function TableOptionsModal({
               </button>
             )}
 
-            {table.isPaid && table.status !== 'done' && (
+            {canManageOrders && (table.doneBatchCount ?? 0) > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (markServedBusy) return;
+                  setMarkServedBusy(true);
+                  void onMarkServed().then(
+                    () => {
+                      setMarkServedBusy(false);
+                      closeAfterAction();
+                    },
+                    () => setMarkServedBusy(false),
+                  );
+                }}
+                disabled={markServedBusy}
+                aria-busy={markServedBusy}
+                className="table-option-action table-option-action-served"
+              >
+                <span className="table-option-action-icon table-option-action-icon-served"><BadgeCheck size={19} /></span>
+                <span className="table-option-action-copy">
+                  <strong>{markServedBusy ? 'Đang xác nhận…' : 'Đã mang món ra bàn'}</strong>
+                  <small>
+                    {markServedBusy
+                      ? 'Đang cập nhật…'
+                      : `Xác nhận ${(table.doneBatchCount ?? 0)} lượt món đã được phục vụ`}
+                  </small>
+                </span>
+                <ChevronRight size={18} />
+              </button>
+            )}
+
+            {table.isPaid && table.status !== 'served' && (
               <div className="table-options-information" style={{ background: '#F0FDF4', borderColor: '#86EFAC', color: '#166534' }}>
                 <BadgeCheck size={17} />
-                Bàn đã thanh toán và vẫn đang phục vụ. Chờ bếp hoàn tất món trước khi xác nhận khách rời.
+                Bàn đã thanh toán và vẫn đang phục vụ. Hoàn tất món và xác nhận đã mang ra trước khi đóng bàn.
               </div>
             )}
 
-            {canManageOrders && table.isPaid && table.status === 'done' && (
+            {canManageOrders && table.isPaid && table.status === 'served' && (
               <button
                 type="button"
                 onClick={() => setShowDepartureConfirmation(true)}

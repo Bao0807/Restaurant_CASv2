@@ -32,17 +32,18 @@ const order: CartItem[] = [{
   note: '',
 }];
 
-function renderForRole(role: EmployeeRole) {
+function renderForRole(role: EmployeeRole, tableOverrides: Partial<Table> = {}) {
   return render(
     <TableOptionsModal
       role={role}
-      table={table}
+      table={{ ...table, ...tableOverrides }}
       order={order}
       onClose={vi.fn()}
       onStartOrder={vi.fn()}
       onEditOrder={vi.fn()}
       onDeleteOrder={vi.fn().mockResolvedValue(undefined)}
       onMarkDone={vi.fn().mockResolvedValue(undefined)}
+      onMarkServed={vi.fn().mockResolvedValue(undefined)}
       onConfirmDeparture={vi.fn().mockResolvedValue(undefined)}
       onCheckInReservation={vi.fn().mockResolvedValue(undefined)}
       onPay={vi.fn()}
@@ -73,5 +74,13 @@ describe('TableOptionsModal RBAC', () => {
     expect(screen.getByText('Thanh toán bàn này')).toBeInTheDocument();
     expect(screen.getByText('Hủy phiếu gọi món')).toBeInTheDocument();
     expect(screen.queryByText('Đánh dấu xong nấu')).not.toBeInTheDocument();
+  });
+
+  test('front of house can confirm ready dishes were served but chef cannot', () => {
+    renderForRole('server', { status: 'done', doneBatchCount: 1, readyBatchIds: [12] });
+    expect(screen.getByText('Đã mang món ra bàn')).toBeInTheDocument();
+    cleanup();
+    renderForRole('chef', { status: 'done', doneBatchCount: 1, readyBatchIds: [12] });
+    expect(screen.queryByText('Đã mang món ra bàn')).not.toBeInTheDocument();
   });
 });

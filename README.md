@@ -63,10 +63,10 @@ npm run dev:web
 | Biểu đồ | Recharts, lazy-loaded | Báo cáo doanh thu và hóa đơn theo giờ/ngày/tuần |
 | Giao diện | CSS responsive, Lucide | Desktop, tablet, mobile, phiếu bếp 80 mm và hóa đơn A4/80 mm |
 
-| Quality gate gần nhất | Kết quả ngày 31/07/2026 |
+| Quality gate gần nhất | Kết quả ngày 03/08/2026 |
 |---|---:|
-| Unit test backend | `38/38` đạt |
-| Unit/a11y test frontend | `4/4` đạt |
+| Unit test backend | `40/40` đạt |
+| Unit/a11y test frontend | `10/10` đạt |
 | Browser E2E Chromium | `2/2` đạt |
 | Database audit read-only | `33/33` nhóm đạt |
 | ESLint | Đạt, không warning |
@@ -132,9 +132,9 @@ Các kết quả trên có thể tái lập bằng lệnh trong [Scripts và ki�
 - **Đặt bàn:** chọn giờ theo mốc 15 phút, kiểm tra sức chứa và chồng/sát lịch trong transaction; hỗ trợ `booked`, `seated`, `completed`, `cancelled` và `no_show`.
 - **Order theo lượt:** `active_orders` giữ bill tổng hợp, còn mỗi lần gọi tạo một `order_batch` FIFO riêng để sửa, in và điều phối bếp.
 - **Hạn mức món theo ngày:** giữ số phần khi gửi bếp, cập nhật chênh lệch khi sửa phiếu chờ, hoàn khi hủy order toàn `waiting` và tự dùng bucket mới theo `BUSINESS_TIME_ZONE`.
-- **Bếp:** FIFO, giới hạn số batch nấu song song, tự động/thủ công/tạm dừng, tự hoàn tất theo ETA, phát hiện lỗi đồng bộ và chống thao tác từ snapshot cũ bằng `batchId/version`.
+- **Bếp:** FIFO, giới hạn số batch nấu song song, tự động/thủ công/tạm dừng, ETA chỉ dùng cảnh báo; bếp xác nhận hoàn tất và phục vụ xác nhận đã mang món bằng `batchId/version`.
 - **ETA tin cậy:** backend tính từ catalog MySQL theo `cookMinutes × quantity`; timer giao diện hiệu chỉnh bằng `serverNow`.
-- **Thanh toán:** tiền mặt, thẻ hoặc QR; trả sau đóng bàn ngay, trả trước giữ queue và bàn đến khi nhân viên xác nhận khách rời.
+- **Thanh toán:** tiền mặt và ghi nhận nội bộ phương thức thẻ/QR; trả sau khi món đã phục vụ sẽ đóng bàn, trả trước giữ queue và bàn đến khi nhân viên xác nhận khách rời.
 - **In ấn:** phiếu bếp 80 mm riêng cho từng lượt gọi; hóa đơn thanh toán hỗ trợ A4 và cuộn nhiệt 80 mm, có thể mở/in lại từ lịch sử.
 - **Bảo mật vận hành:** session cookie `HttpOnly/Secure/SameSite`, thời hạn phiên, giới hạn đăng nhập sai theo IP và RBAC `manager/cashier/server/chef`.
 - **Quản trị:** bàn/khu vực, thực đơn, hạn mức ngày, thời gian nấu, nhân viên/ca, cấu hình bếp và thương hiệu.
@@ -283,7 +283,7 @@ Chỉnh `apps/api/.env` trước khi chạy. Không commit `.env`; các file nà
 | `AUTH_SESSION_HOURS` | `8` | Thời hạn phiên, từ 1 giờ đến 30 ngày |
 | `TRUST_PROXY` | để trống | Đặt `loopback` khi API chạy sau reverse proxy cùng máy; quyết định IP dùng cho rate limit/log |
 | `KITCHEN_CONCURRENCY` | `2` | Công suất bếp khởi tạo |
-| `KITCHEN_STALE_MINUTES` | `120` | Ngưỡng chẩn đoán batch không tự đồng bộ sau ETA |
+| `KITCHEN_STALE_MINUTES` | `120` | Khoảng gia hạn sau ETA trước khi batch đang nấu được gắn cảnh báo quá hạn |
 | `BUSINESS_TIME_ZONE` | `Asia/Ho_Chi_Minh` | Múi giờ xác định ngày kinh doanh và thời điểm đặt lại số phần món |
 | `DB_HOST` | `127.0.0.1` | Máy chủ MySQL |
 | `DB_PORT` | `3306` | Cổng MySQL |
@@ -333,6 +333,69 @@ npm run db:schema
 ```
 
 Lệnh này hỏi mật khẩu tương tác và không đặt mật khẩu trên command line. Do `schema.sql` dùng `CREATE TABLE IF NOT EXISTS`, nó không thay thế migration/backfill cho database hiện hữu và không tôn trọng `DB_NAME` tùy chỉnh.
+
+### Backup và restore drill an toàn
+
+Repository có cặp công cụ backup/khôi phục để kiểm chứng trước khi migration. Máy chạy lệnh cần có MySQL 8 CLI (`mysqldump` và `mysql`) trong `PATH`, hoặc truyền đường dẫn executable bằng tham số như ví dụ Windows bên dưới. Công cụ đọc kết nối từ `apps/api/.env` hoặc các biến `DB_*`; mật khẩu chỉ được truyền qua environment của child process, không xuất hiện trong command line.
+
+Tạo thư mục backup **ngoài repository**, giới hạn quyền truy cập, rồi tạo một file mới:
+
+```powershell
+$backupDirectory = Join-Path $env:USERPROFILE 'RestaurantCASBackups'
+New-Item -ItemType Directory -Force -Path $backupDirectory
+$backupFile = Join-Path $backupDirectory "restaurant_casv2-$(Get-Date -Format 'yyyyMMdd-HHmmss').sql"
+npm run db:backup -- --output $backupFile
+```
+
+Nếu MySQL 8 trên Windows chưa có trong `PATH`:
+
+```powershell
+$mysqldump = 'C:\Program Files\MySQL\MySQL Server 8.0\bin\mysqldump.exe'
+npm run db:backup -- --output $backupFile --mysqldump-bin $mysqldump
+```
+
+```bash
+mkdir -p "$HOME/restaurant-cas-backups"
+chmod 700 "$HOME/restaurant-cas-backups"
+npm run db:backup -- --output "$HOME/restaurant-cas-backups/restaurant_casv2-20260803-120000.sql"
+```
+
+Lệnh backup dùng snapshot `--single-transaction`, không khóa bảng InnoDB và không ghi database nguồn. Nó không ghi đè file đã tồn tại, đồng thời tạo file SHA-256 cạnh dump, ví dụ `restaurant_casv2-20260803-120000.sql.sha256`. Phải lưu cả hai file. Ứng dụng hiện không dùng stored routine, event hoặc trigger, nên công cụ cố ý loại các object có thể thực thi này và chỉ sao lưu schema + dữ liệu ứng dụng.
+
+Có thể kiểm tra tham số mà không kết nối MySQL hoặc tạo file:
+
+```powershell
+npm run db:backup -- --output C:\Backups\restaurant-casv2-check.sql --dry-run
+```
+
+Định kỳ khôi phục vào một database drill **mới, riêng biệt**. Tên đích bắt buộc chứa từ `restore_drill`, không được trùng `DB_NAME`/database nguồn và không được tồn tại trước đó:
+
+```powershell
+npm run db:restore:drill -- --backup $backupFile --target-db restaurant_casv2_restore_drill_20260803
+```
+
+Trên Windows có thể chỉ rõ MySQL client:
+
+```powershell
+$mysql = 'C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe'
+npm run db:restore:drill -- --backup $backupFile --target-db restaurant_casv2_restore_drill_20260803 --mysql-bin $mysql
+```
+
+```bash
+npm run db:restore:drill -- \
+  --backup "$HOME/restaurant-cas-backups/restaurant_casv2-20260803-120000.sql" \
+  --target-db restaurant_casv2_restore_drill_20260803
+```
+
+Chỉ restore file do chính `db:backup` tạo, giữ cả dump/checksum trong thư mục NTFS riêng tư (và mã hóa ổ đĩa nếu có dữ liệu thật); checksum phát hiện file bị thay đổi nhưng không thay thế chữ ký số. Nếu user runtime không có quyền `CREATE DATABASE`, cấp riêng `RESTORE_DB_USER` và `RESTORE_DB_PASSWORD` qua secret của terminal/CI. Ưu tiên một MySQL staging tách biệt hoặc tài khoản drill có quyền tối thiểu; không dùng tài khoản production đặc quyền để nhập dump không tin cậy. Có thể dùng `RESTORE_DB_HOST` và `RESTORE_DB_PORT` cho máy staging. Script kiểm tra checksum, chặn thêm các lệnh cấp database/tài khoản/server và tham chiếu ghi chéo database phổ biến, từ chối mọi database đích đã tồn tại, tạo database drill đúng một lần, restore rồi tự chạy `db:audit` ở chế độ READ ONLY. Các kiểm tra văn bản là lớp phòng vệ bổ sung, không phải SQL sandbox. Script **không bao giờ chạy `DROP DATABASE`** và để database drill lại cho DBA kiểm tra/xóa thủ công sau đó.
+
+Kiểm tra toàn bộ file và kế hoạch mà không kết nối hoặc restore:
+
+```powershell
+npm run db:restore:drill -- --backup $backupFile --target-db restaurant_casv2_restore_drill_check --dry-run
+```
+
+Đây chỉ là tooling theo yêu cầu, **không phải lịch backup tự động** và không tự xóa bản cũ. Chính sách tối thiểu đề xuất là backup hằng ngày, backup riêng trước mọi migration, giữ 7 bản ngày + 4 bản tuần + 6 bản tháng, mã hóa và sao chép sang thiết bị/vị trí khác. Với backup hằng ngày, RPO tốt nhất chỉ là tối đa khoảng 24 giờ; nếu nghiệp vụ chấp nhận mất tối đa 15 phút dữ liệu thì phải bổ sung backup/binlog liên tục tương ứng. Chạy restore drill ít nhất mỗi tháng và ghi nhận thời gian thực tế làm RTO thay vì chỉ tuyên bố một con số chưa kiểm chứng.
 
 ### Nạp dữ liệu đầy đủ để test
 
@@ -399,7 +462,7 @@ erDiagram
 
 ### Kết quả rà soát database
 
-Ngày 01/08/2026, database MySQL `8.0.46` đạt toàn bộ `32` nhóm kiểm tra bắt buộc ở chế độ `READ ONLY`: không có bản ghi mồ côi, batch gắn sai bàn, order lệch tổng hợp, lịch mở chồng nhau, hóa đơn trả trước mất liên kết hoặc ledger món thấp hơn số phần đang hoạt động. Audit còn cảnh báo hai lịch `booked` đã quá giờ; nhân viên có thể xử lý chúng trong phạm vi **Cần xử lý** của màn Đặt bàn.
+Ngày 03/08/2026, database MySQL `8.0.46` đạt toàn bộ `33/33` nhóm kiểm tra bắt buộc ở chế độ `READ ONLY`: không có bản ghi mồ côi, batch gắn sai bàn, order lệch tổng hợp, lịch mở chồng nhau, hóa đơn trả trước mất liên kết, sai vòng đời `waiting → cooking → done → served` hoặc ledger món thấp hơn số phần đang hoạt động. Trạng thái dữ liệu vận hành thay đổi theo thời gian, vì vậy hãy chạy lại `npm run db:audit` thay vì dựa vào snapshot này.
 
 Các giới hạn cấu trúc đã biết nhưng **không gây corruption trong dữ liệu hiện tại**:
 
@@ -447,14 +510,14 @@ Development cho phép `localhost`, `127.x`, IPv6 loopback, `10.x`, `192.168.x` v
 7. Phiếu bếp của lượt mới có thể in riêng; batch được xếp cuối queue bằng `queued_at, id`.
 8. Queue khóa `kitchen_queue_state`, đếm slot trống và lấy batch FIFO.
 9. Batch được lấy chuyển `waiting → cooking` và ghi `cooking_started_at`; trạng thái bàn được suy ra từ tất cả batch của bàn.
-10. Mỗi giây backend so sánh `cooking_started_at + estimated_cook_minutes` với thời gian UTC MySQL. Batch đủ ETA tự chuyển `cooking → done`.
-11. Queue tự lấy batch FIFO tiếp theo nếu đang ở chế độ tự động. Bàn chỉ `done` khi không còn batch chờ/nấu; khi pause/manual, món hiện tại vẫn hoàn tất nhưng không tự lấy món mới.
+10. ETA chỉ tạo cảnh báo quá thời gian; batch chỉ chuyển `cooking → done` khi bếp xác nhận món thực sự hoàn tất.
+11. Queue tự lấy batch FIFO tiếp theo nếu đang ở chế độ tự động. `done` nghĩa là cần mang món; nhân viên phục vụ xác nhận `done → served`. Khi pause/manual, món đang nấu không tự hoàn tất và queue không tự lấy món mới.
 12. Khi sửa, client gửi đúng `batchId`; transaction chỉ chấp nhận batch vẫn `waiting`, canonicalize lại món/ETA, điều chỉnh số phần theo chênh lệch và rebuild giỏ tổng từ toàn bộ batch. Nếu phiếu chờ được sửa sau khi đã sang ngày mới, phần cũ được trả về bucket cũ và nội dung mới được giữ ở bucket ngày hiện tại.
-13. Hủy order chỉ hợp lệ khi tất cả batch còn `waiting`; transaction hoàn lại số phần đã giữ theo `inventory_date`. Batch đã `cooking` hoặc `done` không được hoàn hạn mức.
+13. Hủy order chỉ hợp lệ khi tất cả batch còn `waiting`; transaction hoàn lại số phần đã giữ theo `inventory_date`. Batch đã `cooking`, `done` hoặc `served` không được hoàn hạn mức.
 14. Trạng thái order không được ép qua CRUD bàn; mọi chuyển trạng thái phải đi qua action queue để không vượt công suất bếp.
 15. Hoàn tất/đưa lại hàng chờ phải gửi đúng `expectedBatchId`; retry, bấm kép hoặc client dùng snapshot cũ không thể tác động nhầm phiếu kế tiếp.
 16. Cấu hình bếp được cập nhật từng phần bằng `PATCH` kèm `expectedVersion`; backend khóa singleton và trả `409` nếu máy POS đang dùng phiên bản cũ, tránh ghi đè công suất/chế độ vừa được máy khác thay đổi.
-17. Mỗi snapshot trả `serverNow`; frontend dùng đồng hồ server đã hiệu chỉnh cho timer và yêu cầu đồng bộ ngay tại ETA. API cũng catch-up queue trước khi trả `/api/operations`, nên giao diện không tạo trạng thái “quá nấu”; ngưỡng `KITCHEN_STALE_MINUTES` chỉ dùng chẩn đoán sự cố không tự đồng bộ.
+17. Mỗi snapshot trả `serverNow`; frontend dùng đồng hồ server đã hiệu chỉnh cho timer. API chỉ dùng ETA và `KITCHEN_STALE_MINUTES` để đánh dấu gần trễ/quá hạn; polling giữ nhịp 3 giây và không tự đổi `cooking → done`.
 
 ### Đặt bàn trước
 
@@ -463,7 +526,7 @@ Development cho phép `localhost`, `127.x`, IPv6 loopback, `10.x`, `192.168.x` v
 3. Chỉ lịch `booked` được sửa; client gửi `expectedVersion`, vì vậy bản ghi cũ nhận `409` thay vì ghi đè thay đổi mới hơn.
 4. Vòng đời hợp lệ là `booked → seated → completed` hoặc `booked → cancelled/no_show`. Check-in được phép sớm tối đa 60 phút; đánh dấu `no_show` sau 15 phút kể từ giờ hẹn.
 5. Check-in chuyển lịch sang `seated`, mở đúng bàn để gọi món và liên kết `reservation_id` với active order. Không thể hoàn tất lịch `seated` khi bàn vẫn còn order mở.
-6. Thanh toán luôn lưu snapshot mã đặt bàn, tên khách và số khách vào hóa đơn. Nếu trả sau khi món đã xong, lịch `seated` hoàn tất ngay; nếu trả trước, lịch vẫn giữ `seated` cho đến khi món xong và nhân viên xác nhận khách đã rời.
+6. Thanh toán luôn lưu snapshot mã đặt bàn, tên khách và số khách vào hóa đơn. Nếu trả sau khi mọi món đã được phục vụ (`served`), lịch `seated` hoàn tất ngay; nếu trả trước, lịch vẫn giữ `seated` cho đến khi món được mang ra và nhân viên xác nhận khách đã rời.
 7. Lịch tương lai chỉ hiển thị trên thẻ bàn bằng `nextReservation`. Bàn chỉ được giữ khi khách đã `seated` hoặc lịch `booked` còn không quá 15 phút; lịch buổi tối không khóa bàn từ đầu ngày.
 8. Phạm vi **Cần xử lý** liệt kê lịch `booked` đã qua giờ kết thúc để nhân viên xác nhận `no_show` hoặc hủy; hệ thống không tự đóng lịch và không tự thay đổi dữ liệu khách.
 
@@ -474,9 +537,9 @@ Development cho phép `localhost`, `127.x`, IPv6 loopback, `10.x`, `192.168.x` v
 3. Backend khóa bàn/order/batch, từ chối order đã có hóa đơn và xác định có cần giữ bàn hay không. Cờ `payment.keepTableOpen` giữ nguyên ý định trả trước nếu bếp vừa hoàn tất trong lúc màn thanh toán đang mở.
 4. Backend xác thực nhân viên còn hoạt động đúng vai trò Phục vụ, đọc settings và tính subtotal, discount, service fee, VAT, total.
 5. Tất cả món từ mọi lượt gọi được ghi vào cùng header; item lưu snapshot danh mục để báo cáo lịch sử không đổi theo catalog. Nếu order đến từ đặt bàn, header đồng thời lưu snapshot khách và lịch đặt.
-6. **Trả sau:** nếu mọi batch đã `done` và không yêu cầu giữ bàn, giao dịch nhận `service_status=closed`; active order bị xóa, lịch `seated` liên quan chuyển `completed` và bàn về `empty` trong cùng transaction. Đây là luồng cũ và vẫn được giữ nguyên.
+6. **Trả sau:** nếu mọi batch đã `served` và không yêu cầu giữ bàn, giao dịch nhận `service_status=closed`; active order bị xóa, lịch `seated` liên quan chuyển `completed` và bàn về `empty` trong cùng transaction.
 7. **Trả trước:** khi còn batch `waiting/cooking`, hoặc client đã mở luồng trả trước với `keepTableOpen=true`, giao dịch nhận `service_status=awaiting_departure` và được liên kết với active order trong `active_order_payments`. Bàn tiếp tục ở trạng thái bếp thực tế, queue vẫn chạy, UI hiển thị **Đã thanh toán** và backend khóa gọi thêm, sửa hoặc hủy order.
-8. Khi tất cả batch của bàn trả trước đã `done`, nhân viên gọi `POST /api/orders/:tableId/confirm-departure`. Backend xác thực trạng thái, đổi giao dịch sang `closed`, ghi `departure_confirmed_at`, hoàn tất lịch `seated`, xóa active order và đưa bàn về `empty`. Gọi lại endpoint an toàn theo cơ chế idempotent.
+8. Khi bếp xác nhận `done`, nhân viên phục vụ gọi `POST /api/orders/:tableId/serve-ready` để ghi nhận món đã được mang ra. Chỉ khi tất cả batch đã `served`, nhân viên mới gọi `POST /api/orders/:tableId/confirm-departure`; backend đổi giao dịch sang `closed`, ghi `departure_confirmed_at`, hoàn tất lịch `seated`, xóa active order và đưa bàn về `empty`. Cả hai action đều kiểm tra snapshot để chống bấm kép và xử lý đồng thời.
 9. Response thanh toán trả `requiresDepartureConfirmation` và `orderClosed` để UI phân biệt hai nhánh. Chỉ sau khi transaction thanh toán commit thành công frontend mới tải snapshot chính thức từ `GET /api/payments/:invoiceCode`, cho in hóa đơn A4 hoặc 80 mm và giữ bản local làm fallback nếu lần tải chi tiết tạm thời thất bại.
 
 ### Báo cáo
@@ -521,12 +584,13 @@ Mọi endpoint `/api/*`, trừ health, login và logout, đều yêu cầu sessi
 | `PUT/DELETE` | `/api/categories/:categoryId` | Sửa hoặc ngừng dùng danh mục |
 | `POST` | `/api/menu-items` | Tạo món |
 | `PUT/DELETE` | `/api/menu-items/:itemId` | Sửa/ngừng bán món và cấu hình `dailyLimit` (`null` = không giới hạn, `0..1000000` = hạn mức/ngày) |
-| `GET` | `/api/operations` | Catch-up batch đủ ETA/FIFO rồi trả snapshot nhất quán gồm `serverNow`, bàn/`nextReservation`, order, batch, cấu hình bếp, thanh toán và `menuAvailability[]` |
+| `GET` | `/api/operations` | Promote FIFO theo công suất rồi trả snapshot nhất quán gồm `serverNow`, bàn/`nextReservation`, order, batch, cảnh báo ETA, cấu hình bếp, thanh toán và `menuAvailability[]` |
 | `PUT` | `/api/orders/:tableId` | Tạo lượt đầu hoặc gọi thêm với body `{ items, append }`; giữ số phần theo ngày trong transaction |
 | `PUT` | `/api/orders/:tableId/batches/:batchId` | Sửa đúng một phiếu bếp còn chờ, không đổi FIFO và cập nhật chênh lệch số phần |
 | `POST` | `/api/orders/:tableId/requeue` | Đưa đúng `expectedBatchId` đang nấu về cuối queue |
+| `POST` | `/api/orders/:tableId/serve-ready` | Nhân viên phục vụ xác nhận chính xác danh sách batch `done` đã được mang ra bàn (`served`) |
 | `DELETE` | `/api/orders/:tableId` | Hủy khi toàn bộ batch của order còn chờ và hoàn số phần theo bucket ngày của từng batch |
-| `POST` | `/api/orders/:tableId/confirm-departure` | Xác nhận khách của order trả trước đã rời sau khi mọi batch `done`; đóng giao dịch/lịch đặt và giải phóng bàn, hỗ trợ retry idempotent |
+| `POST` | `/api/orders/:tableId/confirm-departure` | Xác nhận khách của order trả trước đã rời sau khi mọi batch `served`; đóng giao dịch/lịch đặt và giải phóng bàn, hỗ trợ retry idempotent |
 | `PATCH/PUT` | `/api/kitchen/config` | Cập nhật công suất/chế độ/pause với `expectedVersion` |
 | `POST` | `/api/kitchen/dispatch-next` | Lấy một order đầu queue |
 | `POST` | `/api/tables` | Tạo bàn với số ghế, khu vực và tọa độ `positionX/positionY` |
@@ -548,6 +612,8 @@ Mọi endpoint `/api/*`, trừ health, login và logout, đều yêu cầu sessi
 | `npm run db:schema` | Bootstrap thủ công database mới `restaurant_casv2`; không nâng cấp DB cũ |
 | `npm run db:seed:test` | Ghi/làm mới dữ liệu demo trên database development/test |
 | `npm run db:audit` | Kiểm tra 33 nhóm ràng buộc và toàn vẹn ở chế độ READ ONLY |
+| `npm run db:backup -- --output <file.sql>` | Tạo dump nhất quán và file SHA-256 mới; không ghi/khóa bảng nguồn |
+| `npm run db:restore:drill -- --backup <file.sql> --target-db <new_restore_drill_db>` | Restore vào database drill mới rồi chạy audit; từ chối database đã tồn tại |
 | `npm run lint` | ESLint cho backend JavaScript và frontend TypeScript/React |
 | `npm run typecheck` | TypeScript strict check |
 | `npm test` | Unit test backend và frontend/a11y |
@@ -570,7 +636,7 @@ npm audit --audit-level=moderate
 
 Phạm vi unit test hiện tại:
 
-- `38/38` test backend và `4/4` test frontend/a11y đang đạt.
+- `40/40` test backend và `10/10` test frontend/a11y đang đạt.
 - Auth test bao phủ session cookie `HttpOnly/SameSite`, thời hạn phiên, cấu hình nhiều tài khoản và RBAC.
 - Frontend test kiểm tra điều hướng theo vai trò và accessibility tự động của màn đăng nhập.
 - Browser E2E kiểm tra semantics tab/filter, vùng chạm, responsive/overflow và xác nhận khách rời tại hàng chờ thanh toán.
@@ -579,12 +645,12 @@ Phạm vi unit test hiện tại:
 - Hạn mức món theo ngày: xác định ngày kinh doanh, gộp số lượng cùng món, giữ đúng phần cuối, từ chối vượt mức, điều chỉnh khi sửa phiếu chờ và hoàn khi hủy.
 - ETA theo số lượng và lấy dòng lâu nhất.
 - Queue batch đủ slot, pause, manual và automatic.
-- Tự hoàn tất tất cả batch chạy đủ ETA và đồng bộ lại trạng thái bàn.
-- Tự catch-up batch đủ ETA kể cả khi bếp đang tạm dừng; cảnh báo chẩn đoán chỉ dùng khi trạng thái không tự đồng bộ.
+- ETA chỉ dùng để cảnh báo; bếp phải xác nhận `cooking → done`, sau đó nhân viên phục vụ xác nhận `done → served` trước khi kết thúc lượt bàn.
+- Queue không tự hoàn tất theo ETA; batch chỉ sang `done` khi bếp xác nhận và chỉ sang `served` khi nhân viên mang món ra bàn.
 - Công thức payment và thời gian server.
 - Validation nhân viên, vai trò, ca làm và mã nhân viên.
 - Chuẩn hóa lịch đặt bàn, số điện thoại, thời lượng, sức chứa, phát hiện overlap và các chuyển trạng thái hợp lệ/không hợp lệ.
-- Policy chỉ hủy order toàn-waiting; xác định đúng khi nào thanh toán cần giữ bàn, gồm trường hợp `keepTableOpen=true` trong lúc bếp vừa chuyển từ đang nấu sang đã xong.
+- Policy chỉ hủy order toàn-waiting; xác định đúng khi nào thanh toán cần giữ bàn, gồm trường hợp `keepTableOpen=true` cho tới khi mọi batch đã `served`.
 
 ### Smoke test API/MySQL
 
@@ -665,17 +731,30 @@ Không commit file này. `AUTH_PASSWORD`, `AUTH_USERS_JSON`, `AUTH_SESSION_SECRE
 
 ### 2. Backup, migrate và audit
 
-1. Backup database và xác minh có thể restore.
-2. Chạy migration bằng user MySQL tạm thời có quyền DDL:
+1. Tạo backup mới ở vùng lưu trữ ngoài repository:
+
+```bash
+npm run db:backup -- --output /var/backups/restaurant-cas/restaurant_casv2-20260803-120000.sql
+```
+
+2. Trước lần triển khai đầu tiên và định kỳ theo chính sách vận hành, xác minh file đó có thể restore vào database drill mới. Dùng tài khoản restore tách biệt có quyền `CREATE DATABASE`, không dùng database production làm đích:
+
+```bash
+npm run db:restore:drill -- \
+  --backup /var/backups/restaurant-cas/restaurant_casv2-20260803-120000.sql \
+  --target-db restaurant_casv2_restore_drill_20260803
+```
+
+3. Chỉ sau khi backup và drill đạt, chạy migration bằng user MySQL tạm thời có quyền DDL:
 
 ```bash
 npm run db:migrate
 npm run db:audit
 ```
 
-3. Sau khi đạt audit, chạy API bằng user MySQL runtime quyền tối thiểu và giữ `DB_AUTO_MIGRATE=false`.
+4. Sau khi đạt audit, chạy API bằng user MySQL runtime quyền tối thiểu và giữ `DB_AUTO_MIGRATE=false`.
 
-Không chạy `db:seed:test` hoặc `test:smoke` trên production.
+Không chạy `db:seed:test`, `test:smoke` hoặc restore drill với database production làm đích. Các script trên không tự lên lịch, mã hóa, chuyển backup sang máy khác hoặc áp dụng retention; hạ tầng vận hành phải cấu hình các phần đó riêng.
 
 ### 3. Build và phục vụ frontend
 
@@ -734,7 +813,7 @@ Giới hạn hiện tại:
 Ưu tiên bắt buộc trước khi mở ra Internet:
 
 1. Tích hợp payment gateway/POS thật, idempotency key phía nhà cung cấp, callback xác minh, đối soát và quy trình hoàn tiền.
-2. Dùng migration tool có version/rollback và thực hiện backup/restore drill trên hạ tầng đích.
+2. Dùng migration tool có version/rollback; lên lịch, mã hóa và lưu backup ngoài máy chủ, đồng thời vận hành restore drill định kỳ bằng tooling đã cung cấp.
 3. Thiết lập log tập trung, metrics/cảnh báo, SLA và benchmark tải trên thiết bị/mạng POS thực tế.
 4. Chạy Lighthouse/WCAG đầy đủ trên URL deploy và kiểm tra bản in A4/80 mm bằng máy in mục tiêu.
 5. Cân nhắc OIDC/identity store tập trung nếu hệ thống mở ra Internet, chạy nhiều chi nhánh hoặc cần thu hồi phiên tức thời trên nhiều instance.

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import mysql from 'mysql2/promise';
 import { defaultSettings } from './defaultSettings.js';
 import { businessDateFor } from './dailyInventory.js';
@@ -18,8 +19,14 @@ function initialKitchenStaleMinutes() {
   return Number.isInteger(value) ? Math.min(Math.max(value, 15), 1_440) : 120;
 }
 
-if (!/^[a-zA-Z0-9_]+$/.test(databaseName)) {
-  throw new Error('DB_NAME chỉ được chứa chữ, số và dấu gạch dưới');
+if (!/^[a-zA-Z0-9_]{1,64}$/.test(databaseName)) {
+  throw new Error('DB_NAME chỉ được chứa chữ, số và dấu gạch dưới, tối đa 64 ký tự');
+}
+
+/** MySQL giới hạn tên user-level lock ở 64 ký tự; hash giữ tên cố định và tránh va chạm giữa database. */
+export function migrationLockNameFor(name) {
+  const digest = createHash('sha256').update(name).digest('hex').slice(0, 40);
+  return `cas:migrate:${digest}`;
 }
 
 if (isProduction && (!process.env.DB_USER || process.env.DB_PASSWORD == null)) {
@@ -45,6 +52,7 @@ if (!isProduction && process.env.DB_PASSWORD == null) {
 }
 
 let pool;
+let poolReady = false;
 
 /** Tạo pool và buộc mọi session MySQL dùng UTC cho timer bếp nhất quán. */
 function createPool() {
@@ -58,6 +66,14 @@ function createPool() {
     });
   });
   return nextPool;
+}
+
+/** Loại bỏ pool chưa sẵn sàng để lần retry phải bootstrap và xác minh schema lại. */
+async function discardPool() {
+  const currentPool = pool;
+  pool = undefined;
+  poolReady = false;
+  await currentPool?.end().catch(() => {});
 }
 
 const schemaStatements = [
@@ -99,7 +115,7 @@ const schemaStatements = [
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT chk_restaurant_table_number CHECK (table_number BETWEEN 1 AND 999),
     CONSTRAINT chk_restaurant_table_seats CHECK (seats BETWEEN 1 AND 100),
-    CONSTRAINT chk_restaurant_table_status CHECK (status IN ('empty', 'waiting', 'cooking', 'done')),
+    CONSTRAINT chk_restaurant_table_status CHECK (status IN ('empty', 'waiting', 'cooking', 'done', 'served')),
     CONSTRAINT chk_restaurant_table_area CHECK (CHAR_LENGTH(TRIM(area)) BETWEEN 1 AND 80),
     CONSTRAINT chk_restaurant_table_position CHECK (
       (position_x IS NULL AND position_y IS NULL)
@@ -220,13 +236,21 @@ const schemaStatements = [
     queued_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     cooking_started_at DATETIME(3) NULL,
     completed_at DATETIME(3) NULL,
+    served_at DATETIME(3) NULL,
     estimated_cook_minutes INT UNSIGNED NOT NULL DEFAULT 10,
     inventory_date DATE NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_order_batch_order_table FOREIGN KEY (order_id, table_id) REFERENCES active_orders(id, table_id) ON DELETE CASCADE,
     CONSTRAINT uq_order_batch_number UNIQUE (order_id, batch_number),
-    CONSTRAINT chk_order_batch_status CHECK (status IN ('waiting', 'cooking', 'done')),
+    CONSTRAINT chk_order_batch_status CHECK (status IN ('waiting', 'cooking', 'done', 'served')),
+    CONSTRAINT chk_order_batch_lifecycle CHECK (
+      (status = 'waiting' AND cooking_started_at IS NULL AND completed_at IS NULL AND served_at IS NULL)
+      OR (status = 'cooking' AND cooking_started_at IS NOT NULL AND completed_at IS NULL AND served_at IS NULL)
+      OR (status = 'done' AND cooking_started_at IS NOT NULL AND completed_at IS NOT NULL AND served_at IS NULL)
+      OR (status = 'served' AND cooking_started_at IS NOT NULL AND completed_at IS NOT NULL
+        AND served_at IS NOT NULL AND served_at >= completed_at)
+    ),
     CONSTRAINT chk_order_batch_eta CHECK (estimated_cook_minutes BETWEEN 1 AND 23760),
     INDEX idx_order_batch_queue (status, queued_at, id),
     INDEX idx_order_batch_table (table_id, status)
@@ -1121,7 +1145,7 @@ async function ensureDatabaseIntegrityConstraints(connection) {
     `SELECT id FROM restaurant_tables
      WHERE table_number NOT BETWEEN 1 AND 999
         OR seats NOT BETWEEN 1 AND 100
-        OR status NOT IN ('empty', 'waiting', 'cooking', 'done')
+        OR status NOT IN ('empty', 'waiting', 'cooking', 'done', 'served')
      ORDER BY id LIMIT 10`,
   );
   if (invalidTables.length > 0) {
@@ -1189,7 +1213,7 @@ async function ensureDatabaseIntegrityConstraints(connection) {
   ]);
   await replaceCheckConstraints(connection, 'restaurant_tables', [
     ['chk_restaurant_table_number', 'table_number BETWEEN 1 AND 999'],
-    ['chk_restaurant_table_status', "status IN ('empty', 'waiting', 'cooking', 'done')"],
+    ['chk_restaurant_table_status', "status IN ('empty', 'waiting', 'cooking', 'done', 'served')"],
   ]);
   await replaceCheckConstraints(connection, 'reservations', [
     ['chk_reservation_phone', "phone_normalized REGEXP '^[0-9]{8,15}$'"],
@@ -1335,9 +1359,13 @@ async function ensureKitchenQueueColumns(connection) {
       ${hasInventoryDate ? ', inventory_date' : ''}
     )
     SELECT o.id, o.table_id, 1, o.items,
-      CASE WHEN t.status IN ('waiting', 'cooking', 'done') THEN t.status ELSE 'waiting' END,
+      CASE
+        WHEN t.status IN ('waiting', 'cooking', 'done') THEN t.status
+        WHEN t.status = 'served' THEN 'done'
+        ELSE 'waiting'
+      END,
       FALSE, o.queued_at, o.cooking_started_at,
-      CASE WHEN t.status = 'done' THEN o.updated_at ELSE NULL END,
+      CASE WHEN t.status IN ('done', 'served') THEN o.updated_at ELSE NULL END,
       o.estimated_cook_minutes
       ${hasInventoryDate ? `, DATE(DATE_ADD(o.queued_at, INTERVAL ${legacyBusinessOffset} MINUTE))` : ''}
     FROM active_orders o
@@ -1345,6 +1373,54 @@ async function ensureKitchenQueueColumns(connection) {
     LEFT JOIN order_batches b ON b.order_id = o.id
     WHERE b.id IS NULL`,
   );
+}
+
+/** Tách mốc bếp hoàn tất (`done`) khỏi mốc món đã được mang ra bàn (`served`). */
+async function ensureServedOrderLifecycle(connection) {
+  const migrationId = '20260802_served_order_lifecycle_v1';
+  const [applied] = await connection.query(
+    'SELECT id FROM schema_migrations WHERE id = ? LIMIT 1',
+    [migrationId],
+  );
+  if (applied.length > 0) return;
+
+  const [columns] = await connection.query(
+    `SELECT column_name AS columnName FROM information_schema.columns
+     WHERE table_schema = ? AND table_name = 'order_batches'`,
+    [databaseName],
+  );
+  if (!columns.some(column => column.columnName === 'served_at')) {
+    await connection.query('ALTER TABLE order_batches ADD COLUMN served_at DATETIME(3) NULL AFTER completed_at');
+  }
+
+  const [invalidBatches] = await connection.query(
+    `SELECT id FROM order_batches
+     WHERE status NOT IN ('waiting', 'cooking', 'done', 'served')
+       OR (status = 'waiting' AND (cooking_started_at IS NOT NULL OR completed_at IS NOT NULL OR served_at IS NOT NULL))
+       OR (status = 'cooking' AND (cooking_started_at IS NULL OR completed_at IS NOT NULL OR served_at IS NOT NULL))
+       OR (status = 'done' AND (cooking_started_at IS NULL OR completed_at IS NULL OR served_at IS NOT NULL))
+       OR (status = 'served' AND (cooking_started_at IS NULL OR completed_at IS NULL
+         OR served_at IS NULL OR served_at < completed_at))
+     ORDER BY id LIMIT 10`,
+  );
+  if (invalidBatches.length > 0) {
+    throw new Error(`Không thể migrate vòng đời phục vụ tại batch ${invalidBatches.map(row => row.id).join(', ')}.`);
+  }
+
+  await replaceCheckConstraints(connection, 'restaurant_tables', [
+    ['chk_restaurant_table_status', "status IN ('empty', 'waiting', 'cooking', 'done', 'served')"],
+  ]);
+  await replaceCheckConstraints(connection, 'order_batches', [
+    ['chk_order_batch_status', "status IN ('waiting', 'cooking', 'done', 'served')"],
+    ['chk_order_batch_lifecycle', `
+      (status = 'waiting' AND cooking_started_at IS NULL AND completed_at IS NULL AND served_at IS NULL)
+      OR (status = 'cooking' AND cooking_started_at IS NOT NULL AND completed_at IS NULL AND served_at IS NULL)
+      OR (status = 'done' AND cooking_started_at IS NOT NULL AND completed_at IS NOT NULL AND served_at IS NULL)
+      OR (status = 'served' AND cooking_started_at IS NOT NULL AND completed_at IS NOT NULL
+        AND served_at IS NOT NULL AND served_at >= completed_at)
+    `],
+  ]);
+  await connection.query('INSERT INTO schema_migrations (id) VALUES (?)', [migrationId]);
 }
 
 /** Fail-fast khi production tắt auto-migrate nhưng schema chưa đúng phiên bản ứng dụng. */
@@ -1357,7 +1433,8 @@ async function verifyDatabaseSchema(connection) {
     'SELECT id, category_id, cook_minutes, daily_limit, available FROM menu_items LIMIT 0',
     'SELECT menu_item_id, business_date, used_quantity FROM menu_item_daily_usage LIMIT 0',
     'SELECT id, table_id, reservation_id, items, estimated_cook_minutes FROM active_orders LIMIT 0',
-    'SELECT id, order_id, table_id, batch_number, items, status, estimated_cook_minutes, inventory_date FROM order_batches LIMIT 0',
+    `SELECT id, order_id, table_id, batch_number, items, status, cooking_started_at,
+      completed_at, served_at, estimated_cook_minutes, inventory_date FROM order_batches LIMIT 0`,
     'SELECT id, concurrency, stale_after_minutes, automation_enabled, paused, version FROM kitchen_queue_state LIMIT 0',
     'SELECT id, employee_code, full_name, role, active FROM employees LIMIT 0',
     `SELECT id, invoice_code, reservation_id, reservation_code, customer_name, guest_count,
@@ -1415,7 +1492,8 @@ async function verifyDatabaseSchema(connection) {
      FROM information_schema.table_constraints
      WHERE constraint_schema = ? AND constraint_type = 'CHECK'
        AND constraint_name IN (
-         'chk_restaurant_table_area', 'chk_restaurant_table_position',
+          'chk_restaurant_table_status', 'chk_restaurant_table_area', 'chk_restaurant_table_position',
+          'chk_order_batch_status', 'chk_order_batch_lifecycle',
          'chk_reservation_phone', 'chk_reservation_window',
          'chk_reservation_version', 'chk_reservation_lifecycle',
          'chk_kitchen_flags', 'chk_kitchen_version',
@@ -1427,7 +1505,8 @@ async function verifyDatabaseSchema(connection) {
   );
   const criticalCheckNames = new Set(criticalChecks.map(check => check.constraintName));
   const requiredCheckNames = [
-    'chk_restaurant_table_area', 'chk_restaurant_table_position',
+    'chk_restaurant_table_status', 'chk_restaurant_table_area', 'chk_restaurant_table_position',
+    'chk_order_batch_status', 'chk_order_batch_lifecycle',
     'chk_reservation_phone', 'chk_reservation_window',
     'chk_reservation_version', 'chk_reservation_lifecycle',
     'chk_kitchen_flags', 'chk_kitchen_version',
@@ -1436,6 +1515,21 @@ async function verifyDatabaseSchema(connection) {
     'chk_menu_item_daily_limit', 'chk_daily_usage_quantity',
   ];
   const missingChecks = requiredCheckNames.filter(name => !criticalCheckNames.has(name));
+  const [lifecycleChecks] = await connection.query(
+    `SELECT constraint_name AS constraintName, check_clause AS checkClause
+     FROM information_schema.check_constraints
+     WHERE constraint_schema = ? AND constraint_name IN (
+       'chk_restaurant_table_status', 'chk_order_batch_status', 'chk_order_batch_lifecycle'
+     )`,
+    [databaseName],
+  );
+  const lifecycleClauses = new Map(lifecycleChecks.map(check => [
+    check.constraintName,
+    String(check.checkClause || '').toLowerCase(),
+  ]));
+  const servedLifecycleMissing = !lifecycleClauses.get('chk_restaurant_table_status')?.includes('served')
+    || !lifecycleClauses.get('chk_order_batch_status')?.includes('served')
+    || !lifecycleClauses.get('chk_order_batch_lifecycle')?.includes('served_at');
   const [seatedIndexes] = await connection.query(
     `SELECT non_unique AS nonUnique,
        GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ',') AS columns
@@ -1456,7 +1550,7 @@ async function verifyDatabaseSchema(connection) {
     [databaseName],
   );
   const layoutIndex = layoutIndexes[0];
-  if (missingChecks.length > 0 || !seatedIndex
+  if (missingChecks.length > 0 || servedLifecycleMissing || !seatedIndex
     || Number(seatedIndex.nonUnique) !== 0 || seatedIndex.columns !== 'seated_table_id') {
     throw new Error(
       `Database thiếu constraint phiên bản mới${missingChecks.length ? `: ${missingChecks.join(', ')}` : ''}; `
@@ -1472,12 +1566,15 @@ async function verifyDatabaseSchema(connection) {
 /** Bootstrap database/pool; production có thể tắt DDL tự động bằng DB_AUTO_MIGRATE=false. */
 export async function initDatabase({ migrate = autoMigrate } = {}) {
   if (pool) {
-    try {
-      await pool.query('SELECT 1');
-      return pool;
-    } catch {
-      await pool.end().catch(() => {});
-      pool = undefined;
+    if (!poolReady) {
+      await discardPool();
+    } else {
+      try {
+        await pool.query('SELECT 1');
+        return pool;
+      } catch {
+        await discardPool();
+      }
     }
   }
 
@@ -1499,12 +1596,14 @@ export async function initDatabase({ migrate = autoMigrate } = {}) {
   }
 
   pool = createPool();
-  if (migrate) {
-    const migrationConnection = await pool.getConnection();
-    const lockName = `${databaseName}:schema-migration`;
-    let lockAcquired = false;
-    let migrationError;
-    try {
+  poolReady = false;
+  try {
+    if (migrate) {
+      const migrationConnection = await pool.getConnection();
+      const lockName = migrationLockNameFor(databaseName);
+      let lockAcquired = false;
+      let migrationError;
+      try {
       const [lockRows] = await migrationConnection.query('SELECT GET_LOCK(?, 30) AS acquired', [lockName]);
       lockAcquired = Number(lockRows[0]?.acquired) === 1;
       if (!lockAcquired) throw new Error('Không thể lấy advisory lock để migrate database sau 30 giây.');
@@ -1595,24 +1694,24 @@ export async function initDatabase({ migrate = autoMigrate } = {}) {
         );
       }
       await ensureDatabaseIntegrityConstraints(migrationConnection);
-    } catch (error) {
-      await migrationConnection.rollback().catch(() => {});
-      migrationError = error;
-    } finally {
-      if (lockAcquired) await migrationConnection.query('SELECT RELEASE_LOCK(?)', [lockName]).catch(() => {});
-      migrationConnection.release();
+      await ensureServedOrderLifecycle(migrationConnection);
+      } catch (error) {
+        await migrationConnection.rollback().catch(() => {});
+        migrationError = error;
+      } finally {
+        if (lockAcquired) await migrationConnection.query('SELECT RELEASE_LOCK(?)', [lockName]).catch(() => {});
+        migrationConnection.release();
+      }
+      if (migrationError) throw migrationError;
     }
-    if (migrationError) {
-      const failedPool = pool;
-      pool = undefined;
-      await failedPool.end().catch(() => {});
-      throw migrationError;
-    }
-  } else {
-    await verifyDatabaseSchema(pool);
-  }
 
-  return pool;
+    await verifyDatabaseSchema(pool);
+    poolReady = true;
+    return pool;
+  } catch (error) {
+    await discardPool();
+    throw error;
+  }
 }
 
 /** Entry point migration chủ động dùng bởi `npm run db:migrate`. */
@@ -1621,7 +1720,7 @@ export async function migrateDatabase() {
 }
 
 export function getPool() {
-  if (!pool) throw new Error('Database pool has not been initialized');
+  if (!pool || !poolReady) throw new Error('Database pool has not been initialized');
   return pool;
 }
 
@@ -1629,6 +1728,7 @@ export async function closePool() {
   if (!pool) return;
   const currentPool = pool;
   pool = undefined;
+  poolReady = false;
   await currentPool.end();
 }
 

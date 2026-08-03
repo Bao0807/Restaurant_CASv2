@@ -1,4 +1,4 @@
-const ORDER_BATCH_STATUSES = new Set(['waiting', 'cooking', 'done']);
+const ORDER_BATCH_STATUSES = new Set(['waiting', 'cooking', 'done', 'served']);
 
 /**
  * So sánh ý định gọi món thay vì các snapshot giá/catalog do server ghi đè.
@@ -32,7 +32,7 @@ export function isSameOrderSubmission(incomingItems, persistedItems) {
  * Dữ liệu lạ được xem là không an toàn, vì vậy không thể hủy, thanh toán hoặc đóng order.
  */
 export function summarizeOrderBatches(batches) {
-  const summary = { total: 0, waiting: 0, cooking: 0, done: 0, invalid: 0 };
+  const summary = { total: 0, waiting: 0, cooking: 0, done: 0, served: 0, invalid: 0 };
   for (const batch of Array.isArray(batches) ? batches : []) {
     summary.total += 1;
     const status = batch?.status;
@@ -54,14 +54,14 @@ export function canPayOrder(batches) {
   return summary.total > 0 && summary.invalid === 0;
 }
 
-/** Chỉ đóng order khi toàn bộ phiếu bếp đã hoàn tất. */
+/** Chỉ đóng order khi toàn bộ phiếu đã được mang ra phục vụ. */
 export function isOrderComplete(batches) {
   const summary = summarizeOrderBatches(batches);
-  return summary.total > 0 && summary.done === summary.total && summary.invalid === 0;
+  return summary.total > 0 && summary.served === summary.total && summary.invalid === 0;
 }
 
 /**
- * Thanh toán được mở trước khi bếp xong phải giữ bàn cho tới lúc nhân viên xác nhận khách rời.
+ * Thanh toán trước khi mọi món được phục vụ phải giữ bàn tới lúc nhân viên xác nhận khách rời.
  * `keepTableOpen` còn giữ đúng ý định đó nếu bếp vừa hoàn tất trong lúc màn thanh toán đang mở.
  */
 export function paymentRequiresDepartureConfirmation(batches, keepTableOpen = false) {

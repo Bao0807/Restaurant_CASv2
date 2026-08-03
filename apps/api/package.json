@@ -9,6 +9,8 @@
     "migrate": "node src/migrate.js",
     "seed:test": "node scripts/seed-test-data.mjs",
     "db:audit": "node scripts/audit-db.mjs",
+    "db:backup": "node scripts/db-backup.mjs",
+    "db:restore:drill": "node scripts/db-restore-drill.mjs",
     "test": "node --test",
     "test:smoke": "node scripts/smoke.mjs"
   },

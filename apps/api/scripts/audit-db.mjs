@@ -122,6 +122,7 @@ async function auditStructure() {
     { table: 'menu_item_daily_usage', column: 'business_date', type: 'date', nullable: 'NO' },
     { table: 'menu_item_daily_usage', column: 'used_quantity', type: 'int unsigned', nullable: 'NO', defaultValue: 0 },
     { table: 'order_batches', column: 'inventory_date', type: 'date', nullable: 'NO' },
+    { table: 'order_batches', column: 'served_at', type: 'datetime(3)', nullable: 'YES' },
     { table: 'payment_transactions', column: 'service_status', type: 'varchar(32)', nullable: 'NO' },
     { table: 'payment_transactions', column: 'departure_confirmed_at', type: 'datetime(3)', nullable: 'YES' },
   ];
@@ -301,7 +302,7 @@ async function auditStructure() {
     { table: 'restaurant_tables', name: 'chk_restaurant_table_seats', tokens: ['seats', 'between1and100'] },
     {
       table: 'restaurant_tables', name: 'chk_restaurant_table_status',
-      tokens: ['status', "'empty'", "'waiting'", "'cooking'", "'done'"], forbidden: ["'reserved'"],
+      tokens: ['status', "'empty'", "'waiting'", "'cooking'", "'done'", "'served'"], forbidden: ["'reserved'"],
     },
     {
       table: 'restaurant_tables', name: 'chk_restaurant_table_area',
@@ -328,7 +329,11 @@ async function auditStructure() {
     { table: 'menu_items', name: 'chk_menu_item_cook_minutes', tokens: ['cook_minutes', 'between1and240'] },
     { table: 'menu_items', name: 'chk_menu_item_daily_limit', tokens: ['daily_limit', 'isnull', '1000000'] },
     { table: 'menu_item_daily_usage', name: 'chk_daily_usage_quantity', tokens: ['used_quantity', '2000000000'] },
-    { table: 'order_batches', name: 'chk_order_batch_status', tokens: ['status', "'waiting'", "'cooking'", "'done'"] },
+    { table: 'order_batches', name: 'chk_order_batch_status', tokens: ['status', "'waiting'", "'cooking'", "'done'", "'served'"] },
+    {
+      table: 'order_batches', name: 'chk_order_batch_lifecycle',
+      tokens: ['status', 'cooking_started_at', 'completed_at', 'served_at', "'waiting'", "'cooking'", "'done'", "'served'"],
+    },
     { table: 'order_batches', name: 'chk_order_batch_eta', tokens: ['estimated_cook_minutes', 'between1and23760'] },
     { table: 'kitchen_queue_state', name: 'chk_kitchen_singleton', tokens: ['id=1'] },
     { table: 'kitchen_queue_state', name: 'chk_kitchen_concurrency', tokens: ['concurrency', 'between1and20'] },
@@ -420,15 +425,19 @@ async function auditOrdersAndTables(existingTables) {
     'Mốc thời gian và trạng thái phiếu bếp hợp lệ',
     `SELECT id AS batchId, order_id AS orderId, status, queued_at AS queuedAt,
        cooking_started_at AS cookingStartedAt, completed_at AS completedAt,
+       served_at AS servedAt,
        estimated_cook_minutes AS estimatedMinutes
      FROM order_batches
      WHERE JSON_TYPE(items) <> 'ARRAY' OR JSON_LENGTH(items) = 0
         OR estimated_cook_minutes NOT BETWEEN 1 AND 23760
-        OR (status = 'waiting' AND (cooking_started_at IS NOT NULL OR completed_at IS NOT NULL))
-        OR (status = 'cooking' AND (cooking_started_at IS NULL OR completed_at IS NOT NULL))
-        OR (status = 'done' AND (cooking_started_at IS NULL OR completed_at IS NULL))
+        OR (status = 'waiting' AND (cooking_started_at IS NOT NULL OR completed_at IS NOT NULL OR served_at IS NOT NULL))
+        OR (status = 'cooking' AND (cooking_started_at IS NULL OR completed_at IS NOT NULL OR served_at IS NOT NULL))
+        OR (status = 'done' AND (cooking_started_at IS NULL OR completed_at IS NULL OR served_at IS NOT NULL))
+        OR (status = 'served' AND (cooking_started_at IS NULL OR completed_at IS NULL
+          OR served_at IS NULL OR served_at < completed_at))
         OR (cooking_started_at IS NOT NULL AND cooking_started_at < queued_at)
-        OR (completed_at IS NOT NULL AND (cooking_started_at IS NULL OR completed_at < cooking_started_at))`,
+        OR (completed_at IS NOT NULL AND (cooking_started_at IS NULL OR completed_at < cooking_started_at))
+        OR (served_at IS NOT NULL AND (completed_at IS NULL OR served_at < completed_at))`,
   );
 
   await checkViolationRows(
@@ -465,7 +474,8 @@ async function auditOrdersAndTables(existingTables) {
        CASE
          WHEN SUM(b.status = 'cooking') > 0 THEN 'cooking'
          WHEN SUM(b.status = 'waiting') > 0 THEN 'waiting'
-         ELSE 'done'
+         WHEN SUM(b.status = 'done') > 0 THEN 'done'
+         ELSE 'served'
        END AS expectedStatus
      FROM restaurant_tables t
      INNER JOIN active_orders o ON o.table_id = t.id

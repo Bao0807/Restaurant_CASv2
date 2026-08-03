@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { availableKitchenSlots, isKitchenOrderStale } from '../src/kitchenQueue.js';
+import { availableKitchenSlots, isKitchenOrderStale, syncTableStatuses } from '../src/kitchenQueue.js';
 
 test('số slot bếp không âm khi đang nấu vượt cấu hình mới', () => {
   assert.equal(availableKitchenSlots(3, 2), 0);
@@ -19,4 +19,18 @@ test('chỉ cảnh báo phiếu sau ETA cộng thời gian gia hạn', () => {
     isKitchenOrderStale(startedAt, etaMinutes, graceMinutes, new Date('2026-07-15T02:45:00.000Z').getTime()),
     true,
   );
+});
+
+test('trạng thái bàn chỉ thành served khi không còn phiếu chờ, nấu hoặc cần mang ra', async () => {
+  let statement = '';
+  const connection = {
+    async query(sql) {
+      statement = sql;
+      return [{ affectedRows: 1 }];
+    },
+  };
+
+  await syncTableStatuses(connection, ['table-1']);
+  assert.match(statement, /WHEN SUM\(status = 'done'\) > 0 THEN 'done'/);
+  assert.match(statement, /ELSE 'served'/);
 });

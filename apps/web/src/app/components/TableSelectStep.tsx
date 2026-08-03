@@ -20,6 +20,7 @@ interface TableSelectStepProps {
   onEditOrder: (tableId: string, batchId: number) => void;
   onDeleteOrder: (tableId: string) => Promise<void>;
   onMarkDone: (tableId: string) => Promise<void>;
+  onMarkServed: (tableId: string) => Promise<void>;
   onConfirmDeparture: (tableId: string) => Promise<void>;
   onCheckInReservation: (tableId: string) => Promise<void>;
   onPay: (tableId: string) => void;
@@ -29,9 +30,9 @@ type TableFilter = 'all' | 'serving' | TableStatus | 'paid';
 type TableViewMode = 'grid' | 'floor';
 type TableDensity = 'comfortable' | 'compact';
 
-const STATUS_ORDER: TableStatus[] = ['empty', 'waiting', 'cooking', 'done', 'reserved'];
-const PROGRESS_STATUSES: TableStatus[] = ['waiting', 'cooking', 'done', 'reserved'];
-const SERVING_STATUSES = new Set<TableStatus>(['waiting', 'cooking', 'done']);
+const STATUS_ORDER: TableStatus[] = ['empty', 'waiting', 'cooking', 'done', 'served', 'reserved'];
+const PROGRESS_STATUSES: TableStatus[] = ['waiting', 'cooking', 'done', 'served', 'reserved'];
+const SERVING_STATUSES = new Set<TableStatus>(['waiting', 'cooking', 'done', 'served']);
 const DEFAULT_AREA = 'Khu vực chung';
 
 interface TableBadgeDetail {
@@ -40,7 +41,7 @@ interface TableBadgeDetail {
   key: string;
   label: string;
   title: string;
-  tone: 'addition' | 'paid' | 'items';
+  tone: 'addition' | 'ready' | 'paid' | 'items';
 }
 
 function tableArea(table: Table): string {
@@ -55,6 +56,10 @@ function matchesTableFilter(table: Table, filter: TableFilter): boolean {
   // Đặt trước là trạng thái phụ có thể chồng lấn: bàn vẫn có thể đang trống hoặc đang phục vụ
   // trong khi đã có một lịch booked/seated được backend gắn vào `nextReservation`.
   if (filter === 'reserved') return Boolean(table.nextReservation);
+  if (filter === 'waiting') return (table.waitingBatchCount ?? 0) > 0 || table.status === 'waiting';
+  if (filter === 'cooking') return (table.cookingBatchCount ?? 0) > 0 || table.status === 'cooking';
+  if (filter === 'done') return (table.doneBatchCount ?? 0) > 0 || table.status === 'done';
+  if (filter === 'served') return (table.servedBatchCount ?? 0) > 0 || table.status === 'served';
   return table.status === filter;
 }
 
@@ -98,6 +103,7 @@ function StatusIcon({ status, size = 14 }: { status: TableStatus; size?: number 
   if (status === 'waiting') return <Hourglass {...common} />;
   if (status === 'cooking') return <Flame {...common} />;
   if (status === 'done') return <BellRing {...common} />;
+  if (status === 'served') return <BadgeCheck {...common} />;
   if (status === 'reserved') return <CalendarClock {...common} />;
   return <Circle {...common} />;
 }
@@ -253,6 +259,7 @@ function ProgressInfo({
   if (!isActive || !hasOrder) return null;
 
   const showBatchProgress = (table.batchCount ?? 0) > 0;
+  const completedBatchCount = (table.doneBatchCount ?? 0) + (table.servedBatchCount ?? 0);
 
   return (
     <span className="operations-progress-info">
@@ -274,10 +281,10 @@ function ProgressInfo({
             <strong>{table.cookingBatchCount ?? 0}</strong><small>Nấu</small>
           </span>
           <span
-            aria-label={`${table.doneBatchCount ?? 0} lượt gọi món đã hoàn tất`}
+            aria-label={`${completedBatchCount} lượt gọi món đã được bếp hoàn tất`}
             title="Số lượt gọi món đã được bếp hoàn tất"
           >
-            <strong>{table.doneBatchCount ?? 0}</strong><small>Xong</small>
+            <strong>{completedBatchCount}</strong><small>Xong</small>
           </span>
         </span>
       )}
@@ -335,7 +342,8 @@ function TableCard({
 }) {
   const cfg = STATUS_CONFIG[table.status];
   const hasOrder = Boolean(order?.length);
-  const isReady = table.status === 'done';
+  const hasReadyBatch = (table.doneBatchCount ?? 0) > 0 || table.status === 'done';
+  const isReady = hasReadyBatch;
   const isOperational = SERVING_STATUSES.has(table.status);
   const areaName = tableArea(table);
   const additionalBatchCount = table.additionalBatchCount ?? 0;
@@ -358,6 +366,16 @@ function TableCard({
       title: `${additionalBatchCount} lượt gọi thêm`,
       tone: 'addition',
       className: `table-addition-chip${additionalBatchCount === 2 ? ' is-elevated' : ''}${additionalBatchCount >= 3 ? ' is-alert' : ''}`,
+    });
+  }
+  if (hasReadyBatch && table.status !== 'done') {
+    tableBadges.push({
+      key: 'ready',
+      label: 'Cần phục vụ',
+      title: `${table.doneBatchCount ?? 0} lượt món đã xong, cần mang ra bàn`,
+      tone: 'ready',
+      className: 'table-ready-chip',
+      icon: <BellRing size={12} aria-hidden="true" />,
     });
   }
   if (table.isPaid) {
@@ -461,6 +479,7 @@ export function TableSelectStep({
   onEditOrder,
   onDeleteOrder,
   onMarkDone,
+  onMarkServed,
   onConfirmDeparture,
   onCheckInReservation,
   onPay,
@@ -518,6 +537,7 @@ export function TableSelectStep({
     waiting: tables.filter(table => matchesTableFilter(table, 'waiting')).length,
     cooking: tables.filter(table => matchesTableFilter(table, 'cooking')).length,
     done: tables.filter(table => matchesTableFilter(table, 'done')).length,
+    served: tables.filter(table => matchesTableFilter(table, 'served')).length,
     reserved: tables.filter(table => matchesTableFilter(table, 'reserved')).length,
     paid: tables.filter(table => matchesTableFilter(table, 'paid')).length,
   }), [tables]);
@@ -667,6 +687,7 @@ export function TableSelectStep({
           onEditOrder={batchId => onEditOrder(selectedTable.id, batchId)}
           onDeleteOrder={() => onDeleteOrder(selectedTable.id)}
           onMarkDone={() => onMarkDone(selectedTable.id)}
+          onMarkServed={() => onMarkServed(selectedTable.id)}
           onConfirmDeparture={() => onConfirmDeparture(selectedTable.id)}
           onCheckInReservation={() => onCheckInReservation(selectedTable.id)}
           onPay={() => onPay(selectedTable.id)}

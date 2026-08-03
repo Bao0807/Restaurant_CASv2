@@ -1,4 +1,4 @@
-export type TableStatus = 'empty' | 'waiting' | 'cooking' | 'done' | 'reserved';
+export type TableStatus = 'empty' | 'waiting' | 'cooking' | 'done' | 'served' | 'reserved';
 export type AppView = 'order' | 'overview' | 'reservations' | 'payment' | 'reports' | 'dashboard';
 export type OrderStep = 'tables' | 'menu' | 'confirm' | 'success';
 export type PaymentMethodId = 'cash' | 'card' | 'qr';
@@ -76,6 +76,8 @@ export interface Table {
   waitingBatchCount?: number;
   cookingBatchCount?: number;
   doneBatchCount?: number;
+  readyBatchIds?: number[];
+  servedBatchCount?: number;
   latestBatchNumber?: number;
   /** Order hiện tại đã được thu tiền nhưng bàn có thể vẫn đang phục vụ. */
   isPaid?: boolean;
@@ -342,7 +344,7 @@ export function genId(): string {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
-export type StatusIconName = 'circle' | 'clock' | 'flame' | 'bell-ring' | 'calendar-clock';
+export type StatusIconName = 'circle' | 'clock' | 'flame' | 'bell-ring' | 'badge-check' | 'calendar-clock';
 
 export interface TableStatusConfig {
   label: string;
@@ -359,6 +361,7 @@ export const STATUS_CONFIG: Record<TableStatus, TableStatusConfig> = {
   waiting:  { label: 'Đang chờ',   bg: '#EFF6FF', text: '#1D4ED8', border: '#93C5FD', dot: '#2563EB', icon: 'clock' },
   cooking:  { label: 'Đang nấu',   bg: '#FFF7ED', text: '#C2410C', border: '#FDBA74', dot: '#EA580C', icon: 'flame' },
   done:     { label: 'Đã xong',    bg: '#FEF2F2', text: '#B91C1C', border: '#FCA5A5', dot: '#DC2626', icon: 'bell-ring' },
+  served:   { label: 'Đã phục vụ', bg: '#F0FDF4', text: '#15803D', border: '#86EFAC', dot: '#16A34A', icon: 'badge-check' },
   reserved: { label: 'Đặt trước',  bg: '#FAF5FF', text: '#7E22CE', border: '#D8B4FE', dot: '#9333EA', icon: 'calendar-clock' },
 };
 

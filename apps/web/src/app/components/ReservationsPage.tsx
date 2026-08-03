@@ -556,7 +556,7 @@ export function ReservationsPage({ tables, onChanged, onOpenOrder }: Reservation
                           : hasActiveOrder ? 'Thanh toán trước khi hoàn tất lượt phục vụ' : 'Hoàn tất lượt đặt bàn'}
                         onClick={() => setTransition({ reservation, status: 'completed' })}
                       >
-                        <CheckCircle2 size={16} /> {isPaid ? (linkedTable?.status === 'done' ? 'Chờ khách rời' : 'Đã thanh toán') : hasActiveOrder ? 'Chờ thanh toán' : 'Hoàn tất'}
+                        <CheckCircle2 size={16} /> {isPaid ? (linkedTable?.status === 'served' ? 'Chờ khách rời' : 'Đã thanh toán') : hasActiveOrder ? 'Chờ thanh toán' : 'Hoàn tất'}
                       </button>
                     </>
                   )}

@@ -385,7 +385,19 @@ export async function updateTableStatus(tableId: string, status: TableStatus, ex
   return data.status;
 }
 
-/** Đóng bàn đã trả trước sau khi bếp hoàn tất và nhân viên xác nhận khách đã rời. */
+/** Xác nhận đúng các lượt bếp đang sẵn sàng đã được mang ra bàn. */
+export async function serveReadyOrderBatches(tableId: string, expectedBatchIds: number[]): Promise<TableStatus> {
+  const data = await request<{ status: TableStatus }>(
+    `/orders/${encodeURIComponent(tableId)}/serve-ready`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ expectedBatchIds }),
+    },
+  );
+  return data.status;
+}
+
+/** Đóng bàn đã trả trước sau khi món được phục vụ và nhân viên xác nhận khách đã rời. */
 export async function confirmTableDeparture(tableId: string): Promise<void> {
   await request(`/orders/${encodeURIComponent(tableId)}/confirm-departure`, { method: 'POST' });
 }

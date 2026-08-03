@@ -359,6 +359,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .table-filter-chip.filter-waiting { --filter-accent: #2563eb; --filter-border: #bfdbfe; --filter-bg: #eff6ff; --filter-text: #1d4ed8; --filter-count-bg: #dbeafe; --filter-count-text: #1e40af; }
 .table-filter-chip.filter-cooking { --filter-accent: #ea580c; --filter-border: #fed7aa; --filter-bg: #fff7ed; --filter-text: #c2410c; --filter-count-bg: #ffedd5; --filter-count-text: #9a3412; }
 .table-filter-chip.filter-done { --filter-accent: #dc2626; --filter-border: #fca5a5; --filter-bg: #fef2f2; --filter-text: #b91c1c; --filter-count-bg: #fee2e2; --filter-count-text: #991b1b; }
+.table-filter-chip.filter-served { --filter-accent: #16a34a; --filter-border: #86efac; --filter-bg: #f0fdf4; --filter-text: #15803d; --filter-count-bg: #dcfce7; --filter-count-text: #166534; }
 .table-filter-chip.filter-reserved { --filter-accent: #7c3aed; --filter-border: #ddd6fe; --filter-bg: #f5f3ff; --filter-text: #6d28d9; --filter-count-bg: #ede9fe; --filter-count-text: #5b21b6; }
 .table-filter-chip.filter-paid { --filter-accent: #0284c7; --filter-border: #bae6fd; --filter-bg: #f0f9ff; --filter-text: #0369a1; --filter-count-bg: #e0f2fe; --filter-count-text: #075985; }
 .table-filter-chip:hover { border-color: var(--filter-accent); filter: saturate(1.08); }
@@ -425,7 +426,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   position: relative; z-index: 3; min-width: 0; max-width: 55%; max-height: 39px; overflow: visible;
   display: flex; align-content: flex-start; align-items: flex-start; justify-content: flex-end; flex-wrap: wrap; gap: 4px;
 }
-.table-paid-chip, .table-item-chip, .table-addition-chip, .table-more-chip {
+.table-paid-chip, .table-item-chip, .table-addition-chip, .table-ready-chip, .table-more-chip {
   max-width: 100%; min-height: 18px; overflow: hidden; display: inline-flex; align-items: center; gap: 3px; padding: 0 5px;
   border: 1px solid; border-radius: 999px; font-size: 9px; font-weight: 750; line-height: 1; white-space: nowrap;
   text-overflow: ellipsis;
@@ -435,6 +436,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .table-addition-chip { border-color: #fed7aa; background: #fff7ed; color: #9a3412; }
 .table-addition-chip.is-elevated { border-color: #fdba74; background: #ffedd5; color: #9a3412; font-weight: 850; }
 .table-addition-chip.is-alert { border-color: #fb923c; background: #ffedd5; color: #9a3412; font-weight: 850; }
+.table-ready-chip { border-color: #fca5a5; background: #fef2f2; color: #b91c1c; }
 .table-more-chip { border-color: #dbe4ee; background: #f8fafc; color: #475569; }
 .table-badge-overflow { position: relative; z-index: 3; display: inline-flex; }
 .table-badge-overflow > .table-more-chip {
@@ -459,6 +461,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 }
 .table-badge-popover-item[data-tone="addition"] { background: #fff7ed; color: #9a3412; }
 .table-badge-popover-item[data-tone="paid"] { background: #f0f9ff; color: #0369a1; }
+.table-badge-popover-item[data-tone="ready"] { background: #fef2f2; color: #b91c1c; }
 .operations-table-card-body {
   grid-row: 3; grid-column: 1; min-width: 0; min-height: 0;
   display: grid; align-content: start; justify-items: stretch; gap: 10px; text-align: left;
@@ -845,6 +848,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .table-option-action-icon-check-in { background: #9333ea; }
 .table-option-action-done { border-color: #86efac; background: #f0fdf4; }
 .table-option-action-icon-done { background: #22c55e; }
+.table-option-action-served { border-color: #99f6e4; background: #f0fdfa; }
+.table-option-action-served .table-option-action-copy strong { color: #0f766e; }
+.table-option-action-icon-served { background: #0d9488; }
 .table-option-action-delete { border-color: #fecaca; background: #fef2f2; }
 .table-option-action-delete .table-option-action-copy strong { color: #dc2626; }
 .table-option-action-icon-delete { background: #ef4444; }
